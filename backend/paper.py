@@ -23,20 +23,6 @@ def backtest(
     payout: float = 0.80,
     holding_candles: int = 4,
 ):
-    """
-    V4 backtest.
-
-    A signal is evaluated over multiple future candles instead of only the
-    immediately following candle.
-
-    Risk controls:
-    - risk percentage per trade
-    - daily loss limit
-    - consecutive-loss limit
-    - confidence threshold
-    - volatility-quality filter
-    """
-
     x = df.dropna().copy()
 
     balance = float(starting_balance)
@@ -47,33 +33,42 @@ def backtest(
     consecutive_losses = 0
 
     trades = []
-diagnostics = {
-    "candles_tested": 0,
-    "quality_rejected": 0,
-    "confidence_rejected": 0,
-    "signals_accepted": 0,
-    "max_confidence_seen": 0.0,
-    "confidence_sum": 0.0,
-    "confidence_count": 0,
-}
+
+    diagnostics = {
+        "candles_tested": 0,
+        "quality_rejected": 0,
+        "confidence_rejected": 0,
+        "signals_accepted": 0,
+        "max_confidence_seen": 0.0,
+        "confidence_sum": 0.0,
+        "confidence_count": 0,
+    }
+
     if len(x) <= holding_candles:
-        return _empty_result(starting_balance)
+        result = _empty_result(starting_balance)
+        diagnostics["average_confidence"] = 0.0
+        diagnostics["required_confidence"] = float(
+            profile.min_confidence
+        )
+        result["diagnostics"] = diagnostics
+        return result
 
     for i in range(len(x) - holding_candles):
-
         row = x.iloc[i]
         future = x.iloc[i + holding_candles]
-diagnostics["candles_tested"] += 1
 
-confidence = float(row["CONFIDENCE"])
+        diagnostics["candles_tested"] += 1
 
-diagnostics["max_confidence_seen"] = max(
-    diagnostics["max_confidence_seen"],
-    confidence,
-)
+        confidence = float(row["CONFIDENCE"])
 
-diagnostics["confidence_sum"] += confidence
-diagnostics["confidence_count"] += 1
+        diagnostics["max_confidence_seen"] = max(
+            diagnostics["max_confidence_seen"],
+            confidence,
+        )
+
+        diagnostics["confidence_sum"] += confidence
+        diagnostics["confidence_count"] += 1
+
         dt = x.index[i]
 
         day = (
@@ -104,14 +99,15 @@ diagnostics["confidence_count"] += 1
 
         # Market-quality gate
         if not bool(row["QUALITY_OK"]):
-    diagnostics["quality_rejected"] += 1
-    continue
+            diagnostics["quality_rejected"] += 1
+            continue
 
-if confidence < profile.min_confidence:
-    diagnostics["confidence_rejected"] += 1
-    continue
+        # Confidence gate
+        if confidence < profile.min_confidence:
+            diagnostics["confidence_rejected"] += 1
+            continue
 
-diagnostics["signals_accepted"] += 1
+        diagnostics["signals_accepted"] += 1
 
         direction = str(
             row["DIRECTION"]
@@ -177,9 +173,6 @@ diagnostics["signals_accepted"] += 1
             }
         )
 
-    if not trades:
-    result = _empty_result(starting_balance)
-
     if diagnostics["confidence_count"] > 0:
         diagnostics["average_confidence"] = (
             diagnostics["confidence_sum"]
@@ -192,9 +185,10 @@ diagnostics["signals_accepted"] += 1
         profile.min_confidence
     )
 
-    result["diagnostics"] = diagnostics
-
-    return result
+    if not trades:
+        result = _empty_result(starting_balance)
+        result["diagnostics"] = diagnostics
+        return result
 
     wins = sum(
         1
@@ -202,9 +196,7 @@ diagnostics["signals_accepted"] += 1
         if trade["won"]
     )
 
-    losses = (
-        len(trades) - wins
-    )
+    losses = len(trades) - wins
 
     total_pnl = sum(
         trade["pnl"]
@@ -226,49 +218,25 @@ diagnostics["signals_accepted"] += 1
     )
 
     result = {
-        "trades":
-            len(trades),
-
-        "wins":
-            wins,
-
-        "losses":
-            losses,
-
-        "win_rate":
-            wins / len(trades),
-
-        "starting_balance":
-            float(starting_balance),
-
-        "ending_balance":
-            float(balance),
-
-        "return_pct":
-            (
-                balance
-                / starting_balance
-                - 1
-            )
+        "trades": len(trades),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wins / len(trades),
+        "starting_balance": float(starting_balance),
+        "ending_balance": float(balance),
+        "return_pct": (
+            balance / starting_balance - 1
             if starting_balance
-            else 0.0,
-
-        "max_drawdown":
-            float(max_drawdown),
-
-        "profit_factor":
-            (
-                float(profit_factor)
-                if math.isfinite(profit_factor)
-                else 999.0
-            ),
-
-        "average_trade_pnl":
-            float(avg_trade),
-
-        "holding_candles":
-            holding_candles,
-
+            else 0.0
+        ),
+        "max_drawdown": float(max_drawdown),
+        "profit_factor": (
+            float(profit_factor)
+            if math.isfinite(profit_factor)
+            else 999.0
+        ),
+        "average_trade_pnl": float(avg_trade),
+        "holding_candles": holding_candles,
         "equity_curve": [
             {
                 "time": trade["time"],
@@ -276,26 +244,11 @@ diagnostics["signals_accepted"] += 1
             }
             for trade in trades
         ],
-
-        "journal":
-            trades[-200:],
+        "journal": trades[-200:],
+        "diagnostics": diagnostics,
     }
-if diagnostics["confidence_count"] > 0:
-    diagnostics["average_confidence"] = (
-        diagnostics["confidence_sum"]
-        / diagnostics["confidence_count"]
-    )
-else:
-    diagnostics["average_confidence"] = 0.0
 
-diagnostics["required_confidence"] = float(
-    profile.min_confidence
-)
-
-result["diagnostics"] = diagnostics
     return result
-
-
 def _empty_result(
     starting_balance: float,
 ) -> Dict:
