@@ -178,9 +178,23 @@ diagnostics["signals_accepted"] += 1
         )
 
     if not trades:
-        return _empty_result(
-            starting_balance
+    result = _empty_result(starting_balance)
+
+    if diagnostics["confidence_count"] > 0:
+        diagnostics["average_confidence"] = (
+            diagnostics["confidence_sum"]
+            / diagnostics["confidence_count"]
         )
+    else:
+        diagnostics["average_confidence"] = 0.0
+
+    diagnostics["required_confidence"] = float(
+        profile.min_confidence
+    )
+
+    result["diagnostics"] = diagnostics
+
+    return result
 
     wins = sum(
         1
