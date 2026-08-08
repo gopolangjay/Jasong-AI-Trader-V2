@@ -1,0 +1,55 @@
+name: Build Jasong AI Trader APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "mobile/**"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Check Flutter
+        run: flutter --version
+
+      - name: Create Android project files
+        working-directory: mobile
+        run: flutter create . --platforms=android
+
+      - name: Install Flutter packages
+        working-directory: mobile
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: mobile
+        run: flutter build apk --release
+
+      - name: Upload Jasong AI Trader APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jasong-AI-Trader-V3-APK
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
