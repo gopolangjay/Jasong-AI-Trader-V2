@@ -26,18 +26,37 @@ def get_db():
     finally:
         db.close()
 
-def get_data(symbol: str, period="3mo", interval="15m"):
+def get_data(symbol: str, period="1mo", interval="15m"):
     try:
-        d = yf.download(symbol, period=period, interval=interval,
-                        progress=False, auto_adjust=True)
-        if isinstance(d.columns, pd.MultiIndex):
-            d.columns = d.columns.get_level_values(0)
-        d = d.dropna(subset=["Open","High","Low","Close"])
-        if len(d) < 100:
-            raise ValueError("Not enough market data")
-        return d
+        periods_to_try = [period, "1mo", "5d"]
+
+        for p in periods_to_try:
+            d = yf.download(
+                symbol,
+                period=p,
+                interval=interval,
+                progress=False,
+                auto_adjust=True
+            )
+
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.get_level_values(0)
+
+            if all(col in d.columns for col in ["Open", "High", "Low", "Close"]):
+                d = d.dropna(subset=["Open", "High", "Low", "Close"])
+
+                if len(d) >= 80:
+                    return d
+
+        raise ValueError(
+            f"Not enough market data for {symbol} at {interval}"
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Market data unavailable: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Market data unavailable: {e}"
+        )
 
 def build(symbol: str, period: str, interval: str):
     raw = get_data(symbol, period, interval)
@@ -60,7 +79,7 @@ def health():
 
 @app.get("/signal")
 def signal(symbol: str="EURUSD=X", risk_mode: str="Balanced",
-           period: str="3mo", interval: str="15m", balance: float=10000.0):
+           period: str="1mo", interval: str="15m", balance: float=10000.0):
     if risk_mode not in PROFILES:
         raise HTTPException(status_code=400, detail="Invalid risk mode")
     profile = PROFILES[risk_mode]
@@ -76,7 +95,7 @@ def signal(symbol: str="EURUSD=X", risk_mode: str="Balanced",
 
 @app.get("/backtest")
 def run_backtest(symbol: str="EURUSD=X", risk_mode: str="Balanced",
-                 period: str="3mo", interval: str="15m",
+                 period: str="1mo", interval: str="15m",
                  starting_balance: float=10000.0, payout: float=0.80):
     if risk_mode not in PROFILES:
         raise HTTPException(status_code=400, detail="Invalid risk mode")
