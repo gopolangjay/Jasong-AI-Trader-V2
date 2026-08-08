@@ -34,7 +34,7 @@ class _HomePageState extends State<HomePage> {
   String risk = 'Balanced';
   String apiBase = const String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://10.0.2.2:8000',
+    defaultValue: 'https://jasong-ai-trader-v2.onrender.com',
   );
 
   Map<String,dynamic>? sig;
