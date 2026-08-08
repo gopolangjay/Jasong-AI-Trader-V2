@@ -47,7 +47,15 @@ def backtest(
     consecutive_losses = 0
 
     trades = []
-
+diagnostics = {
+    "candles_tested": 0,
+    "quality_rejected": 0,
+    "confidence_rejected": 0,
+    "signals_accepted": 0,
+    "max_confidence_seen": 0.0,
+    "confidence_sum": 0.0,
+    "confidence_count": 0,
+}
     if len(x) <= holding_candles:
         return _empty_result(starting_balance)
 
@@ -55,7 +63,17 @@ def backtest(
 
         row = x.iloc[i]
         future = x.iloc[i + holding_candles]
+diagnostics["candles_tested"] += 1
 
+confidence = float(row["CONFIDENCE"])
+
+diagnostics["max_confidence_seen"] = max(
+    diagnostics["max_confidence_seen"],
+    confidence,
+)
+
+diagnostics["confidence_sum"] += confidence
+diagnostics["confidence_count"] += 1
         dt = x.index[i]
 
         day = (
@@ -86,15 +104,14 @@ def backtest(
 
         # Market-quality gate
         if not bool(row["QUALITY_OK"]):
-            continue
+    diagnostics["quality_rejected"] += 1
+    continue
 
-        confidence = float(
-            row["CONFIDENCE"]
-        )
+if confidence < profile.min_confidence:
+    diagnostics["confidence_rejected"] += 1
+    continue
 
-        # Confidence gate
-        if confidence < profile.min_confidence:
-            continue
+diagnostics["signals_accepted"] += 1
 
         direction = str(
             row["DIRECTION"]
@@ -249,7 +266,19 @@ def backtest(
         "journal":
             trades[-200:],
     }
+if diagnostics["confidence_count"] > 0:
+    diagnostics["average_confidence"] = (
+        diagnostics["confidence_sum"]
+        / diagnostics["confidence_count"]
+    )
+else:
+    diagnostics["average_confidence"] = 0.0
 
+diagnostics["required_confidence"] = float(
+    profile.min_confidence
+)
+
+result["diagnostics"] = diagnostics
     return result
 
 
