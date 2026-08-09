@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:fl_chart/fl_chart.dart';
@@ -32,25 +33,36 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final symbol = TextEditingController(text: 'EURUSD=X');
-  final balance = TextEditingController(text: '10000');
+  final symbol = TextEditingController(
+    text: 'EURUSD=X',
+  );
+
+  final balance = TextEditingController(
+    text: '10000',
+  );
 
   String risk = 'Balanced';
 
   String apiBase = const String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://jasong-ai-trader-v2.onrender.com',
+    defaultValue:
+        'https://jasong-ai-trader-v2.onrender.com',
   );
 
   Map<String, dynamic>? sig;
   Map<String, dynamic>? bt;
 
   List<Map<String, dynamic>> marketResults = [];
+  List<Map<String, dynamic>> marketFailures = [];
+
   Map<String, dynamic>? rankedMarkets;
 
   int scanProgress = 0;
+
   bool busy = false;
   bool scanningMarkets = false;
+
+  String? currentScanMarket;
   String? error;
 
   final List<String> markets = [
@@ -65,21 +77,44 @@ class _HomePageState extends State<HomePage> {
     'GBPJPY',
   ];
 
-  Future<Map<String, dynamic>> getJson(Uri uri) async {
-    final response = await http.get(uri).timeout(
+  // =========================================================
+  // BASIC GET REQUEST
+  // =========================================================
+
+  Future<Map<String, dynamic>> getJson(
+    Uri uri,
+  ) async {
+    final response = await http
+        .get(uri)
+        .timeout(
           const Duration(seconds: 90),
         );
 
     if (response.statusCode != 200) {
       throw Exception(
-        'Server ${response.statusCode}: ${response.body}',
+        'Server ${response.statusCode}: '
+        '${response.body}',
+      );
+    }
+
+    final decoded = jsonDecode(
+      response.body,
+    );
+
+    if (decoded is! Map) {
+      throw Exception(
+        'Invalid server response',
       );
     }
 
     return Map<String, dynamic>.from(
-      jsonDecode(response.body),
+      decoded,
     );
   }
+
+  // =========================================================
+  // BASIC POST JSON REQUEST
+  // =========================================================
 
   Future<Map<String, dynamic>> postJson(
     Uri uri,
@@ -89,7 +124,8 @@ class _HomePageState extends State<HomePage> {
         .post(
           uri,
           headers: {
-            'Content-Type': 'application/json',
+            'Content-Type':
+                'application/json',
           },
           body: jsonEncode(body),
         )
@@ -99,37 +135,71 @@ class _HomePageState extends State<HomePage> {
 
     if (response.statusCode != 200) {
       throw Exception(
-        'Server ${response.statusCode}: ${response.body}',
+        'Server ${response.statusCode}: '
+        '${response.body}',
+      );
+    }
+
+    final decoded = jsonDecode(
+      response.body,
+    );
+
+    if (decoded is! Map) {
+      throw Exception(
+        'Invalid server response',
       );
     }
 
     return Map<String, dynamic>.from(
-      jsonDecode(response.body),
+      decoded,
     );
   }
 
+  // =========================================================
+  // V4.1 RESILIENT SEQUENTIAL MARKET SCANNER
+  // =========================================================
+
   Future<void> scanAllMarkets() async {
-    if (busy) return;
+    if (busy) {
+      return;
+    }
 
     setState(() {
       busy = true;
       scanningMarkets = true;
+
       error = null;
+
       marketResults = [];
+      marketFailures = [];
+
       rankedMarkets = null;
+
       scanProgress = 0;
+      currentScanMarket = null;
     });
 
-    try {
-      final completed = <Map<String, dynamic>>[];
+    final completed =
+        <Map<String, dynamic>>[];
 
-      for (int i = 0; i < markets.length; i++) {
-        if (!mounted) return;
+    final failures =
+        <Map<String, dynamic>>[];
+
+    try {
+      for (
+        int i = 0;
+        i < markets.length;
+        i++
+      ) {
+        if (!mounted) {
+          return;
+        }
 
         final market = markets[i];
 
         setState(() {
           scanProgress = i + 1;
+          currentScanMarket = market;
         });
 
         final uri = Uri.parse(
@@ -138,30 +208,123 @@ class _HomePageState extends State<HomePage> {
           queryParameters: {
             'market': market,
             'risk_mode': risk,
-            'starting_balance': balance.text,
+            'starting_balance':
+                balance.text,
             'payout': '0.80',
           },
         );
 
-        final result = await getJson(uri);
+        try {
+          // Each market has its own timeout.
+          // A timeout no longer kills the
+          // complete 9-market scan.
+          final response = await http
+              .get(uri)
+              .timeout(
+                const Duration(
+                  seconds: 75,
+                ),
+              );
 
-        completed.add(
-          Map<String, dynamic>.from(result),
-        );
+          if (response.statusCode != 200) {
+            throw Exception(
+              'HTTP '
+              '${response.statusCode}',
+            );
+          }
 
-        if (!mounted) return;
-
-        setState(() {
-          marketResults =
-              List<Map<String, dynamic>>.from(
-            completed,
+          final decoded = jsonDecode(
+            response.body,
           );
-        });
 
+          if (decoded is! Map) {
+            throw Exception(
+              'Invalid market response',
+            );
+          }
+
+          final result =
+              Map<String, dynamic>.from(
+            decoded,
+          );
+
+          result['market'] ??= market;
+
+          completed.add(result);
+
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            marketResults =
+                List<
+                    Map<String, dynamic>
+                >.from(
+              completed,
+            );
+          });
+        } on TimeoutException {
+          failures.add({
+            'market': market,
+            'status': 'TIMEOUT',
+            'error':
+                'Market scan exceeded '
+                '75 seconds',
+          });
+
+          if (mounted) {
+            setState(() {
+              marketFailures =
+                  List<
+                      Map<String, dynamic>
+                  >.from(
+                failures,
+              );
+            });
+          }
+        } catch (e) {
+          failures.add({
+            'market': market,
+            'status': 'ERROR',
+            'error': e.toString(),
+          });
+
+          if (mounted) {
+            setState(() {
+              marketFailures =
+                  List<
+                      Map<String, dynamic>
+                  >.from(
+                failures,
+              );
+            });
+          }
+        }
+
+        // Give Render a brief recovery
+        // period before the next heavy
+        // optimisation request.
         await Future.delayed(
-          const Duration(milliseconds: 800),
+          const Duration(seconds: 2),
         );
       }
+
+      if (completed.isEmpty) {
+        throw Exception(
+          'No market scans completed '
+          'successfully. Please try again.',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        currentScanMarket =
+            'Ranking markets';
+      });
 
       final rankUri = Uri.parse(
         '$apiBase/rank-markets',
@@ -171,18 +334,35 @@ class _HomePageState extends State<HomePage> {
         },
       );
 
-      final ranked = await postJson(
-        rankUri,
-        completed,
-      );
+      try {
+        final ranked =
+            await postJson(
+          rankUri,
+          completed,
+        );
 
-      if (!mounted) return;
+        if (!mounted) {
+          return;
+        }
 
-      setState(() {
-        rankedMarkets = ranked;
-      });
+        setState(() {
+          rankedMarkets = ranked;
+        });
+      } catch (e) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          error =
+              'Market scans completed, '
+              'but ranking failed: $e';
+        });
+      }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         error = e.toString();
@@ -191,15 +371,25 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           busy = false;
+
           scanningMarkets = false;
+
           scanProgress = 0;
+
+          currentScanMarket = null;
         });
       }
     }
   }
 
+  // =========================================================
+  // LIVE AI SIGNAL
+  // =========================================================
+
   Future<void> refreshSignal() async {
-    if (busy) return;
+    if (busy) {
+      return;
+    }
 
     setState(() {
       busy = true;
@@ -217,15 +407,20 @@ class _HomePageState extends State<HomePage> {
         },
       );
 
-      final result = await getJson(uri);
+      final result =
+          await getJson(uri);
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         sig = result;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         error = e.toString();
@@ -239,8 +434,14 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // =========================================================
+  // BACKTEST
+  // =========================================================
+
   Future<void> runBacktest() async {
-    if (busy) return;
+    if (busy) {
+      return;
+    }
 
     setState(() {
       busy = true;
@@ -254,19 +455,25 @@ class _HomePageState extends State<HomePage> {
         queryParameters: {
           'symbol': symbol.text,
           'risk_mode': risk,
-          'starting_balance': balance.text,
+          'starting_balance':
+              balance.text,
         },
       );
 
-      final result = await getJson(uri);
+      final result =
+          await getJson(uri);
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         bt = result;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         error = e.toString();
@@ -280,11 +487,21 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> recordPaperTrade() async {
-    if (busy) return;
+  // =========================================================
+  // RECORD PAPER TRADE
+  // =========================================================
+
+  Future<void>
+      recordPaperTrade() async {
+    if (busy) {
+      return;
+    }
 
     if (sig == null ||
-        !['BUY', 'SELL'].contains(
+        ![
+          'BUY',
+          'SELL',
+        ].contains(
           sig!['decision'],
         )) {
       return;
@@ -302,13 +519,17 @@ class _HomePageState extends State<HomePage> {
         queryParameters: {
           'symbol': symbol.text,
           'direction':
-              sig!['decision'].toString(),
+              sig!['decision']
+                  .toString(),
           'confidence':
-              sig!['confidence'].toString(),
+              sig!['confidence']
+                  .toString(),
           'entry_price':
-              sig!['price'].toString(),
+              sig!['price']
+                  .toString(),
           'stake':
-              sig!['suggested_paper_stake']
+              sig![
+                      'suggested_paper_stake']
                   .toString(),
         },
       );
@@ -316,16 +537,23 @@ class _HomePageState extends State<HomePage> {
       final response = await http
           .post(uri)
           .timeout(
-            const Duration(seconds: 30),
+            const Duration(
+              seconds: 30,
+            ),
           );
 
       if (response.statusCode != 200) {
-        throw Exception(response.body);
+        throw Exception(
+          response.body,
+        );
       }
 
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
         const SnackBar(
           content: Text(
             'Paper trade recorded',
@@ -333,7 +561,9 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) {
+        return;
+      }
 
       setState(() {
         error = e.toString();
@@ -346,6 +576,10 @@ class _HomePageState extends State<HomePage> {
       }
     }
   }
+
+  // =========================================================
+  // INIT / DISPOSE
+  // =========================================================
 
   @override
   void initState() {
@@ -360,10 +594,17 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     symbol.dispose();
     balance.dispose();
+
     super.dispose();
   }
 
-  Color decisionColor(String decision) {
+  // =========================================================
+  // COLOURS
+  // =========================================================
+
+  Color decisionColor(
+    String decision,
+  ) {
     if (decision == 'BUY') {
       return Colors.greenAccent;
     }
@@ -375,7 +616,9 @@ class _HomePageState extends State<HomePage> {
     return Colors.amberAccent;
   }
 
-  Color statusColor(String status) {
+  Color statusColor(
+    String status,
+  ) {
     switch (status) {
       case 'STRONG':
         return Colors.greenAccent;
@@ -389,10 +632,63 @@ class _HomePageState extends State<HomePage> {
       case 'REJECT':
         return Colors.redAccent;
 
+      case 'TIMEOUT':
+        return Colors.orangeAccent;
+
+      case 'ERROR':
+        return Colors.redAccent;
+
       default:
         return Colors.white70;
     }
   }
+
+  // =========================================================
+  // NUMBER FORMATTING
+  // =========================================================
+
+  String formatPrice(
+    dynamic value,
+  ) {
+    if (value is num) {
+      return value
+          .toDouble()
+          .toStringAsFixed(5);
+    }
+
+    return '-';
+  }
+
+  String formatRsi(
+    dynamic value,
+  ) {
+    if (value is num) {
+      return value
+          .toDouble()
+          .toStringAsFixed(2);
+    }
+
+    return '-';
+  }
+
+  String formatPercent(
+    dynamic value, {
+    int decimals = 1,
+  }) {
+    if (value is num) {
+      return (
+        value.toDouble() * 100
+      ).toStringAsFixed(
+        decimals,
+      );
+    }
+
+    return '0.0';
+  }
+
+  // =========================================================
+  // GENERIC METRIC CARD
+  // =========================================================
 
   Widget metric(
     String label,
@@ -401,22 +697,29 @@ class _HomePageState extends State<HomePage> {
     return Expanded(
       child: Card(
         child: Padding(
-          padding: const EdgeInsets.all(14),
+          padding:
+              const EdgeInsets.all(14),
           child: Column(
             children: [
               Text(
                 label,
-                style: const TextStyle(
+                style:
+                    const TextStyle(
                   fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(
+                height: 6,
+              ),
               Text(
                 value,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
+                textAlign:
+                    TextAlign.center,
+                style:
+                    const TextStyle(
                   fontSize: 19,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
             ],
@@ -426,37 +729,49 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // =========================================================
+  // MARKET CARD
+  // =========================================================
+
   Widget marketCard(
     Map<String, dynamic> market,
     int rank,
   ) {
     final winRate =
-        ((market['win_rate'] ?? 0) as num)
+        ((market['win_rate'] ?? 0)
+                    as num)
                 .toDouble() *
             100;
 
     final score =
-        ((market['market_score'] ?? 0) as num)
+        ((market['market_score'] ?? 0)
+                as num)
             .toDouble();
 
     final profitFactor =
-        ((market['profit_factor'] ?? 0) as num)
+        ((market['profit_factor'] ??
+                    0)
+                as num)
             .toDouble();
 
     final returnPct =
-        ((market['return_pct'] ?? 0) as num)
+        ((market['return_pct'] ?? 0)
+                    as num)
                 .toDouble() *
             100;
 
     final status =
-        market['status']?.toString() ??
+        market['status']
+                ?.toString() ??
             'UNKNOWN';
 
     String holdText =
-        '${market['holding_candles'] ?? '-'} candles';
+        '${market['holding_candles'] ?? '-'} '
+        'candles';
 
     final interval =
-        market['interval']?.toString();
+        market['interval']
+            ?.toString();
 
     final holdingCandles =
         market['holding_candles'];
@@ -471,13 +786,16 @@ class _HomePageState extends State<HomePage> {
 
       if (holdMinutes != null) {
         holdText =
-            '$holdingCandles candles • ~${_formatMinutes(holdMinutes)}';
+            '${holdingCandles.toInt()} '
+            'candles • '
+            '~${_formatMinutes(holdMinutes)}';
       }
     }
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding:
+            const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment:
               CrossAxisAlignment.start,
@@ -488,7 +806,8 @@ class _HomePageState extends State<HomePage> {
                   child: Text(
                     '#$rank '
                     '${market['market'] ?? '-'}',
-                    style: const TextStyle(
+                    style:
+                        const TextStyle(
                       fontSize: 20,
                       fontWeight:
                           FontWeight.bold,
@@ -501,17 +820,27 @@ class _HomePageState extends State<HomePage> {
                     fontWeight:
                         FontWeight.bold,
                     color:
-                        statusColor(status),
+                        statusColor(
+                      status,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+
+            const SizedBox(
+              height: 8,
+            ),
+
             Text(
               'Score '
               '${score.toStringAsFixed(1)}',
             ),
-            const SizedBox(height: 4),
+
+            const SizedBox(
+              height: 4,
+            ),
+
             Text(
               '${market['interval'] ?? '-'}'
               ' • Win '
@@ -519,18 +848,27 @@ class _HomePageState extends State<HomePage> {
               ' • PF '
               '${profitFactor.toStringAsFixed(2)}',
             ),
-            const SizedBox(height: 4),
+
+            const SizedBox(
+              height: 4,
+            ),
+
             Text(
               'Return '
               '${returnPct.toStringAsFixed(2)}%'
               ' • Trades '
               '${market['trades'] ?? '-'}',
             ),
-            const SizedBox(height: 4),
+
+            const SizedBox(
+              height: 4,
+            ),
+
             Text(
               'Threshold '
               '${market['threshold_pct'] ?? '-'}%'
-              ' • Hold $holdText',
+              ' • Hold '
+              '$holdText',
             ),
           ],
         ),
@@ -538,26 +876,35 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // =========================================================
+  // HOLDING TIME HELPERS
+  // =========================================================
+
   int? _holdingMinutes(
     String interval,
     int holdingCandles,
   ) {
     final match = RegExp(
       r'^(\d+)(m|h)$',
-    ).firstMatch(interval);
+    ).firstMatch(
+      interval,
+    );
 
     if (match == null) {
       return null;
     }
 
     final amount =
-        int.tryParse(match.group(1)!);
+        int.tryParse(
+      match.group(1)!,
+    );
 
     if (amount == null) {
       return null;
     }
 
-    final unit = match.group(2);
+    final unit =
+        match.group(2);
 
     final minutesPerCandle =
         unit == 'h'
@@ -568,76 +915,109 @@ class _HomePageState extends State<HomePage> {
         holdingCandles;
   }
 
-  String _formatMinutes(int minutes) {
+  String _formatMinutes(
+    int minutes,
+  ) {
     if (minutes < 60) {
       return '$minutes min';
     }
 
     if (minutes % 60 == 0) {
-      final hours = minutes ~/ 60;
+      final hours =
+          minutes ~/ 60;
+
       return '$hours h';
     }
 
-    final hours = minutes ~/ 60;
-    final remainder = minutes % 60;
+    final hours =
+        minutes ~/ 60;
 
-    return '$hours h $remainder min';
+    final remainder =
+        minutes % 60;
+
+    return '$hours h '
+        '$remainder min';
   }
 
+  // =========================================================
+  // MAIN UI
+  // =========================================================
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     final decision =
-        sig?['decision']?.toString() ??
+        sig?['decision']
+                ?.toString() ??
             'WAIT';
 
     final confidence =
-        (((sig?['confidence'] ?? 0) as num)
-                    .toDouble() *
-                100)
-            .toStringAsFixed(1);
+        formatPercent(
+      sig?['confidence'],
+    );
 
     final aiUp =
-        (((sig?['combined_up_probability'] ??
-                            0)
-                        as num)
-                    .toDouble() *
-                100)
-            .toStringAsFixed(1);
+        formatPercent(
+      sig?[
+          'combined_up_probability'],
+    );
+
+    final priceText =
+        formatPrice(
+      sig?['price'],
+    );
+
+    final rsiText =
+        formatRsi(
+      sig?['rsi'],
+    );
 
     final curve =
-        (bt?['equity_curve'] as List?) ??
+        (bt?['equity_curve']
+                    as List?) ??
             const [];
 
     final topMarkets =
-        (rankedMarkets?['top_markets']
-                    as List?)
-                ?.cast<dynamic>() ??
+        (rankedMarkets?[
+                    'top_markets']
+                as List?) ??
             const [];
 
-    final bestMarket =
-        rankedMarkets?['best_market'];
+    final dynamic bestMarket =
+        rankedMarkets?[
+            'best_market'];
 
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          'Jasong AI Trader V4',
+          'Jasong AI Trader V4.1',
         ),
         actions: [
           IconButton(
             onPressed:
-                busy ? null : refreshSignal,
-            icon: const Icon(
+                busy
+                    ? null
+                    : refreshSignal,
+            icon:
+                const Icon(
               Icons.refresh,
             ),
           ),
         ],
       ),
+
       body: RefreshIndicator(
-        onRefresh: refreshSignal,
+        onRefresh:
+            refreshSignal,
+
         child: ListView(
           physics:
               const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(14),
+
+          padding:
+              const EdgeInsets.all(14),
+
           children: [
             const Text(
               'AI-assisted paper trading',
@@ -647,22 +1027,29 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(
+              height: 10,
+            ),
 
             TextField(
-              controller: symbol,
+              controller:
+                  symbol,
               decoration:
                   const InputDecoration(
-                labelText: 'Market symbol',
+                labelText:
+                    'Market symbol',
                 border:
                     OutlineInputBorder(),
               ),
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(
+              height: 10,
+            ),
 
             TextField(
-              controller: balance,
+              controller:
+                  balance,
               keyboardType:
                   const TextInputType
                       .numberWithOptions(
@@ -670,19 +1057,25 @@ class _HomePageState extends State<HomePage> {
               ),
               decoration:
                   const InputDecoration(
-                labelText: 'Paper balance',
+                labelText:
+                    'Paper balance',
                 border:
                     OutlineInputBorder(),
               ),
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(
+              height: 10,
+            ),
 
-            DropdownButtonFormField<String>(
-              initialValue: risk,
+            DropdownButtonFormField<
+                String>(
+              initialValue:
+                  risk,
               decoration:
                   const InputDecoration(
-                labelText: 'Risk mode',
+                labelText:
+                    'Risk mode',
                 border:
                     OutlineInputBorder(),
               ),
@@ -693,24 +1086,36 @@ class _HomePageState extends State<HomePage> {
               ]
                   .map(
                     (item) =>
-                        DropdownMenuItem(
+                        DropdownMenuItem<
+                            String>(
                       value: item,
-                      child: Text(item),
+                      child:
+                          Text(item),
                     ),
                   )
                   .toList(),
-              onChanged: busy
-                  ? null
-                  : (value) {
-                      setState(() {
-                        risk =
-                            value ??
-                                'Balanced';
-                      });
-                    },
+
+              onChanged:
+                  busy
+                      ? null
+                      : (value) {
+                          setState(
+                            () {
+                              risk =
+                                  value ??
+                                      'Balanced';
+                            },
+                          );
+                        },
             ),
 
-            const SizedBox(height: 14),
+            const SizedBox(
+              height: 14,
+            ),
+
+            // =================================================
+            // AI SIGNAL CARD
+            // =================================================
 
             Card(
               child: Padding(
@@ -722,7 +1127,8 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Text(
                       decision,
-                      style: TextStyle(
+                      style:
+                          TextStyle(
                         fontSize: 44,
                         fontWeight:
                             FontWeight.w900,
@@ -732,7 +1138,11 @@ class _HomePageState extends State<HomePage> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 6),
+
+                    const SizedBox(
+                      height: 6,
+                    ),
+
                     Text(
                       sig?['reason']
                               ?.toString() ??
@@ -744,6 +1154,10 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ),
+
+            // =================================================
+            // SIGNAL METRICS
+            // =================================================
 
             Row(
               children: [
@@ -762,11 +1176,11 @@ class _HomePageState extends State<HomePage> {
               children: [
                 metric(
                   'Price',
-                  '${sig?['price'] ?? '-'}',
+                  priceText,
                 ),
                 metric(
                   'RSI',
-                  '${sig?['rsi'] ?? '-'}',
+                  rsiText,
                 ),
               ],
             ),
@@ -784,71 +1198,115 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
 
-            const SizedBox(height: 10),
+            const SizedBox(
+              height: 10,
+            ),
+
+            // =================================================
+            // BUTTONS
+            // =================================================
 
             FilledButton.icon(
               onPressed:
-                  busy ? null : refreshSignal,
-              icon: const Icon(
+                  busy
+                      ? null
+                      : refreshSignal,
+              icon:
+                  const Icon(
                 Icons.psychology,
               ),
-              label: const Text(
+              label:
+                  const Text(
                 'Refresh AI Signal',
               ),
             ),
 
-            const SizedBox(height: 8),
+            const SizedBox(
+              height: 8,
+            ),
 
             OutlinedButton.icon(
               onPressed:
-                  busy ? null : runBacktest,
-              icon: const Icon(
+                  busy
+                      ? null
+                      : runBacktest,
+              icon:
+                  const Icon(
                 Icons.query_stats,
               ),
-              label: const Text(
+              label:
+                  const Text(
                 'Run Backtest',
               ),
             ),
 
-            const SizedBox(height: 8),
+            const SizedBox(
+              height: 8,
+            ),
 
             FilledButton.icon(
               onPressed:
-                  busy ? null : scanAllMarkets,
-              icon: const Icon(
+                  busy
+                      ? null
+                      : scanAllMarkets,
+              icon:
+                  const Icon(
                 Icons.radar,
               ),
-              label: const Text(
+              label:
+                  const Text(
                 'Scan All Markets',
               ),
             ),
 
-            const SizedBox(height: 8),
+            const SizedBox(
+              height: 8,
+            ),
 
             OutlinedButton.icon(
-              onPressed: busy ||
-                      !['BUY', 'SELL']
-                          .contains(decision)
-                  ? null
-                  : recordPaperTrade,
-              icon: const Icon(
+              onPressed:
+                  busy ||
+                          ![
+                            'BUY',
+                            'SELL',
+                          ].contains(
+                            decision,
+                          )
+                      ? null
+                      : recordPaperTrade,
+              icon:
+                  const Icon(
                 Icons.edit_note,
               ),
-              label: const Text(
+              label:
+                  const Text(
                 'Record Paper Trade',
               ),
             ),
 
-            if (busy &&
-                !scanningMarkets)
+            // =================================================
+            // NORMAL LOADING
+            // =================================================
+
+            if (
+              busy &&
+              !scanningMarkets
+            )
               const Padding(
                 padding:
-                    EdgeInsets.all(16),
-                child: Center(
+                    EdgeInsets.all(
+                  16,
+                ),
+                child:
+                    Center(
                   child:
                       CircularProgressIndicator(),
                 ),
               ),
+
+            // =================================================
+            // MARKET SCAN PROGRESS
+            // =================================================
 
             if (scanningMarkets)
               Padding(
@@ -859,35 +1317,64 @@ class _HomePageState extends State<HomePage> {
                 child: Column(
                   children: [
                     LinearProgressIndicator(
-                      value: markets.isEmpty
-                          ? null
-                          : scanProgress /
-                              markets.length,
+                      value:
+                          markets.isEmpty
+                              ? null
+                              : scanProgress /
+                                  markets.length,
                     ),
+
                     const SizedBox(
                       height: 8,
                     ),
+
                     Text(
                       'Scanning market '
                       '$scanProgress of '
                       '${markets.length}',
                     ),
-                    if (scanProgress > 0 &&
-                        scanProgress <=
-                            markets.length)
-                      Text(
-                        markets[
-                            scanProgress -
-                                1],
-                        style:
-                            const TextStyle(
-                          fontWeight:
-                              FontWeight.bold,
+
+                    if (
+                      currentScanMarket !=
+                      null
+                    )
+                      Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          top: 4,
+                        ),
+                        child:
+                            Text(
+                          currentScanMarket!,
+                          style:
+                              const TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
                         ),
                       ),
+
+                    const SizedBox(
+                      height: 6,
+                    ),
+
+                    Text(
+                      '${marketResults.length} '
+                      'completed • '
+                      '${marketFailures.length} '
+                      'skipped',
+                      style:
+                          const TextStyle(
+                        fontSize: 12,
+                      ),
+                    ),
                   ],
                 ),
               ),
+
+            // =================================================
+            // ERROR
+            // =================================================
 
             if (error != null)
               Padding(
@@ -905,30 +1392,92 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
-            if (marketResults.isNotEmpty &&
-                rankedMarkets == null &&
-                !scanningMarkets) ...[
-              const SizedBox(height: 12),
-              Text(
-                '${marketResults.length} market scans completed.',
+            // =================================================
+            // FAILED MARKETS
+            // =================================================
+
+            if (
+              marketFailures.isNotEmpty
+            ) ...[
+              const SizedBox(
+                height: 12,
+              ),
+
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    14,
+                  ),
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${marketFailures.length} '
+                        'markets skipped',
+                        style:
+                            const TextStyle(
+                          fontWeight:
+                              FontWeight.bold,
+                          color:
+                              Colors.amberAccent,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      for (
+                        final failure
+                        in marketFailures
+                      )
+                        Padding(
+                          padding:
+                              const EdgeInsets.only(
+                            bottom: 4,
+                          ),
+                          child: Text(
+                            '${failure['market']}'
+                            ' • '
+                            '${failure['status']}',
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               ),
             ],
 
-            if (rankedMarkets != null) ...[
-              const SizedBox(height: 18),
+            // =================================================
+            // TOP MARKETS
+            // =================================================
+
+            if (
+              rankedMarkets != null
+            ) ...[
+              const SizedBox(
+                height: 18,
+              ),
 
               const Text(
                 'Top Markets',
-                style: TextStyle(
+                style:
+                    TextStyle(
                   fontSize: 22,
                   fontWeight:
                       FontWeight.bold,
                 ),
               ),
 
-              const SizedBox(height: 8),
+              const SizedBox(
+                height: 8,
+              ),
 
-              if (topMarkets.isEmpty)
+              if (
+                topMarkets.isEmpty
+              )
                 const Card(
                   child: Padding(
                     padding:
@@ -936,73 +1485,115 @@ class _HomePageState extends State<HomePage> {
                       16,
                     ),
                     child: Text(
-                      'No market currently meets the '
-                      'V4 qualification rules.',
+                      'No market currently '
+                      'meets the V4 '
+                      'qualification rules.',
                     ),
                   ),
                 ),
 
-              for (int i = 0;
-                  i < topMarkets.length;
-                  i++)
+              for (
+                int i = 0;
+                i <
+                    topMarkets.length;
+                i++
+              )
                 marketCard(
-                  Map<String, dynamic>.from(
+                  Map<
+                      String,
+                      dynamic
+                  >.from(
                     topMarkets[i],
                   ),
                   i + 1,
                 ),
 
-              if (bestMarket != null)
+              // ===============================================
+              // BEST OPPORTUNITY
+              // ===============================================
+
+              if (
+                bestMarket != null
+              )
                 Card(
                   child: Padding(
                     padding:
-                        const EdgeInsets
-                            .all(16),
+                        const EdgeInsets.all(
+                      16,
+                    ),
                     child: Column(
                       children: [
                         const Text(
                           'BEST OPPORTUNITY',
-                          style: TextStyle(
+                          style:
+                              TextStyle(
                             fontWeight:
                                 FontWeight.bold,
                           ),
                         ),
+
                         const SizedBox(
                           height: 8,
                         ),
+
                         Text(
-                          bestMarket['market']
+                          bestMarket[
+                                  'market']
                               .toString(),
                           style:
                               const TextStyle(
                             fontSize: 30,
                             fontWeight:
-                                FontWeight
-                                    .w900,
+                                FontWeight.w900,
                           ),
                         ),
+
                         const SizedBox(
                           height: 4,
                         ),
+
                         Text(
-                          '${bestMarket['interval']}'
+                          '${bestMarket['interval'] ?? '-'}'
                           ' • Score '
-                          '${bestMarket['market_score']}',
+                          '${bestMarket['market_score'] ?? '-'}',
                         ),
+
                         const SizedBox(
                           height: 4,
                         ),
+
                         Text(
                           'Historical win rate '
-                          '${((((bestMarket['win_rate'] ?? 0) as num).toDouble()) * 100).toStringAsFixed(1)}%',
+                          '${formatPercent(bestMarket['win_rate'])}%',
                         ),
+
                         const SizedBox(
                           height: 4,
                         ),
+
+                        Text(
+                          'Profit factor '
+                          '${bestMarket['profit_factor'] ?? '-'}',
+                        ),
+
+                        const SizedBox(
+                          height: 4,
+                        ),
+
+                        Text(
+                          'Threshold '
+                          '${bestMarket['threshold_pct'] ?? '-'}%',
+                        ),
+
+                        const SizedBox(
+                          height: 4,
+                        ),
+
                         Text(
                           'Status '
                           '${bestMarket['status'] ?? '-'}',
-                          style: TextStyle(
+                          style:
+                              TextStyle(
                             color:
                                 statusColor(
                               bestMarket[
@@ -1020,12 +1611,19 @@ class _HomePageState extends State<HomePage> {
                 ),
             ],
 
+            // =================================================
+            // BACKTEST
+            // =================================================
+
             if (bt != null) ...[
-              const SizedBox(height: 18),
+              const SizedBox(
+                height: 18,
+              ),
 
               const Text(
                 'Backtest',
-                style: TextStyle(
+                style:
+                    TextStyle(
                   fontSize: 20,
                   fontWeight:
                       FontWeight.bold,
@@ -1040,7 +1638,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                   metric(
                     'Win rate',
-                    '${((((bt!['win_rate'] ?? 0) as num).toDouble()) * 100).toStringAsFixed(1)}%',
+                    '${formatPercent(bt!['win_rate'])}%',
                   ),
                 ],
               ),
@@ -1049,11 +1647,11 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   metric(
                     'Return',
-                    '${((((bt!['return_pct'] ?? 0) as num).toDouble()) * 100).toStringAsFixed(1)}%',
+                    '${formatPercent(bt!['return_pct'])}%',
                   ),
                   metric(
                     'Max DD',
-                    '${((((bt!['max_drawdown'] ?? 0) as num).toDouble()) * 100).toStringAsFixed(1)}%',
+                    '${formatPercent(bt!['max_drawdown'])}%',
                   ),
                 ],
               ),
@@ -1061,7 +1659,8 @@ class _HomePageState extends State<HomePage> {
               if (curve.isNotEmpty)
                 SizedBox(
                   height: 220,
-                  child: LineChart(
+                  child:
+                      LineChart(
                     LineChartData(
                       titlesData:
                           const FlTitlesData(
@@ -1079,11 +1678,12 @@ class _HomePageState extends State<HomePage> {
                             show: false,
                           ),
                           spots: [
-                            for (int i = 0;
-                                i <
-                                    curve
-                                        .length;
-                                i++)
+                            for (
+                              int i = 0;
+                              i <
+                                  curve.length;
+                              i++
+                            )
                               FlSpot(
                                 i.toDouble(),
                                 ((curve[i]
@@ -1100,17 +1700,30 @@ class _HomePageState extends State<HomePage> {
                 ),
             ],
 
-            const SizedBox(height: 16),
+            const SizedBox(
+              height: 16,
+            ),
+
+            // =================================================
+            // SAFETY
+            // =================================================
 
             const Card(
               child: Padding(
                 padding:
-                    EdgeInsets.all(14),
+                    EdgeInsets.all(
+                  14,
+                ),
                 child: Text(
-                  'Safety: no Martingale, no forced daily-profit target, '
-                  'no live broker execution, and no broker password stored '
-                  'in the app. Historical/model results and market rankings '
-                  'do not guarantee future profit.',
+                  'Safety: no Martingale, '
+                  'no forced daily-profit '
+                  'target, no live broker '
+                  'execution, and no broker '
+                  'password stored in the '
+                  'app. Historical/model '
+                  'results and market '
+                  'rankings do not guarantee '
+                  'future profit.',
                 ),
               ),
             ),
