@@ -1,3 +1,4 @@
+from market_scanner import classify_result, calculate_market_score
 from market_scanner import scan_markets
 from multi_optimizer import optimise_all_timeframes
 from strategy_optimizer import optimise_strategy
@@ -428,10 +429,42 @@ def run_scan_market(
         payout=payout,
     )
 
+    best = result.get("best")
+
+    if best:
+        trades = int(best.get("trades", 0))
+        win_rate = float(best.get("win_rate", 0.0))
+        profit_factor = float(best.get("profit_factor", 0.0))
+        return_pct = float(best.get("return_pct", 0.0))
+        max_drawdown = abs(
+            float(best.get("max_drawdown", 0.0))
+        )
+
+        status = classify_result(
+            trades,
+            win_rate,
+            profit_factor,
+            return_pct,
+            max_drawdown,
+        )
+
+        market_score = calculate_market_score(
+            trades,
+            win_rate,
+            profit_factor,
+            return_pct,
+            max_drawdown,
+        )
+
+        best["status"] = status
+        best["market_score"] = market_score
+
     result.update({
         "market": market,
         "symbol": symbol,
         "risk_mode": risk_mode,
+        "status": best.get("status") if best else "NO_DATA",
+        "market_score": best.get("market_score", 0.0) if best else 0.0,
         "live_execution": False,
     })
 
