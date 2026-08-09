@@ -1,4 +1,3 @@
-import random
 import threading
 import time
 from dataclasses import dataclass
@@ -46,28 +45,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V4.4
-# ============================================================
-#
-# Main improvements:
-#
-# 1. Fresh market-data cache
-# 2. Stale-cache fallback
-# 3. Yahoo rate-limit cooldown
-# 4. Download throttling
-# 5. Safe intraday periods
-# 6. Reduced repeated Yahoo requests
-# 7. One deep-validation candidate per request
-# 8. Zero-balance protection
-# 9. Cache diagnostics
-# 10. No duplicate /backtest-all route
-#
-# Paper trading / research only.
-# ============================================================
-
-
-# ============================================================
-# MARKETS
+# JASONG AI TRADER V4.6
+# SINGLE-DOWNLOAD / RESAMPLED MULTI-TIMEFRAME DATA ENGINE
 # ============================================================
 
 MARKETS = {
@@ -83,13 +62,9 @@ MARKETS = {
 }
 
 
-# ============================================================
-# FASTAPI APP
-# ============================================================
-
 app = FastAPI(
-    title="Jasong AI Trader V4.4 API",
-    version="4.4.0",
+    title="Jasong AI Trader V4.6 API",
+    version="4.6.0",
 )
 
 app.add_middleware(
@@ -118,13 +93,14 @@ def get_db():
 
 
 # ============================================================
-# MARKET-DATA CACHE
+# CACHE
 # ============================================================
 
 @dataclass
 class CacheEntry:
     dataframe: pd.DataFrame
     created_at: float
+    source: str
 
 
 _DATA_CACHE: Dict[
@@ -132,45 +108,35 @@ _DATA_CACHE: Dict[
     CacheEntry,
 ] = {}
 
-
 _CACHE_LOCK = threading.Lock()
-
 _DOWNLOAD_LOCK = threading.Lock()
 
 
-# Fresh data is preferred for 5 minutes.
+# Fresh data for five minutes.
 CACHE_TTL_SECONDS = 300
 
-
-# If Yahoo temporarily fails, data up to 6 hours old
-# may be used as a defensive fallback.
+# Old data may be reused during Yahoo failure.
 STALE_CACHE_MAX_AGE_SECONDS = 21600
 
+# Space Yahoo requests apart.
+MIN_DOWNLOAD_GAP_SECONDS = 2.5
 
-# Keep Yahoo downloads spaced apart.
-MIN_DOWNLOAD_GAP_SECONDS = 2.0
-
-
-# When Yahoo reports rate limiting, stop immediately
-# hammering it for a while.
-YAHOO_RATE_LIMIT_COOLDOWN_SECONDS = 180
+# Stop hammering Yahoo after a rate-limit incident.
+YAHOO_COOLDOWN_SECONDS = 180
 
 
 _last_download_time = 0.0
-
 _yahoo_cooldown_until = 0.0
 
 
 # ============================================================
-# BASIC VALIDATION
+# GENERAL VALIDATION
 # ============================================================
 
 def validate_risk_mode(
     risk_mode: str,
 ):
-
     if risk_mode not in PROFILES:
-
         raise HTTPException(
             status_code=400,
             detail="Invalid risk mode",
@@ -178,12 +144,10 @@ def validate_risk_mode(
 
 
 def validate_balance(
-    value: float,
+    amount: float,
     field_name: str = "starting_balance",
 ):
-
-    if value <= 0:
-
+    if amount <= 0:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -191,122 +155,6 @@ def validate_balance(
                 "greater than 0"
             ),
         )
-
-
-# ============================================================
-# SAFE PERIOD HANDLING
-# ============================================================
-
-def safe_period(
-    period: str,
-    interval: str,
-) -> str:
-
-    period = str(
-        period or "1mo"
-    ).lower().strip()
-
-    interval = str(
-        interval or "15m"
-    ).lower().strip()
-
-
-    # Yahoo 1-minute candles have tight restrictions.
-    if interval == "1m":
-
-        if period not in {
-            "1d",
-            "5d",
-            "7d",
-        }:
-            return "5d"
-
-        return period
-
-
-    # Other intraday intervals.
-    if interval in {
-        "2m",
-        "5m",
-        "15m",
-        "30m",
-        "60m",
-        "90m",
-        "1h",
-    }:
-
-        if period not in {
-            "1d",
-            "5d",
-            "1mo",
-        }:
-            return "1mo"
-
-        return period
-
-
-    return period
-
-
-def fallback_periods(
-    period: str,
-    interval: str,
-) -> list[str]:
-
-    interval = str(
-        interval
-    ).lower().strip()
-
-    requested = safe_period(
-        period,
-        interval,
-    )
-
-
-    if interval == "1m":
-
-        candidates = [
-            requested,
-            "5d",
-            "1d",
-        ]
-
-
-    elif interval in {
-        "2m",
-        "5m",
-        "15m",
-        "30m",
-        "60m",
-        "90m",
-        "1h",
-    }:
-
-        candidates = [
-            requested,
-            "1mo",
-            "5d",
-        ]
-
-
-    else:
-
-        candidates = [
-            requested,
-            "3mo",
-            "1mo",
-        ]
-
-
-    unique = []
-
-    for item in candidates:
-
-        if item not in unique:
-            unique.append(item)
-
-
-    return unique
 
 
 # ============================================================
@@ -318,7 +166,6 @@ def _cache_key(
     period: str,
     interval: str,
 ):
-
     return (
         symbol.upper().strip(),
         period.lower().strip(),
@@ -326,11 +173,33 @@ def _cache_key(
     )
 
 
-def _get_cache_entry(
+def _cache_put(
     symbol: str,
     period: str,
     interval: str,
-) -> Optional[CacheEntry]:
+    data: pd.DataFrame,
+    source: str,
+):
+    key = _cache_key(
+        symbol,
+        period,
+        interval,
+    )
+
+    with _CACHE_LOCK:
+        _DATA_CACHE[key] = CacheEntry(
+            dataframe=data.copy(),
+            created_at=time.time(),
+            source=source,
+        )
+
+
+def _cache_get(
+    symbol: str,
+    period: str,
+    interval: str,
+    allow_stale: bool = False,
+) -> Optional[pd.DataFrame]:
 
     key = _cache_key(
         symbol,
@@ -339,122 +208,52 @@ def _get_cache_entry(
     )
 
     with _CACHE_LOCK:
-
         entry = _DATA_CACHE.get(
             key
         )
 
-        return entry
+        if entry is None:
+            return None
 
-
-def _get_fresh_cache(
-    symbol: str,
-    period: str,
-    interval: str,
-) -> Optional[pd.DataFrame]:
-
-    entry = _get_cache_entry(
-        symbol,
-        period,
-        interval,
-    )
-
-    if entry is None:
-        return None
-
-
-    age = (
-        time.time()
-        - entry.created_at
-    )
-
-
-    if age > CACHE_TTL_SECONDS:
-        return None
-
-
-    return entry.dataframe.copy()
-
-
-def _get_stale_cache(
-    symbol: str,
-    period: str,
-    interval: str,
-) -> Optional[pd.DataFrame]:
-
-    entry = _get_cache_entry(
-        symbol,
-        period,
-        interval,
-    )
-
-    if entry is None:
-        return None
-
-
-    age = (
-        time.time()
-        - entry.created_at
-    )
-
-
-    if age > STALE_CACHE_MAX_AGE_SECONDS:
-        return None
-
-
-    return entry.dataframe.copy()
-
-
-def _store_cache(
-    symbol: str,
-    period: str,
-    interval: str,
-    dataframe: pd.DataFrame,
-):
-
-    key = _cache_key(
-        symbol,
-        period,
-        interval,
-    )
-
-    with _CACHE_LOCK:
-
-        _DATA_CACHE[key] = CacheEntry(
-            dataframe=dataframe.copy(),
-            created_at=time.time(),
+        age = (
+            time.time()
+            - entry.created_at
         )
+
+        max_age = (
+            STALE_CACHE_MAX_AGE_SECONDS
+            if allow_stale
+            else CACHE_TTL_SECONDS
+        )
+
+        if age > max_age:
+            return None
+
+        return entry.dataframe.copy()
 
 
 def clear_market_cache():
-
     with _CACHE_LOCK:
-
         count = len(
             _DATA_CACHE
         )
 
         _DATA_CACHE.clear()
 
-
     return count
 
 
-def market_cache_stats():
-
+def cache_stats():
     now = time.time()
 
-    items = []
-
-
     with _CACHE_LOCK:
+        items = []
 
         for (
-            key,
-            entry,
-        ) in _DATA_CACHE.items():
-
-            symbol, period, interval = key
+            symbol,
+            period,
+            interval,
+        ), entry in _DATA_CACHE.items():
 
             age = (
                 now
@@ -468,6 +267,7 @@ def market_cache_stats():
                 "rows": len(
                     entry.dataframe
                 ),
+                "source": entry.source,
                 "age_seconds": round(
                     age,
                     1,
@@ -476,12 +276,7 @@ def market_cache_stats():
                     age
                     <= CACHE_TTL_SECONDS
                 ),
-                "stale_usable": (
-                    age
-                    <= STALE_CACHE_MAX_AGE_SECONDS
-                ),
             })
-
 
     return {
         "entries": len(items),
@@ -498,11 +293,10 @@ def market_cache_stats():
 
 
 # ============================================================
-# YAHOO RATE LIMIT
+# YAHOO COOLDOWN
 # ============================================================
 
 def yahoo_cooldown_active():
-
     return (
         time.time()
         < _yahoo_cooldown_until
@@ -510,14 +304,13 @@ def yahoo_cooldown_active():
 
 
 def yahoo_cooldown_remaining():
-
     remaining = (
         _yahoo_cooldown_until
         - time.time()
     )
 
     return max(
-        0,
+        0.0,
         round(
             remaining,
             1,
@@ -526,48 +319,42 @@ def yahoo_cooldown_remaining():
 
 
 def activate_yahoo_cooldown():
-
     global _yahoo_cooldown_until
 
     _yahoo_cooldown_until = (
         time.time()
-        + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
+        + YAHOO_COOLDOWN_SECONDS
     )
 
 
-def _is_rate_limit_error(
+def _looks_like_rate_limit(
     exc: Exception,
 ):
-
-    message = str(
+    text = str(
         exc
     ).lower()
 
-    patterns = [
-        "rate limit",
+    markers = [
         "too many requests",
+        "rate limit",
         "yfratelimiterror",
         "429",
     ]
 
-
     return any(
-        pattern in message
-        for pattern in patterns
+        marker in text
+        for marker in markers
     )
 
 
 # ============================================================
-# DOWNLOAD THROTTLING
+# DOWNLOAD THROTTLE
 # ============================================================
 
 def _wait_for_download_slot():
-
     global _last_download_time
 
-
     with _DOWNLOAD_LOCK:
-
         now = time.time()
 
         elapsed = (
@@ -575,14 +362,14 @@ def _wait_for_download_slot():
             - _last_download_time
         )
 
-
-        if elapsed < MIN_DOWNLOAD_GAP_SECONDS:
-
+        if (
+            elapsed
+            < MIN_DOWNLOAD_GAP_SECONDS
+        ):
             time.sleep(
                 MIN_DOWNLOAD_GAP_SECONDS
                 - elapsed
             )
-
 
         _last_download_time = (
             time.time()
@@ -590,30 +377,25 @@ def _wait_for_download_slot():
 
 
 # ============================================================
-# CLEAN YAHOO DATA
+# CLEAN PRICE DATA
 # ============================================================
 
-def _clean_download(
-    dataframe: pd.DataFrame,
+def _clean_price_data(
+    frame: pd.DataFrame,
 ):
-
-    if dataframe is None:
+    if frame is None:
         return pd.DataFrame()
 
-
-    data = dataframe.copy()
-
+    data = frame.copy()
 
     if isinstance(
         data.columns,
         pd.MultiIndex,
     ):
-
         data.columns = (
             data.columns
             .get_level_values(0)
         )
-
 
     required = [
         "Open",
@@ -622,50 +404,132 @@ def _clean_download(
         "Close",
     ]
 
-
     if not all(
-        column in data.columns
-        for column in required
+        name in data.columns
+        for name in required
     ):
-
         return pd.DataFrame()
 
+    if "Volume" not in data.columns:
+        data["Volume"] = 0.0
+
+    data = data[
+        [
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume",
+        ]
+    ].copy()
 
     data = data.dropna(
-        subset=required
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+        ]
     )
 
+    data = data.sort_index()
 
     return data
 
 
 # ============================================================
-# ONE CONTROLLED YAHOO DOWNLOAD
+# SAFE YAHOO PERIODS
 # ============================================================
 
-def _download_market_data(
+def safe_native_period(
+    period: str,
+    interval: str,
+):
+    period = str(
+        period or "1mo"
+    ).lower().strip()
+
+    interval = str(
+        interval or "15m"
+    ).lower().strip()
+
+    if interval == "1m":
+        if period not in {
+            "1d",
+            "5d",
+            "7d",
+        }:
+            return "5d"
+
+    if interval in {
+        "2m",
+        "5m",
+        "15m",
+        "30m",
+    }:
+        if period not in {
+            "1d",
+            "5d",
+            "1mo",
+        }:
+            return "1mo"
+
+    return period
+
+
+# ============================================================
+# NATIVE YAHOO DOWNLOAD
+# ============================================================
+
+def _download_native(
     symbol: str,
     period: str,
     interval: str,
 ):
+    period = safe_native_period(
+        period,
+        interval,
+    )
+
+    fresh = _cache_get(
+        symbol,
+        period,
+        interval,
+    )
+
+    if (
+        fresh is not None
+        and len(fresh) >= 80
+    ):
+        return fresh
 
     if yahoo_cooldown_active():
-
-        raise RuntimeError(
-            "Yahoo data source is "
-            "temporarily cooling down "
-            f"for approximately "
-            f"{yahoo_cooldown_remaining()} "
-            "seconds"
+        stale = _cache_get(
+            symbol,
+            period,
+            interval,
+            allow_stale=True,
         )
 
+        if (
+            stale is not None
+            and len(stale) >= 80
+        ):
+            return stale
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Yahoo market data is "
+                "temporarily cooling down "
+                f"({yahoo_cooldown_remaining()}s)"
+            ),
+        )
 
     _wait_for_download_slot()
 
-
     try:
-
-        data = yf.download(
+        raw = yf.download(
             symbol,
             period=period,
             interval=interval,
@@ -674,40 +538,230 @@ def _download_market_data(
             threads=False,
         )
 
+        data = _clean_price_data(
+            raw
+        )
 
-        cleaned = _clean_download(
-            data
+        if data.empty:
+            raise ValueError(
+                "Yahoo returned no usable data"
+            )
+
+        _cache_put(
+            symbol,
+            period,
+            interval,
+            data,
+            source="YAHOO",
+        )
+
+        return data.copy()
+
+    except Exception as exc:
+        if _looks_like_rate_limit(
+            exc
+        ):
+            activate_yahoo_cooldown()
+
+        stale = _cache_get(
+            symbol,
+            period,
+            interval,
+            allow_stale=True,
+        )
+
+        if (
+            stale is not None
+            and len(stale) >= 80
+        ):
+            return stale
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Market data unavailable: "
+                f"{symbol} {period} {interval}: "
+                f"{exc}"
+            ),
         )
 
 
-        if cleaned.empty:
+# ============================================================
+# LOCAL RESAMPLING
+# ============================================================
 
-            raise ValueError(
-                "Yahoo returned no usable rows"
+def _resample_ohlcv(
+    base: pd.DataFrame,
+    rule: str,
+):
+    data = base.resample(
+        rule,
+        label="right",
+        closed="right",
+    ).agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum",
+    })
+
+    data = data.dropna(
+        subset=[
+            "Open",
+            "High",
+            "Low",
+            "Close",
+        ]
+    )
+
+    return data
+
+
+def _derived_data(
+    symbol: str,
+    period: str,
+    interval: str,
+):
+    """
+    Generate common higher timeframes locally.
+
+    30m is derived from native 15m.
+
+    1h for short histories can also be derived from 15m.
+
+    Longer hourly history is downloaded natively because
+    Yahoo does not provide enough 15m history to truthfully
+    create a multi-month 1h backtest.
+    """
+
+    interval = interval.lower()
+
+    existing = _cache_get(
+        symbol,
+        period,
+        interval,
+    )
+
+    if (
+        existing is not None
+        and len(existing) >= 80
+    ):
+        return existing
+
+    # --------------------------------------------------------
+    # 30 MINUTES FROM 15 MINUTES
+    # --------------------------------------------------------
+
+    if interval == "30m":
+        base_period = safe_native_period(
+            period,
+            "15m",
+        )
+
+        base = _download_native(
+            symbol,
+            base_period,
+            "15m",
+        )
+
+        derived = _resample_ohlcv(
+            base,
+            "30min",
+        )
+
+        if len(derived) >= 80:
+            _cache_put(
+                symbol,
+                period,
+                "30m",
+                derived,
+                source="RESAMPLED_15M",
             )
 
+            return derived.copy()
 
-        return cleaned
+    # --------------------------------------------------------
+    # SHORT 1H HISTORY FROM 15M
+    # --------------------------------------------------------
 
+    if (
+        interval in {
+            "60m",
+            "1h",
+        }
+        and period in {
+            "1d",
+            "5d",
+            "1mo",
+        }
+    ):
+        base = _download_native(
+            symbol,
+            safe_native_period(
+                period,
+                "15m",
+            ),
+            "15m",
+        )
 
-    except Exception as exc:
+        derived = _resample_ohlcv(
+            base,
+            "1h",
+        )
 
-        if _is_rate_limit_error(
-            exc
-        ):
+        if len(derived) >= 80:
+            _cache_put(
+                symbol,
+                period,
+                interval,
+                derived,
+                source="RESAMPLED_15M",
+            )
 
-            activate_yahoo_cooldown()
+            return derived.copy()
 
-            raise RuntimeError(
-                "Yahoo rate limit detected"
-            ) from exc
+    # --------------------------------------------------------
+    # 2H / 4H FROM NATIVE 1H
+    # --------------------------------------------------------
 
+    if interval in {
+        "2h",
+        "4h",
+    }:
+        base = _download_native(
+            symbol,
+            period,
+            "1h",
+        )
 
-        raise
+        rule = (
+            "2h"
+            if interval == "2h"
+            else "4h"
+        )
+
+        derived = _resample_ohlcv(
+            base,
+            rule,
+        )
+
+        if len(derived) >= 80:
+            _cache_put(
+                symbol,
+                period,
+                interval,
+                derived,
+                source="RESAMPLED_1H",
+            )
+
+            return derived.copy()
+
+    return None
 
 
 # ============================================================
-# PUBLIC MARKET-DATA FUNCTION
+# PUBLIC DATA ACCESS
 # ============================================================
 
 def get_data(
@@ -715,172 +769,69 @@ def get_data(
     period: str = "1mo",
     interval: str = "15m",
 ):
-
     symbol = str(
         symbol
     ).strip()
 
-    interval = str(
-        interval
+    period = str(
+        period or "1mo"
     ).lower().strip()
 
+    interval = str(
+        interval or "15m"
+    ).lower().strip()
 
     if not symbol:
-
         raise HTTPException(
             status_code=400,
             detail="Market symbol required",
         )
 
+    # --------------------------------------------------------
+    # EXACT CACHE
+    # --------------------------------------------------------
 
-    periods = fallback_periods(
+    cached = _cache_get(
+        symbol,
+        period,
+        interval,
+    )
+
+    if (
+        cached is not None
+        and len(cached) >= 80
+    ):
+        return cached
+
+    # --------------------------------------------------------
+    # TRY LOCAL DERIVATION FIRST
+    # --------------------------------------------------------
+
+    derived = _derived_data(
+        symbol,
+        period,
+        interval,
+    )
+
+    if (
+        derived is not None
+        and len(derived) >= 80
+    ):
+        return derived
+
+    # --------------------------------------------------------
+    # OTHERWISE USE NATIVE YAHOO
+    # --------------------------------------------------------
+
+    return _download_native(
+        symbol,
         period,
         interval,
     )
 
 
-    errors = []
-
-
-    # ========================================================
-    # FIRST PASS: FRESH CACHE
-    # ========================================================
-
-    for safe_p in periods:
-
-        cached = _get_fresh_cache(
-            symbol,
-            safe_p,
-            interval,
-        )
-
-
-        if (
-            cached is not None
-            and len(cached) >= 80
-        ):
-
-            return cached
-
-
-    # ========================================================
-    # IF YAHOO IS COOLING DOWN, USE STALE CACHE
-    # ========================================================
-
-    if yahoo_cooldown_active():
-
-        for safe_p in periods:
-
-            stale = _get_stale_cache(
-                symbol,
-                safe_p,
-                interval,
-            )
-
-
-            if (
-                stale is not None
-                and len(stale) >= 80
-            ):
-
-                return stale
-
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Yahoo market data is "
-                "temporarily rate limited "
-                "and no cached dataset "
-                "is available for "
-                f"{symbol} {interval}"
-            ),
-        )
-
-
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
-
-    for safe_p in periods:
-
-        try:
-
-            data = _download_market_data(
-                symbol=symbol,
-                period=safe_p,
-                interval=interval,
-            )
-
-
-            if not data.empty:
-
-                _store_cache(
-                    symbol=symbol,
-                    period=safe_p,
-                    interval=interval,
-                    dataframe=data,
-                )
-
-
-            if len(data) >= 80:
-
-                return data.copy()
-
-
-            errors.append(
-                f"{safe_p}: only "
-                f"{len(data)} rows"
-            )
-
-
-        except Exception as exc:
-
-            errors.append(
-                f"{safe_p}: {exc}"
-            )
-
-
-            # If this failure activated the
-            # rate-limit cooldown, stop making
-            # further Yahoo requests immediately.
-            if yahoo_cooldown_active():
-                break
-
-
-    # ========================================================
-    # FINAL STALE-CACHE FALLBACK
-    # ========================================================
-
-    for safe_p in periods:
-
-        stale = _get_stale_cache(
-            symbol,
-            safe_p,
-            interval,
-        )
-
-
-        if (
-            stale is not None
-            and len(stale) >= 80
-        ):
-
-            return stale
-
-
-    raise HTTPException(
-        status_code=502,
-        detail=(
-            "Market data unavailable for "
-            f"{symbol} at {interval}. "
-            + " | ".join(errors)
-        ),
-    )
-
-
 # ============================================================
-# BUILD AI DATASET
+# AI BUILD PIPELINE
 # ============================================================
 
 def build(
@@ -888,7 +839,6 @@ def build(
     period: str,
     interval: str,
 ):
-
     raw = get_data(
         symbol,
         period,
@@ -903,13 +853,10 @@ def build(
         indicators
     )
 
-    enriched = enrich(
+    return enrich(
         indicators,
         model,
     )
-
-
-    return enriched
 
 
 # ============================================================
@@ -918,23 +865,18 @@ def build(
 
 @app.get("/")
 def root():
-
     return {
         "name":
-            "Jasong AI Trader V4.4",
+            "Jasong AI Trader V4.6",
 
         "version":
-            "4.4.0",
+            "4.6.0",
 
         "mode":
             "paper-trading",
 
         "live_execution":
             False,
-
-        "message":
-            "AI-assisted research "
-            "and paper trading only.",
     }
 
 
@@ -944,47 +886,39 @@ def root():
 
 @app.get("/health")
 def health():
-
     return {
         "status": "ok",
-        "version": "4.4.0",
-        "live_execution": False,
+        "version": "4.6.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
             yahoo_cooldown_active(),
         "yahoo_cooldown_remaining":
             yahoo_cooldown_remaining(),
+        "live_execution":
+            False,
     }
 
 
 # ============================================================
-# CACHE DIAGNOSTICS
+# DATA CACHE
 # ============================================================
 
 @app.get("/data-cache")
 def data_cache():
-
     return {
         "status": "ok",
-        **market_cache_stats(),
+        **cache_stats(),
     }
 
 
 @app.post("/data-cache/clear")
 def clear_data_cache():
-
-    removed = (
-        clear_market_cache()
-    )
-
+    removed = clear_market_cache()
 
     return {
-        "status":
-            "cleared",
-
-        "entries_removed":
-            removed,
+        "status": "cleared",
+        "entries_removed": removed,
     }
 
 
@@ -994,22 +928,12 @@ def clear_data_cache():
 
 @app.get("/signal")
 def signal(
-    symbol: str =
-        "EURUSD=X",
-
-    risk_mode: str =
-        "Balanced",
-
-    period: str =
-        "1mo",
-
-    interval: str =
-        "15m",
-
-    balance: float =
-        10000.0,
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    balance: float = 10000.0,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1019,44 +943,32 @@ def signal(
         "balance",
     )
 
+    profile = PROFILES[
+        risk_mode
+    ]
 
-    profile = (
-        PROFILES[
-            risk_mode
-        ]
-    )
-
-
-    data = build(
+    signal_data = build(
         symbol,
         period,
         interval,
     )
 
-
     result = decision(
-        data,
+        signal_data,
         profile,
     )
 
-
     result.update({
-        "symbol":
-            symbol,
-
-        "risk_mode":
-            risk_mode,
-
+        "symbol": symbol,
+        "risk_mode": risk_mode,
         "suggested_paper_stake":
             stake_for_balance(
                 balance,
                 profile.risk_per_trade,
             ),
-
         "live_execution":
             False,
     })
-
 
     return result
 
@@ -1067,25 +979,13 @@ def signal(
 
 @app.get("/backtest")
 def run_backtest(
-    symbol: str =
-        "EURUSD=X",
-
-    risk_mode: str =
-        "Balanced",
-
-    period: str =
-        "1mo",
-
-    interval: str =
-        "15m",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1094,35 +994,24 @@ def run_backtest(
         starting_balance
     )
 
-
     data = build(
         symbol,
         period,
         interval,
     )
 
-
     result = backtest(
         data,
-        PROFILES[
-            risk_mode
-        ],
+        PROFILES[risk_mode],
         starting_balance,
         payout,
     )
 
-
     result.update({
-        "symbol":
-            symbol,
-
-        "risk_mode":
-            risk_mode,
-
-        "live_execution":
-            False,
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "live_execution": False,
     })
-
 
     return result
 
@@ -1138,15 +1027,12 @@ def create_paper_trade(
     confidence: float,
     entry_price: float,
     stake: float,
-    db: Session =
-        Depends(get_db),
+    db: Session = Depends(get_db),
 ):
-
     if direction not in {
         "BUY",
         "SELL",
     }:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1155,9 +1041,7 @@ def create_paper_trade(
             ),
         )
 
-
     if stake <= 0:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1165,7 +1049,6 @@ def create_paper_trade(
                 "greater than 0"
             ),
         )
-
 
     trade = Trade(
         symbol=symbol,
@@ -1175,7 +1058,6 @@ def create_paper_trade(
         stake=stake,
         mode="paper",
     )
-
 
     db.add(
         trade
@@ -1187,25 +1069,17 @@ def create_paper_trade(
         trade
     )
 
-
     return {
-        "id":
-            trade.id,
-
-        "status":
-            "recorded",
-
-        "live_execution":
-            False,
+        "id": trade.id,
+        "status": "recorded",
+        "live_execution": False,
     }
 
 
 @app.get("/paper-trades")
 def list_paper_trades(
-    db: Session =
-        Depends(get_db),
+    db: Session = Depends(get_db),
 ):
-
     rows = (
         db.query(Trade)
         .order_by(
@@ -1215,40 +1089,20 @@ def list_paper_trades(
         .all()
     )
 
-
     return [
         {
-            "id":
-                row.id,
-
+            "id": row.id,
             "created_at":
                 row.created_at.isoformat(),
-
-            "symbol":
-                row.symbol,
-
-            "direction":
-                row.direction,
-
-            "confidence":
-                row.confidence,
-
-            "entry_price":
-                row.entry_price,
-
-            "stake":
-                row.stake,
-
-            "result":
-                row.result,
-
-            "pnl":
-                row.pnl,
-
-            "closed":
-                row.closed,
+            "symbol": row.symbol,
+            "direction": row.direction,
+            "confidence": row.confidence,
+            "entry_price": row.entry_price,
+            "stake": row.stake,
+            "result": row.result,
+            "pnl": row.pnl,
+            "closed": row.closed,
         }
-
         for row in rows
     ]
 
@@ -1259,22 +1113,12 @@ def list_paper_trades(
 
 @app.get("/backtest-all")
 def run_backtest_all(
-    risk_mode: str =
-        "Balanced",
-
-    period: str =
-        "1mo",
-
-    interval: str =
-        "15m",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1283,16 +1127,11 @@ def run_backtest_all(
         starting_balance
     )
 
-
-    profile = (
-        PROFILES[
-            risk_mode
-        ]
-    )
-
+    profile = PROFILES[
+        risk_mode
+    ]
 
     results = []
-
 
     for (
         market_name,
@@ -1300,94 +1139,77 @@ def run_backtest_all(
     ) in MARKETS.items():
 
         try:
-
             data = build(
                 symbol,
                 period,
                 interval,
             )
 
-
-            result = backtest(
+            tested = backtest(
                 data,
                 profile,
                 starting_balance,
                 payout,
             )
 
-
             results.append({
                 "market":
                     market_name,
-
                 "symbol":
                     symbol,
-
                 "trades":
-                    result.get(
+                    tested.get(
                         "trades",
                         0,
                     ),
-
                 "wins":
-                    result.get(
+                    tested.get(
                         "wins",
                         0,
                     ),
-
                 "losses":
-                    result.get(
+                    tested.get(
                         "losses",
                         0,
                     ),
-
                 "win_rate":
-                    result.get(
+                    tested.get(
                         "win_rate",
                         0.0,
                     ),
-
                 "return_pct":
-                    result.get(
+                    tested.get(
                         "return_pct",
                         0.0,
                     ),
-
                 "max_drawdown":
-                    result.get(
+                    tested.get(
                         "max_drawdown",
                         0.0,
                     ),
-
                 "profit_factor":
-                    result.get(
+                    tested.get(
                         "profit_factor",
                         0.0,
                     ),
-
                 "average_trade_pnl":
-                    result.get(
+                    tested.get(
                         "average_trade_pnl",
                         0.0,
                     ),
             })
 
-
         except Exception as exc:
-
             results.append({
                 "market":
                     market_name,
-
                 "symbol":
                     symbol,
-
                 "error":
                     str(exc),
             })
 
-
-    ranked = sorted(
+    results = sorted(
         results,
         key=lambda item:
             item.get(
@@ -1397,23 +1219,17 @@ def run_backtest_all(
         reverse=True,
     )
 
-
     return {
         "risk_mode":
             risk_mode,
-
         "period":
             period,
-
         "interval":
             interval,
-
         "markets_tested":
             len(MARKETS),
-
         "results":
-            ranked,
-
+            results,
         "live_execution":
             False,
     }
@@ -1425,28 +1241,14 @@ def run_backtest_all(
 
 @app.get("/threshold-sweep")
 def run_threshold_sweep(
-    symbol: str =
-        "EURUSD=X",
-
-    risk_mode: str =
-        "Balanced",
-
-    period: str =
-        "1mo",
-
-    interval: str =
-        "15m",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
-
-    holding_candles: int =
-        4,
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    holding_candles: int = 4,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1455,93 +1257,61 @@ def run_threshold_sweep(
         starting_balance
     )
 
-
     raw = get_data(
         symbol,
         period,
         interval,
     )
 
-
     indicators = add_indicators(
         raw
     )
 
-
     model = train_model(
         indicators
     )
-
 
     enriched = enrich(
         indicators,
         model,
     )
 
-
     result = threshold_sweep(
         enriched,
-        PROFILES[
-            risk_mode
-        ],
+        PROFILES[risk_mode],
         starting_balance=
             starting_balance,
-        payout=
-            payout,
+        payout=payout,
         holding_candles=
             holding_candles,
     )
 
-
     result.update({
-        "symbol":
-            symbol,
-
-        "risk_mode":
-            risk_mode,
-
-        "period":
-            period,
-
-        "interval":
-            interval,
-
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
         "holding_candles":
             holding_candles,
-
-        "live_execution":
-            False,
+        "live_execution": False,
     })
-
 
     return result
 
 
 # ============================================================
-# STRATEGY OPTIMISE
+# STRATEGY OPTIMIZER
 # ============================================================
 
 @app.get("/strategy-optimize")
 def run_strategy_optimize(
-    symbol: str =
-        "EURUSD=X",
-
-    risk_mode: str =
-        "Balanced",
-
-    period: str =
-        "1mo",
-
-    interval: str =
-        "15m",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1549,7 +1319,6 @@ def run_strategy_optimize(
     validate_balance(
         starting_balance
     )
-
 
     raw = get_data(
         symbol,
@@ -1557,75 +1326,49 @@ def run_strategy_optimize(
         interval,
     )
 
-
     indicators = add_indicators(
         raw
     )
 
-
     model = train_model(
         indicators
     )
-
 
     enriched = enrich(
         indicators,
         model,
     )
 
-
     result = optimise_strategy(
         enriched,
-        PROFILES[
-            risk_mode
-        ],
+        PROFILES[risk_mode],
         starting_balance=
             starting_balance,
-        payout=
-            payout,
+        payout=payout,
     )
 
-
     result.update({
-        "symbol":
-            symbol,
-
-        "risk_mode":
-            risk_mode,
-
-        "period":
-            period,
-
-        "interval":
-            interval,
-
-        "live_execution":
-            False,
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
+        "live_execution": False,
     })
-
 
     return result
 
 
 # ============================================================
-# OPTIMISE TIMEFRAMES
+# OPTIMIZE ALL TIMEFRAMES
 # ============================================================
 
 @app.get("/optimize-timeframes")
 def run_optimize_timeframes(
-    symbol: str =
-        "EURUSD=X",
-
-    risk_mode: str =
-        "Balanced",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1634,44 +1377,25 @@ def run_optimize_timeframes(
         starting_balance
     )
 
-
     result = optimise_all_timeframes(
-        symbol=
-            symbol,
-
-        get_data_func=
-            get_data,
-
+        symbol=symbol,
+        get_data_func=get_data,
         add_indicators_func=
             add_indicators,
-
         train_model_func=
             train_model,
-
-        enrich_func=
-            enrich,
-
+        enrich_func=enrich,
         profile=
-            PROFILES[
-                risk_mode
-            ],
-
+            PROFILES[risk_mode],
         starting_balance=
             starting_balance,
-
-        payout=
-            payout,
+        payout=payout,
     )
 
-
     result.update({
-        "risk_mode":
-            risk_mode,
-
-        "live_execution":
-            False,
+        "risk_mode": risk_mode,
+        "live_execution": False,
     })
-
 
     return result
 
@@ -1682,19 +1406,11 @@ def run_optimize_timeframes(
 
 @app.get("/scan-market")
 def run_scan_market(
-    market: str =
-        "EURUSD",
-
-    risk_mode: str =
-        "Balanced",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
+    market: str = "EURUSD",
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -1703,14 +1419,9 @@ def run_scan_market(
         starting_balance
     )
 
-
-    market = (
-        market.upper()
-    )
-
+    market = market.upper()
 
     if market not in MARKETS:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1719,57 +1430,36 @@ def run_scan_market(
             ),
         )
 
-
-    symbol = (
-        MARKETS[
-            market
-        ]
-    )
-
+    symbol = MARKETS[
+        market
+    ]
 
     result = optimise_all_timeframes(
-        symbol=
-            symbol,
-
-        get_data_func=
-            get_data,
-
+        symbol=symbol,
+        get_data_func=get_data,
         add_indicators_func=
             add_indicators,
-
         train_model_func=
             train_model,
-
-        enrich_func=
-            enrich,
-
+        enrich_func=enrich,
         profile=
-            PROFILES[
-                risk_mode
-            ],
-
+            PROFILES[risk_mode],
         starting_balance=
             starting_balance,
-
-        payout=
-            payout,
+        payout=payout,
     )
-
 
     best = result.get(
         "best"
     )
 
-
     if best:
-
         trades = int(
             best.get(
                 "trades",
                 0,
             )
         )
-
 
         win_rate = float(
             best.get(
@@ -1778,7 +1468,6 @@ def run_scan_market(
             )
         )
 
-
         profit_factor = float(
             best.get(
                 "profit_factor",
@@ -1786,14 +1475,12 @@ def run_scan_market(
             )
         )
 
-
         return_pct = float(
             best.get(
                 "return_pct",
                 0.0,
             )
         )
-
 
         max_drawdown = abs(
             float(
@@ -1804,17 +1491,17 @@ def run_scan_market(
             )
         )
 
-
-        status = classify_result(
-            trades,
-            win_rate,
-            profit_factor,
-            return_pct,
-            max_drawdown,
+        best["status"] = (
+            classify_result(
+                trades,
+                win_rate,
+                profit_factor,
+                return_pct,
+                max_drawdown,
+            )
         )
 
-
-        market_score = (
+        best["market_score"] = (
             calculate_market_score(
                 trades,
                 win_rate,
@@ -1824,49 +1511,27 @@ def run_scan_market(
             )
         )
 
-
-        best[
-            "status"
-        ] = status
-
-        best[
-            "market_score"
-        ] = market_score
-
-
     result.update({
-        "market":
-            market,
-
-        "symbol":
-            symbol,
-
-        "risk_mode":
-            risk_mode,
-
-        "status":
-            (
-                best.get(
-                    "status"
-                )
-                if best
-                else "NO_DATA"
-            ),
-
-        "market_score":
-            (
-                best.get(
-                    "market_score",
-                    0.0,
-                )
-                if best
-                else 0.0
-            ),
-
-        "live_execution":
-            False,
+        "market": market,
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "status": (
+            best.get(
+                "status"
+            )
+            if best
+            else "NO_DATA"
+        ),
+        "market_score": (
+            best.get(
+                "market_score",
+                0.0,
+            )
+            if best
+            else 0.0
+        ),
+        "live_execution": False,
     })
-
 
     return result
 
@@ -1877,18 +1542,13 @@ def run_scan_market(
 
 @app.post("/rank-markets")
 def rank_markets(
-    results: list =
-        Body(...),
-
-    top_n: int =
-        3,
+    results: list = Body(...),
+    top_n: int = 3,
 ):
-
     if not isinstance(
         results,
         list,
     ):
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1896,13 +1556,10 @@ def rank_markets(
             ),
         )
 
-
     if (
         top_n < 1
-        or
-        top_n > 9
+        or top_n > 9
     ):
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1911,7 +1568,6 @@ def rank_markets(
             ),
         )
 
-
     return build_top_markets(
         results=results,
         top_n=top_n,
@@ -1919,27 +1575,19 @@ def rank_markets(
 
 
 # ============================================================
-# V4.2 FAST SCAN
+# FAST SCAN
 # ============================================================
 
 @app.get("/fast-scan")
 def run_fast_scan(
-    period: str =
-        "5d",
-
-    interval: str =
-        "15m",
-
-    top_n: int =
-        3,
+    period: str = "5d",
+    interval: str = "15m",
+    top_n: int = 3,
 ):
-
     if (
         top_n < 1
-        or
-        top_n > len(MARKETS)
+        or top_n > len(MARKETS)
     ):
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1948,64 +1596,30 @@ def run_fast_scan(
             ),
         )
 
-
     return fast_scan_markets(
-        markets=
-            MARKETS,
-
-        get_data_func=
-            get_data,
-
+        markets=MARKETS,
+        get_data_func=get_data,
         add_indicators_func=
             add_indicators,
-
-        period=
-            period,
-
-        interval=
-            interval,
-
-        top_n=
-            top_n,
+        period=period,
+        interval=interval,
+        top_n=top_n,
     )
 
 
 # ============================================================
-# V4.4 DEEP VALIDATION
-# ============================================================
-#
-# IMPORTANT:
-#
-# Deep validation is intentionally limited to ONE candidate
-# per HTTP request.
-#
-# Why?
-#
-# The heavy multi-timeframe optimiser can request several
-# market datasets. Doing this for 3 markets inside one Render
-# request was causing long-running requests and 502 failures.
-#
-# We will validate #1 first.
-# If it fails, the application can validate #2 next.
+# DEEP VALIDATE
+# ONE CANDIDATE PER REQUEST
 # ============================================================
 
 @app.post("/deep-validate")
 def run_deep_validate(
     candidates: list[dict],
-
-    risk_mode: str =
-        "Balanced",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
-
-    max_candidates: int =
-        1,
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    max_candidates: int = 1,
 ):
-
     validate_risk_mode(
         risk_mode
     )
@@ -2014,9 +1628,7 @@ def run_deep_validate(
         starting_balance
     )
 
-
     if not candidates:
-
         raise HTTPException(
             status_code=400,
             detail=(
@@ -2024,610 +1636,39 @@ def run_deep_validate(
             ),
         )
 
-
-    # V4.4 deliberately validates one market per
-    # request to protect the Render worker.
-    candidate_to_test = [
-        candidates[0]
+    candidate = candidates[
+        0
     ]
 
-
     result = validate_candidates(
-        candidates=
-            candidate_to_test,
-
+        candidates=[
+            candidate
+        ],
         optimise_all_timeframes_func=
             optimise_all_timeframes,
-
-        get_data_func=
-            get_data,
-
+        get_data_func=get_data,
         add_indicators_func=
             add_indicators,
-
         train_model_func=
             train_model,
-
-        enrich_func=
-            enrich,
-
+        enrich_func=enrich,
         profile=
-            PROFILES[
-                risk_mode
-            ],
-
+            PROFILES[risk_mode],
         starting_balance=
             starting_balance,
-
-        payout=
-            payout,
-
-        max_candidates=
-            1,
+        payout=payout,
+        max_candidates=1,
     )
 
-
-    result[
-        "requested_candidates"
-    ] = len(
-        candidates
-    )
-
-
-    result[
-        "candidates_processed_this_request"
-    ] = 1
-
-
-    result[
-        "validation_mode"
-    ] = (
-        "SEQUENTIAL_SINGLE_CANDIDATE"
-    )
-
-
-    result[
-        "next_candidate_available"
-    ] = (
-        len(candidates) > 1
-    )
-
-
-    return result
-# ============================================================
-# V4.5 AUTO VERIFIED TRADE FINDER
-# ============================================================
-
-@app.get("/find-verified-trade")
-def find_verified_trade(
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    period: str = "5d",
-    interval: str = "15m",
-    top_n: int = 3,
-):
-    """
-    V4.5 automatic trade finder.
-
-    Workflow:
-
-    1. Fast-scan all supported markets.
-    2. Take the strongest candidates.
-    3. Deep-validate them sequentially.
-    4. Stop immediately when one candidate becomes VERIFIED.
-    5. Return NO_VERIFIED_TRADE if none pass.
-
-    This endpoint finds historically validated setups.
-    It does NOT execute live trades.
-    """
-
-    # --------------------------------------------------------
-    # INPUT VALIDATION
-    # --------------------------------------------------------
-
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    if top_n < 1 or top_n > 3:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "top_n must be between "
-                "1 and 3"
-            ),
-        )
-
-    # --------------------------------------------------------
-    # STEP 1: FAST SCAN
-    # --------------------------------------------------------
-
-    try:
-
-        fast_result = fast_scan_markets(
-            markets=MARKETS,
-            get_data_func=get_data,
-            add_indicators_func=add_indicators,
-            period=period,
-            interval=interval,
-            top_n=top_n,
-        )
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Fast scan failed: "
-                f"{exc}"
-            ),
-        )
-
-    # --------------------------------------------------------
-    # FIND TOP CANDIDATES
-    # --------------------------------------------------------
-
-    candidates = (
-        fast_result.get("top_candidates")
-        or fast_result.get("ranking")
-        or fast_result.get("candidates")
-        or []
-    )
-
-    if not candidates:
-
-        return {
-            "version":
-                "V4.5",
-
-            "status":
-                "NO_CANDIDATES",
-
-            "message":
-                "Fast scan found no "
-                "trade candidates.",
-
-            "markets_tested":
-                fast_result.get(
-                    "markets_tested",
-                    len(MARKETS),
-                ),
-
-            "candidates_tested":
-                0,
-
-            "verified_trade":
-                None,
-
-            "validation_history":
-                [],
-
-            "live_execution":
-                False,
-        }
-
-    # Only use the requested shortlist.
-    candidates = candidates[:top_n]
-
-    validation_history = []
-
-    # --------------------------------------------------------
-    # STEP 2:
-    # DEEP VALIDATE SEQUENTIALLY
-    # --------------------------------------------------------
-
-    for index, candidate in enumerate(
-        candidates,
-        start=1,
-    ):
-
-        market = candidate.get(
-            "market"
-        )
-
-        symbol = candidate.get(
-            "symbol"
-        )
-
-        fast_score = candidate.get(
-            "fast_score",
-            candidate.get(
-                "score",
-                0.0,
-            ),
-        )
-
-        fast_direction = candidate.get(
-            "direction",
-            "WAIT",
-        )
-
-        # ----------------------------------------------------
-        # DEEP VALIDATION
-        # ----------------------------------------------------
-
-        try:
-
-            deep_result = validate_candidates(
-                candidates=[
-                    candidate
-                ],
-
-                optimise_all_timeframes_func=
-                    optimise_all_timeframes,
-
-                get_data_func=
-                    get_data,
-
-                add_indicators_func=
-                    add_indicators,
-
-                train_model_func=
-                    train_model,
-
-                enrich_func=
-                    enrich,
-
-                profile=
-                    PROFILES[
-                        risk_mode
-                    ],
-
-                starting_balance=
-                    starting_balance,
-
-                payout=
-                    payout,
-
-                max_candidates=
-                    1,
-            )
-
-        except Exception as exc:
-
-            validation_history.append({
-                "position":
-                    index,
-
-                "market":
-                    market,
-
-                "symbol":
-                    symbol,
-
-                "fast_score":
-                    fast_score,
-
-                "fast_direction":
-                    fast_direction,
-
-                "deep_status":
-                    "ERROR",
-
-                "verified":
-                    False,
-
-                "error":
-                    str(exc),
-            })
-
-            continue
-
-        # ----------------------------------------------------
-        # EXTRACT RESULT
-        # ----------------------------------------------------
-
-        final_market = (
-            deep_result.get(
-                "final_market"
-            )
-        )
-
-        final_status = (
-            deep_result.get(
-                "final_status",
-                "NOT_VERIFIED",
-            )
-        )
-
-        if final_market:
-
-            deep_status = (
-                final_market.get(
-                    "status",
-                    final_status,
-                )
-            )
-
-            verified = bool(
-                final_market.get(
-                    "verified",
-                    False,
-                )
-            )
-
-            history_item = {
-                "position":
-                    index,
-
-                "market":
-                    market,
-
-                "symbol":
-                    symbol,
-
-                "fast_score":
-                    fast_score,
-
-                "fast_direction":
-                    fast_direction,
-
-                "deep_status":
-                    deep_status,
-
-                "verified":
-                    verified,
-
-                "deep_score":
-                    final_market.get(
-                        "deep_score"
-                    ),
-
-                "trades":
-                    final_market.get(
-                        "trades"
-                    ),
-
-                "wins":
-                    final_market.get(
-                        "wins"
-                    ),
-
-                "losses":
-                    final_market.get(
-                        "losses"
-                    ),
-
-                "win_rate":
-                    final_market.get(
-                        "win_rate"
-                    ),
-
-                "profit_factor":
-                    final_market.get(
-                        "profit_factor"
-                    ),
-
-                "return_pct":
-                    final_market.get(
-                        "return_pct"
-                    ),
-
-                "max_drawdown":
-                    final_market.get(
-                        "max_drawdown"
-                    ),
-
-                "period":
-                    final_market.get(
-                        "period"
-                    ),
-
-                "interval":
-                    final_market.get(
-                        "interval"
-                    ),
-
-                "threshold":
-                    final_market.get(
-                        "threshold"
-                    ),
-
-                "holding_candles":
-                    final_market.get(
-                        "holding_candles"
-                    ),
-
-                "validated_sample":
-                    final_market.get(
-                        "validated_sample"
-                    ),
-            }
-
-        else:
-
-            verified = False
-
-            history_item = {
-                "position":
-                    index,
-
-                "market":
-                    market,
-
-                "symbol":
-                    symbol,
-
-                "fast_score":
-                    fast_score,
-
-                "fast_direction":
-                    fast_direction,
-
-                "deep_status":
-                    final_status,
-
-                "verified":
-                    False,
-            }
-
-        validation_history.append(
-            history_item
-        )
-
-        # ----------------------------------------------------
-        # STEP 3:
-        # STOP ON FIRST VERIFIED MARKET
-        # ----------------------------------------------------
-
-        if verified:
-
-            # -----------------------------------------------
-            # CHECK DIRECTION AGREEMENT
-            # -----------------------------------------------
-
-            deep_direction = (
-                final_market.get(
-                    "direction",
-                    "WAIT",
-                )
-            )
-
-            direction_agreement = (
-                fast_direction
-                == deep_direction
-            )
-
-            # If fast and deep validation disagree on
-            # direction, do NOT return it as final.
-            if not direction_agreement:
-
-                validation_history[
-                    -1
-                ][
-                    "deep_status"
-                ] = (
-                    "DIRECTION_MISMATCH"
-                )
-
-                validation_history[
-                    -1
-                ][
-                    "verified"
-                ] = False
-
-                continue
-
-            # -----------------------------------------------
-            # VERIFIED TRADE FOUND
-            # -----------------------------------------------
-
-            verified_trade = {
-                **final_market,
-
-                "fast_rank":
-                    index,
-
-                "fast_score":
-                    fast_score,
-
-                "fast_direction":
-                    fast_direction,
-
-                "direction_agreement":
-                    True,
-            }
-
-            return {
-                "version":
-                    "V4.5",
-
-                "status":
-                    "VERIFIED_TRADE_FOUND",
-
-                "message":
-                    (
-                        f"{market} passed "
-                        "fast scan and deep "
-                        "validation."
-                    ),
-
-                "risk_mode":
-                    risk_mode,
-
-                "markets_tested":
-                    fast_result.get(
-                        "markets_tested",
-                        len(MARKETS),
-                    ),
-
-                "fast_candidates":
-                    len(candidates),
-
-                "candidates_tested":
-                    index,
-
-                "verified_trade":
-                    verified_trade,
-
-                "validation_history":
-                    validation_history,
-
-                "live_execution":
-                    False,
-
-                "warning":
-                    (
-                        "Historical validation "
-                        "does not guarantee the "
-                        "next trade will win."
-                    ),
-            }
-
-    # --------------------------------------------------------
-    # NO VERIFIED TRADE
-    # --------------------------------------------------------
-
-    return {
-        "version":
-            "V4.5",
-
-        "status":
-            "NO_VERIFIED_TRADE",
-
-        "message":
-            (
-                "None of the shortlisted "
-                "markets passed deep "
-                "validation."
-            ),
-
-        "risk_mode":
-            risk_mode,
-
-        "markets_tested":
-            fast_result.get(
-                "markets_tested",
-                len(MARKETS),
-            ),
-
-        "fast_candidates":
+    result.update({
+        "requested_candidates":
             len(candidates),
-
-        "candidates_tested":
-            len(
-                validation_history
-            ),
-
-        "verified_trade":
-            None,
-
-        "validation_history":
-            validation_history,
-
+        "candidates_processed_this_request":
+            1,
+        "validation_mode":
+            "V4.6_SINGLE_CANDIDATE",
         "live_execution":
             False,
+    })
 
-        "warning":
-            (
-                "No trade should be forced "
-                "when validation criteria "
-                "are not satisfied."
-            ),
-    }
+    return result
