@@ -25,6 +25,7 @@ from strategy_optimizer import optimise_strategy
 from optimizer import threshold_sweep
 
 from indicators import add_indicators
+
 from engine import (
     PROFILES,
     train_model,
@@ -45,6 +46,27 @@ from database import (
 
 
 # ============================================================
+# JASONG AI TRADER V4.4
+# ============================================================
+#
+# Main improvements:
+#
+# 1. Fresh market-data cache
+# 2. Stale-cache fallback
+# 3. Yahoo rate-limit cooldown
+# 4. Download throttling
+# 5. Safe intraday periods
+# 6. Reduced repeated Yahoo requests
+# 7. One deep-validation candidate per request
+# 8. Zero-balance protection
+# 9. Cache diagnostics
+# 10. No duplicate /backtest-all route
+#
+# Paper trading / research only.
+# ============================================================
+
+
+# ============================================================
 # MARKETS
 # ============================================================
 
@@ -62,12 +84,12 @@ MARKETS = {
 
 
 # ============================================================
-# APP
+# FASTAPI APP
 # ============================================================
 
 app = FastAPI(
-    title="Jasong AI Trader V4.3 API",
-    version="4.3.0",
+    title="Jasong AI Trader V4.4 API",
+    version="4.4.0",
 )
 
 app.add_middleware(
@@ -96,7 +118,7 @@ def get_db():
 
 
 # ============================================================
-# V4.3 MARKET DATA CACHE
+# MARKET-DATA CACHE
 # ============================================================
 
 @dataclass
@@ -110,18 +132,69 @@ _DATA_CACHE: Dict[
     CacheEntry,
 ] = {}
 
+
 _CACHE_LOCK = threading.Lock()
+
 _DOWNLOAD_LOCK = threading.Lock()
 
+
+# Fresh data is preferred for 5 minutes.
 CACHE_TTL_SECONDS = 300
 
-MIN_DOWNLOAD_GAP_SECONDS = 1.25
+
+# If Yahoo temporarily fails, data up to 6 hours old
+# may be used as a defensive fallback.
+STALE_CACHE_MAX_AGE_SECONDS = 21600
+
+
+# Keep Yahoo downloads spaced apart.
+MIN_DOWNLOAD_GAP_SECONDS = 2.0
+
+
+# When Yahoo reports rate limiting, stop immediately
+# hammering it for a while.
+YAHOO_RATE_LIMIT_COOLDOWN_SECONDS = 180
+
 
 _last_download_time = 0.0
 
+_yahoo_cooldown_until = 0.0
+
 
 # ============================================================
-# PERIOD SAFETY
+# BASIC VALIDATION
+# ============================================================
+
+def validate_risk_mode(
+    risk_mode: str,
+):
+
+    if risk_mode not in PROFILES:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode",
+        )
+
+
+def validate_balance(
+    value: float,
+    field_name: str = "starting_balance",
+):
+
+    if value <= 0:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{field_name} must be "
+                "greater than 0"
+            ),
+        )
+
+
+# ============================================================
+# SAFE PERIOD HANDLING
 # ============================================================
 
 def safe_period(
@@ -137,21 +210,21 @@ def safe_period(
         interval or "15m"
     ).lower().strip()
 
-    # Yahoo 1-minute data is especially restricted.
+
+    # Yahoo 1-minute candles have tight restrictions.
     if interval == "1m":
 
-        allowed = {
+        if period not in {
             "1d",
             "5d",
             "7d",
-        }
-
-        if period not in allowed:
+        }:
             return "5d"
 
         return period
 
-    # Intraday data has tighter history limits.
+
+    # Other intraday intervals.
     if interval in {
         "2m",
         "5m",
@@ -162,16 +235,15 @@ def safe_period(
         "1h",
     }:
 
-        allowed = {
+        if period not in {
             "1d",
             "5d",
             "1mo",
-        }
-
-        if period not in allowed:
+        }:
             return "1mo"
 
         return period
+
 
     return period
 
@@ -181,10 +253,15 @@ def fallback_periods(
     interval: str,
 ) -> list[str]:
 
+    interval = str(
+        interval
+    ).lower().strip()
+
     requested = safe_period(
         period,
         interval,
     )
+
 
     if interval == "1m":
 
@@ -193,6 +270,7 @@ def fallback_periods(
             "5d",
             "1d",
         ]
+
 
     elif interval in {
         "2m",
@@ -210,6 +288,7 @@ def fallback_periods(
             "5d",
         ]
 
+
     else:
 
         candidates = [
@@ -218,14 +297,16 @@ def fallback_periods(
             "1mo",
         ]
 
-    result = []
+
+    unique = []
 
     for item in candidates:
 
-        if item not in result:
-            result.append(item)
+        if item not in unique:
+            unique.append(item)
 
-    return result
+
+    return unique
 
 
 # ============================================================
@@ -245,11 +326,11 @@ def _cache_key(
     )
 
 
-def _get_cached(
+def _get_cache_entry(
     symbol: str,
     period: str,
     interval: str,
-) -> Optional[pd.DataFrame]:
+) -> Optional[CacheEntry]:
 
     key = _cache_key(
         symbol,
@@ -257,32 +338,71 @@ def _get_cached(
         interval,
     )
 
-    now = time.time()
-
     with _CACHE_LOCK:
 
         entry = _DATA_CACHE.get(
             key
         )
 
-        if entry is None:
-            return None
+        return entry
 
-        age = (
-            now
-            - entry.created_at
-        )
 
-        if age > CACHE_TTL_SECONDS:
+def _get_fresh_cache(
+    symbol: str,
+    period: str,
+    interval: str,
+) -> Optional[pd.DataFrame]:
 
-            _DATA_CACHE.pop(
-                key,
-                None,
-            )
+    entry = _get_cache_entry(
+        symbol,
+        period,
+        interval,
+    )
 
-            return None
+    if entry is None:
+        return None
 
-        return entry.dataframe.copy()
+
+    age = (
+        time.time()
+        - entry.created_at
+    )
+
+
+    if age > CACHE_TTL_SECONDS:
+        return None
+
+
+    return entry.dataframe.copy()
+
+
+def _get_stale_cache(
+    symbol: str,
+    period: str,
+    interval: str,
+) -> Optional[pd.DataFrame]:
+
+    entry = _get_cache_entry(
+        symbol,
+        period,
+        interval,
+    )
+
+    if entry is None:
+        return None
+
+
+    age = (
+        time.time()
+        - entry.created_at
+    )
+
+
+    if age > STALE_CACHE_MAX_AGE_SECONDS:
+        return None
+
+
+    return entry.dataframe.copy()
 
 
 def _store_cache(
@@ -300,14 +420,9 @@ def _store_cache(
 
     with _CACHE_LOCK:
 
-        _DATA_CACHE[key] = (
-            CacheEntry(
-                dataframe=
-                    dataframe.copy(),
-
-                created_at=
-                    time.time(),
-            )
+        _DATA_CACHE[key] = CacheEntry(
+            dataframe=dataframe.copy(),
+            created_at=time.time(),
         )
 
 
@@ -321,6 +436,7 @@ def clear_market_cache():
 
         _DATA_CACHE.clear()
 
+
     return count
 
 
@@ -328,9 +444,10 @@ def market_cache_stats():
 
     now = time.time()
 
-    with _CACHE_LOCK:
+    items = []
 
-        items = []
+
+    with _CACHE_LOCK:
 
         for (
             key,
@@ -339,48 +456,115 @@ def market_cache_stats():
 
             symbol, period, interval = key
 
+            age = (
+                now
+                - entry.created_at
+            )
+
             items.append({
-                "symbol":
-                    symbol,
-
-                "period":
-                    period,
-
-                "interval":
-                    interval,
-
-                "age_seconds":
-                    round(
-                        now
-                        - entry.created_at,
-                        1,
-                    ),
-
-                "rows":
-                    len(
-                        entry.dataframe
-                    ),
+                "symbol": symbol,
+                "period": period,
+                "interval": interval,
+                "rows": len(
+                    entry.dataframe
+                ),
+                "age_seconds": round(
+                    age,
+                    1,
+                ),
+                "fresh": (
+                    age
+                    <= CACHE_TTL_SECONDS
+                ),
+                "stale_usable": (
+                    age
+                    <= STALE_CACHE_MAX_AGE_SECONDS
+                ),
             })
 
+
     return {
-        "entries":
-            len(items),
-
-        "ttl_seconds":
+        "entries": len(items),
+        "fresh_ttl_seconds":
             CACHE_TTL_SECONDS,
-
-        "items":
-            items,
+        "stale_max_age_seconds":
+            STALE_CACHE_MAX_AGE_SECONDS,
+        "yahoo_cooldown_active":
+            yahoo_cooldown_active(),
+        "yahoo_cooldown_remaining":
+            yahoo_cooldown_remaining(),
+        "items": items,
     }
 
 
 # ============================================================
-# DOWNLOAD THROTTLE
+# YAHOO RATE LIMIT
+# ============================================================
+
+def yahoo_cooldown_active():
+
+    return (
+        time.time()
+        < _yahoo_cooldown_until
+    )
+
+
+def yahoo_cooldown_remaining():
+
+    remaining = (
+        _yahoo_cooldown_until
+        - time.time()
+    )
+
+    return max(
+        0,
+        round(
+            remaining,
+            1,
+        ),
+    )
+
+
+def activate_yahoo_cooldown():
+
+    global _yahoo_cooldown_until
+
+    _yahoo_cooldown_until = (
+        time.time()
+        + YAHOO_RATE_LIMIT_COOLDOWN_SECONDS
+    )
+
+
+def _is_rate_limit_error(
+    exc: Exception,
+):
+
+    message = str(
+        exc
+    ).lower()
+
+    patterns = [
+        "rate limit",
+        "too many requests",
+        "yfratelimiterror",
+        "429",
+    ]
+
+
+    return any(
+        pattern in message
+        for pattern in patterns
+    )
+
+
+# ============================================================
+# DOWNLOAD THROTTLING
 # ============================================================
 
 def _wait_for_download_slot():
 
     global _last_download_time
+
 
     with _DOWNLOAD_LOCK:
 
@@ -391,15 +575,14 @@ def _wait_for_download_slot():
             - _last_download_time
         )
 
-        if (
-            elapsed
-            < MIN_DOWNLOAD_GAP_SECONDS
-        ):
+
+        if elapsed < MIN_DOWNLOAD_GAP_SECONDS:
 
             time.sleep(
                 MIN_DOWNLOAD_GAP_SECONDS
                 - elapsed
             )
+
 
         _last_download_time = (
             time.time()
@@ -407,7 +590,7 @@ def _wait_for_download_slot():
 
 
 # ============================================================
-# DATA CLEANING
+# CLEAN YAHOO DATA
 # ============================================================
 
 def _clean_download(
@@ -415,10 +598,11 @@ def _clean_download(
 ):
 
     if dataframe is None:
-
         return pd.DataFrame()
 
+
     data = dataframe.copy()
+
 
     if isinstance(
         data.columns,
@@ -430,12 +614,14 @@ def _clean_download(
             .get_level_values(0)
         )
 
+
     required = [
         "Open",
         "High",
         "Low",
         "Close",
     ]
+
 
     if not all(
         column in data.columns
@@ -444,117 +630,84 @@ def _clean_download(
 
         return pd.DataFrame()
 
+
     data = data.dropna(
         subset=required
     )
 
+
     return data
 
 
-def _is_rate_limit_error(
-    exc: Exception,
-):
-
-    message = str(
-        exc
-    ).lower()
-
-    indicators = [
-        "rate limit",
-        "too many requests",
-        "yfratelimiterror",
-        "429",
-    ]
-
-    return any(
-        marker in message
-        for marker in indicators
-    )
-
-
 # ============================================================
-# YAHOO DOWNLOAD
+# ONE CONTROLLED YAHOO DOWNLOAD
 # ============================================================
 
 def _download_market_data(
     symbol: str,
     period: str,
     interval: str,
-    retries: int = 3,
 ):
 
-    last_exception = None
+    if yahoo_cooldown_active():
 
-    for attempt in range(
-        retries
-    ):
+        raise RuntimeError(
+            "Yahoo data source is "
+            "temporarily cooling down "
+            f"for approximately "
+            f"{yahoo_cooldown_remaining()} "
+            "seconds"
+        )
 
-        try:
 
-            _wait_for_download_slot()
+    _wait_for_download_slot()
 
-            data = yf.download(
-                symbol,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-                threads=False,
+
+    try:
+
+        data = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+        )
+
+
+        cleaned = _clean_download(
+            data
+        )
+
+
+        if cleaned.empty:
+
+            raise ValueError(
+                "Yahoo returned no usable rows"
             )
 
-            cleaned = _clean_download(
-                data
-            )
 
-            if not cleaned.empty:
+        return cleaned
 
-                return cleaned
 
-            last_exception = (
-                ValueError(
-                    "Yahoo returned "
-                    "no usable rows"
-                )
-            )
+    except Exception as exc:
 
-        except Exception as exc:
+        if _is_rate_limit_error(
+            exc
+        ):
 
-            last_exception = exc
+            activate_yahoo_cooldown()
 
-            if not _is_rate_limit_error(
-                exc
-            ):
+            raise RuntimeError(
+                "Yahoo rate limit detected"
+            ) from exc
 
-                break
 
-        if attempt < retries - 1:
-
-            delay = (
-                2 ** (
-                    attempt + 1
-                )
-            )
-
-            delay += random.uniform(
-                0.1,
-                0.8,
-            )
-
-            time.sleep(
-                delay
-            )
-
-    if last_exception is not None:
-
-        raise last_exception
-
-    raise ValueError(
-        "Market download failed"
-    )
+        raise
 
 
 # ============================================================
-# PUBLIC MARKET DATA FUNCTION
+# PUBLIC MARKET-DATA FUNCTION
 # ============================================================
 
 def get_data(
@@ -563,105 +716,167 @@ def get_data(
     interval: str = "15m",
 ):
 
-    try:
+    symbol = str(
+        symbol
+    ).strip()
 
-        symbol = str(
-            symbol
-        ).strip()
+    interval = str(
+        interval
+    ).lower().strip()
 
-        interval = str(
-            interval
-        ).lower().strip()
 
-        if not symbol:
+    if not symbol:
 
-            raise ValueError(
-                "Market symbol "
-                "is required"
-            )
+        raise HTTPException(
+            status_code=400,
+            detail="Market symbol required",
+        )
 
-        periods = fallback_periods(
-            period,
+
+    periods = fallback_periods(
+        period,
+        interval,
+    )
+
+
+    errors = []
+
+
+    # ========================================================
+    # FIRST PASS: FRESH CACHE
+    # ========================================================
+
+    for safe_p in periods:
+
+        cached = _get_fresh_cache(
+            symbol,
+            safe_p,
             interval,
         )
 
-        errors = []
+
+        if (
+            cached is not None
+            and len(cached) >= 80
+        ):
+
+            return cached
+
+
+    # ========================================================
+    # IF YAHOO IS COOLING DOWN, USE STALE CACHE
+    # ========================================================
+
+    if yahoo_cooldown_active():
 
         for safe_p in periods:
 
-            # --------------------------------------------
-            # CACHE FIRST
-            # --------------------------------------------
-
-            cached = _get_cached(
+            stale = _get_stale_cache(
                 symbol,
                 safe_p,
                 interval,
             )
 
-            if cached is not None:
 
-                if len(cached) >= 80:
+            if (
+                stale is not None
+                and len(stale) >= 80
+            ):
 
-                    return cached
+                return stale
 
-            # --------------------------------------------
-            # DOWNLOAD ONLY WHEN NECESSARY
-            # --------------------------------------------
 
-            try:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Yahoo market data is "
+                "temporarily rate limited "
+                "and no cached dataset "
+                "is available for "
+                f"{symbol} {interval}"
+            ),
+        )
 
-                data = _download_market_data(
+
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
+
+    for safe_p in periods:
+
+        try:
+
+            data = _download_market_data(
+                symbol=symbol,
+                period=safe_p,
+                interval=interval,
+            )
+
+
+            if not data.empty:
+
+                _store_cache(
                     symbol=symbol,
                     period=safe_p,
                     interval=interval,
+                    dataframe=data,
                 )
 
-                if not data.empty:
 
-                    _store_cache(
-                        symbol=symbol,
-                        period=safe_p,
-                        interval=interval,
-                        dataframe=data,
-                    )
+            if len(data) >= 80:
 
-                if len(data) >= 80:
+                return data.copy()
 
-                    return data.copy()
 
-                errors.append(
-                    f"{safe_p}: "
-                    f"only "
-                    f"{len(data)} rows"
-                )
+            errors.append(
+                f"{safe_p}: only "
+                f"{len(data)} rows"
+            )
 
-            except Exception as exc:
 
-                errors.append(
-                    f"{safe_p}: "
-                    f"{exc}"
-                )
+        except Exception as exc:
 
-        raise ValueError(
-            "Market data unavailable "
-            f"for {symbol} "
-            f"at {interval}. "
+            errors.append(
+                f"{safe_p}: {exc}"
+            )
+
+
+            # If this failure activated the
+            # rate-limit cooldown, stop making
+            # further Yahoo requests immediately.
+            if yahoo_cooldown_active():
+                break
+
+
+    # ========================================================
+    # FINAL STALE-CACHE FALLBACK
+    # ========================================================
+
+    for safe_p in periods:
+
+        stale = _get_stale_cache(
+            symbol,
+            safe_p,
+            interval,
+        )
+
+
+        if (
+            stale is not None
+            and len(stale) >= 80
+        ):
+
+            return stale
+
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "Market data unavailable for "
+            f"{symbol} at {interval}. "
             + " | ".join(errors)
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Market data unavailable: "
-                f"{e}"
-            ),
-        )
+        ),
+    )
 
 
 # ============================================================
@@ -680,52 +895,21 @@ def build(
         interval,
     )
 
-    ind = add_indicators(
+    indicators = add_indicators(
         raw
     )
 
     model = train_model(
-        ind
+        indicators
     )
 
-    return enrich(
-        ind,
+    enriched = enrich(
+        indicators,
         model,
     )
 
 
-# ============================================================
-# VALIDATION HELPERS
-# ============================================================
-
-def validate_risk_mode(
-    risk_mode: str,
-):
-
-    if risk_mode not in PROFILES:
-
-        raise HTTPException(
-            status_code=400,
-            detail=
-                "Invalid risk mode",
-        )
-
-
-def validate_balance(
-    balance: float,
-    field_name:
-        str = "starting_balance",
-):
-
-    if balance <= 0:
-
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"{field_name} "
-                "must be greater than 0"
-            ),
-        )
+    return enriched
 
 
 # ============================================================
@@ -737,7 +921,10 @@ def root():
 
     return {
         "name":
-            "Jasong AI Trader V4.3",
+            "Jasong AI Trader V4.4",
+
+        "version":
+            "4.4.0",
 
         "mode":
             "paper-trading",
@@ -759,14 +946,15 @@ def root():
 def health():
 
     return {
-        "status":
-            "ok",
-
-        "version":
-            "4.3.0",
-
-        "live_execution":
-            False,
+        "status": "ok",
+        "version": "4.4.0",
+        "live_execution": False,
+        "cache_entries":
+            len(_DATA_CACHE),
+        "yahoo_cooldown_active":
+            yahoo_cooldown_active(),
+        "yahoo_cooldown_remaining":
+            yahoo_cooldown_remaining(),
     }
 
 
@@ -778,9 +966,7 @@ def health():
 def data_cache():
 
     return {
-        "status":
-            "ok",
-
+        "status": "ok",
         **market_cache_stats(),
     }
 
@@ -791,6 +977,7 @@ def clear_data_cache():
     removed = (
         clear_market_cache()
     )
+
 
     return {
         "status":
@@ -832,24 +1019,28 @@ def signal(
         "balance",
     )
 
+
     profile = (
         PROFILES[
             risk_mode
         ]
     )
 
-    sig = build(
+
+    data = build(
         symbol,
         period,
         interval,
     )
 
-    out = decision(
-        sig,
+
+    result = decision(
+        data,
         profile,
     )
 
-    out.update({
+
+    result.update({
         "symbol":
             symbol,
 
@@ -866,7 +1057,8 @@ def signal(
             False,
     })
 
-    return out
+
+    return result
 
 
 # ============================================================
@@ -902,20 +1094,23 @@ def run_backtest(
         starting_balance
     )
 
-    sig = build(
+
+    data = build(
         symbol,
         period,
         interval,
     )
 
+
     result = backtest(
-        sig,
+        data,
         PROFILES[
             risk_mode
         ],
         starting_balance,
         payout,
     )
+
 
     result.update({
         "symbol":
@@ -927,6 +1122,7 @@ def run_backtest(
         "live_execution":
             False,
     })
+
 
     return result
 
@@ -959,17 +1155,19 @@ def create_paper_trade(
             ),
         )
 
+
     if stake <= 0:
 
         raise HTTPException(
             status_code=400,
             detail=(
-                "stake must be "
+                "Stake must be "
                 "greater than 0"
             ),
         )
 
-    t = Trade(
+
+    trade = Trade(
         symbol=symbol,
         direction=direction,
         confidence=confidence,
@@ -978,13 +1176,21 @@ def create_paper_trade(
         mode="paper",
     )
 
-    db.add(t)
+
+    db.add(
+        trade
+    )
+
     db.commit()
-    db.refresh(t)
+
+    db.refresh(
+        trade
+    )
+
 
     return {
         "id":
-            t.id,
+            trade.id,
 
         "status":
             "recorded",
@@ -1009,40 +1215,41 @@ def list_paper_trades(
         .all()
     )
 
+
     return [
         {
             "id":
-                r.id,
+                row.id,
 
             "created_at":
-                r.created_at.isoformat(),
+                row.created_at.isoformat(),
 
             "symbol":
-                r.symbol,
+                row.symbol,
 
             "direction":
-                r.direction,
+                row.direction,
 
             "confidence":
-                r.confidence,
+                row.confidence,
 
             "entry_price":
-                r.entry_price,
+                row.entry_price,
 
             "stake":
-                r.stake,
+                row.stake,
 
             "result":
-                r.result,
+                row.result,
 
             "pnl":
-                r.pnl,
+                row.pnl,
 
             "closed":
-                r.closed,
+                row.closed,
         }
 
-        for r in rows
+        for row in rows
     ]
 
 
@@ -1076,36 +1283,42 @@ def run_backtest_all(
         starting_balance
     )
 
+
     profile = (
         PROFILES[
             risk_mode
         ]
     )
 
+
     results = []
 
-    for name, symbol in (
-        MARKETS.items()
-    ):
+
+    for (
+        market_name,
+        symbol,
+    ) in MARKETS.items():
 
         try:
 
-            sig = build(
+            data = build(
                 symbol,
                 period,
                 interval,
             )
 
+
             result = backtest(
-                sig,
+                data,
                 profile,
                 starting_balance,
                 payout,
             )
 
+
             results.append({
                 "market":
-                    name,
+                    market_name,
 
                 "symbol":
                     symbol,
@@ -1159,28 +1372,31 @@ def run_backtest_all(
                     ),
             })
 
-        except Exception as e:
+
+        except Exception as exc:
 
             results.append({
                 "market":
-                    name,
+                    market_name,
 
                 "symbol":
                     symbol,
 
                 "error":
-                    str(e),
+                    str(exc),
             })
+
 
     ranked = sorted(
         results,
-        key=lambda x:
-            x.get(
+        key=lambda item:
+            item.get(
                 "return_pct",
                 -999,
             ),
         reverse=True,
     )
+
 
     return {
         "risk_mode":
@@ -1192,14 +1408,14 @@ def run_backtest_all(
         "interval":
             interval,
 
-        "live_execution":
-            False,
-
         "markets_tested":
             len(MARKETS),
 
         "results":
             ranked,
+
+        "live_execution":
+            False,
     }
 
 
@@ -1239,24 +1455,29 @@ def run_threshold_sweep(
         starting_balance
     )
 
+
     raw = get_data(
         symbol,
         period,
         interval,
     )
 
-    ind = add_indicators(
+
+    indicators = add_indicators(
         raw
     )
 
+
     model = train_model(
-        ind
+        indicators
     )
 
+
     enriched = enrich(
-        ind,
+        indicators,
         model,
     )
+
 
     result = threshold_sweep(
         enriched,
@@ -1270,6 +1491,7 @@ def run_threshold_sweep(
         holding_candles=
             holding_candles,
     )
+
 
     result.update({
         "symbol":
@@ -1290,6 +1512,7 @@ def run_threshold_sweep(
         "live_execution":
             False,
     })
+
 
     return result
 
@@ -1327,24 +1550,29 @@ def run_strategy_optimize(
         starting_balance
     )
 
+
     raw = get_data(
         symbol,
         period,
         interval,
     )
 
-    ind = add_indicators(
+
+    indicators = add_indicators(
         raw
     )
 
+
     model = train_model(
-        ind
+        indicators
     )
 
+
     enriched = enrich(
-        ind,
+        indicators,
         model,
     )
+
 
     result = optimise_strategy(
         enriched,
@@ -1356,6 +1584,7 @@ def run_strategy_optimize(
         payout=
             payout,
     )
+
 
     result.update({
         "symbol":
@@ -1373,6 +1602,7 @@ def run_strategy_optimize(
         "live_execution":
             False,
     })
+
 
     return result
 
@@ -1404,6 +1634,7 @@ def run_optimize_timeframes(
         starting_balance
     )
 
+
     result = optimise_all_timeframes(
         symbol=
             symbol,
@@ -1432,6 +1663,7 @@ def run_optimize_timeframes(
             payout,
     )
 
+
     result.update({
         "risk_mode":
             risk_mode,
@@ -1439,6 +1671,7 @@ def run_optimize_timeframes(
         "live_execution":
             False,
     })
+
 
     return result
 
@@ -1470,9 +1703,11 @@ def run_scan_market(
         starting_balance
     )
 
+
     market = (
         market.upper()
     )
+
 
     if market not in MARKETS:
 
@@ -1484,11 +1719,13 @@ def run_scan_market(
             ),
         )
 
+
     symbol = (
         MARKETS[
             market
         ]
     )
+
 
     result = optimise_all_timeframes(
         symbol=
@@ -1518,11 +1755,11 @@ def run_scan_market(
             payout,
     )
 
-    best = (
-        result.get(
-            "best"
-        )
+
+    best = result.get(
+        "best"
     )
+
 
     if best:
 
@@ -1533,12 +1770,14 @@ def run_scan_market(
             )
         )
 
+
         win_rate = float(
             best.get(
                 "win_rate",
                 0.0,
             )
         )
+
 
         profit_factor = float(
             best.get(
@@ -1547,12 +1786,14 @@ def run_scan_market(
             )
         )
 
+
         return_pct = float(
             best.get(
                 "return_pct",
                 0.0,
             )
         )
+
 
         max_drawdown = abs(
             float(
@@ -1563,6 +1804,7 @@ def run_scan_market(
             )
         )
 
+
         status = classify_result(
             trades,
             win_rate,
@@ -1570,6 +1812,7 @@ def run_scan_market(
             return_pct,
             max_drawdown,
         )
+
 
         market_score = (
             calculate_market_score(
@@ -1581,6 +1824,7 @@ def run_scan_market(
             )
         )
 
+
         best[
             "status"
         ] = status
@@ -1588,6 +1832,7 @@ def run_scan_market(
         best[
             "market_score"
         ] = market_score
+
 
     result.update({
         "market":
@@ -1622,11 +1867,12 @@ def run_scan_market(
             False,
     })
 
+
     return result
 
 
 # ============================================================
-# RANK COMPLETED MARKETS
+# RANK MARKETS
 # ============================================================
 
 @app.post("/rank-markets")
@@ -1646,10 +1892,10 @@ def rank_markets(
         raise HTTPException(
             status_code=400,
             detail=(
-                "results must "
-                "be a list"
+                "results must be a list"
             ),
         )
+
 
     if (
         top_n < 1
@@ -1660,18 +1906,16 @@ def rank_markets(
         raise HTTPException(
             status_code=400,
             detail=(
-                "top_n must "
-                "be between "
+                "top_n must be between "
                 "1 and 9"
             ),
         )
 
-    ranked = build_top_markets(
+
+    return build_top_markets(
         results=results,
         top_n=top_n,
     )
-
-    return ranked
 
 
 # ============================================================
@@ -1699,13 +1943,13 @@ def run_fast_scan(
         raise HTTPException(
             status_code=400,
             detail=(
-                "top_n must be "
-                f"between 1 and "
-                f"{len(MARKETS)}"
+                f"top_n must be between "
+                f"1 and {len(MARKETS)}"
             ),
         )
 
-    result = fast_scan_markets(
+
+    return fast_scan_markets(
         markets=
             MARKETS,
 
@@ -1725,11 +1969,24 @@ def run_fast_scan(
             top_n,
     )
 
-    return result
-
 
 # ============================================================
-# V4.3 DEEP VALIDATION
+# V4.4 DEEP VALIDATION
+# ============================================================
+#
+# IMPORTANT:
+#
+# Deep validation is intentionally limited to ONE candidate
+# per HTTP request.
+#
+# Why?
+#
+# The heavy multi-timeframe optimiser can request several
+# market datasets. Doing this for 3 markets inside one Render
+# request was causing long-running requests and 502 failures.
+#
+# We will validate #1 first.
+# If it fails, the application can validate #2 next.
 # ============================================================
 
 @app.post("/deep-validate")
@@ -1746,7 +2003,7 @@ def run_deep_validate(
         0.80,
 
     max_candidates: int =
-        3,
+        1,
 ):
 
     validate_risk_mode(
@@ -1757,6 +2014,7 @@ def run_deep_validate(
         starting_balance
     )
 
+
     if not candidates:
 
         raise HTTPException(
@@ -1766,24 +2024,17 @@ def run_deep_validate(
             ),
         )
 
-    if (
-        max_candidates < 1
-        or
-        max_candidates > 3
-    ):
 
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "max_candidates "
-                "must be between "
-                "1 and 3"
-            ),
-        )
+    # V4.4 deliberately validates one market per
+    # request to protect the Render worker.
+    candidate_to_test = [
+        candidates[0]
+    ]
+
 
     result = validate_candidates(
         candidates=
-            candidates,
+            candidate_to_test,
 
         optimise_all_timeframes_func=
             optimise_all_timeframes,
@@ -1812,7 +2063,34 @@ def run_deep_validate(
             payout,
 
         max_candidates=
-            max_candidates,
+            1,
     )
+
+
+    result[
+        "requested_candidates"
+    ] = len(
+        candidates
+    )
+
+
+    result[
+        "candidates_processed_this_request"
+    ] = 1
+
+
+    result[
+        "validation_mode"
+    ] = (
+        "SEQUENTIAL_SINGLE_CANDIDATE"
+    )
+
+
+    result[
+        "next_candidate_available"
+    ] = (
+        len(candidates) > 1
+    )
+
 
     return result
