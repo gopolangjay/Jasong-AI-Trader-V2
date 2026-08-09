@@ -1,3 +1,5 @@
+from sequential_scanner import build_top_markets
+from fastapi import Body
 from market_scanner import classify_result, calculate_market_score
 from market_scanner import scan_markets
 from multi_optimizer import optimise_all_timeframes
@@ -469,3 +471,33 @@ def run_scan_market(
     })
 
     return result
+@app.post("/rank-markets")
+def rank_markets(
+    results: list = Body(...),
+    top_n: int = 3,
+):
+    """
+    Rank completed /scan-market results.
+
+    This endpoint does NOT rerun the AI models.
+    It only combines and ranks completed market scans.
+    """
+
+    if not isinstance(results, list):
+        raise HTTPException(
+            status_code=400,
+            detail="results must be a list"
+        )
+
+    if top_n < 1 or top_n > 9:
+        raise HTTPException(
+            status_code=400,
+            detail="top_n must be between 1 and 9"
+        )
+
+    ranked = build_top_markets(
+        results=results,
+        top_n=top_n,
+    )
+
+    return ranked
