@@ -1,3 +1,4 @@
+from fast_scanner import fast_scan_markets
 from sequential_scanner import build_top_markets
 from fastapi import Body
 from market_scanner import classify_result, calculate_market_score
@@ -501,3 +502,25 @@ def rank_markets(
     )
 
     return ranked
+@app.get("/fast-scan")
+def run_fast_scan(
+    period: str = "5d",
+    interval: str = "15m",
+    top_n: int = 3,
+):
+    if top_n < 1 or top_n > len(MARKETS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"top_n must be between 1 and {len(MARKETS)}"
+        )
+
+    result = fast_scan_markets(
+        markets=MARKETS,
+        get_data_func=get_data,
+        add_indicators_func=add_indicators,
+        period=period,
+        interval=interval,
+        top_n=top_n,
+    )
+
+    return result
