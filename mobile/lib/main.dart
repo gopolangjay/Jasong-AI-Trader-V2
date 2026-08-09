@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:fl_chart/fl_chart.dart';
@@ -52,42 +51,27 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? sig;
   Map<String, dynamic>? bt;
 
-  List<Map<String, dynamic>> marketResults = [];
-  List<Map<String, dynamic>> marketFailures = [];
-
-  Map<String, dynamic>? rankedMarkets;
-
-  int scanProgress = 0;
+  Map<String, dynamic>? fastScan;
 
   bool busy = false;
   bool scanningMarkets = false;
 
-  String? currentScanMarket;
   String? error;
 
-  final List<String> markets = [
-    'EURUSD',
-    'GBPUSD',
-    'USDJPY',
-    'AUDUSD',
-    'NZDUSD',
-    'USDCAD',
-    'USDCHF',
-    'EURJPY',
-    'GBPJPY',
-  ];
-
   // =========================================================
-  // BASIC GET REQUEST
+  // HTTP GET
   // =========================================================
 
   Future<Map<String, dynamic>> getJson(
-    Uri uri,
-  ) async {
+    Uri uri, {
+    int timeoutSeconds = 90,
+  }) async {
     final response = await http
         .get(uri)
         .timeout(
-          const Duration(seconds: 90),
+          Duration(
+            seconds: timeoutSeconds,
+          ),
         );
 
     if (response.statusCode != 200) {
@@ -110,276 +94,6 @@ class _HomePageState extends State<HomePage> {
     return Map<String, dynamic>.from(
       decoded,
     );
-  }
-
-  // =========================================================
-  // BASIC POST JSON REQUEST
-  // =========================================================
-
-  Future<Map<String, dynamic>> postJson(
-    Uri uri,
-    dynamic body,
-  ) async {
-    final response = await http
-        .post(
-          uri,
-          headers: {
-            'Content-Type':
-                'application/json',
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(
-          const Duration(seconds: 90),
-        );
-
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Server ${response.statusCode}: '
-        '${response.body}',
-      );
-    }
-
-    final decoded = jsonDecode(
-      response.body,
-    );
-
-    if (decoded is! Map) {
-      throw Exception(
-        'Invalid server response',
-      );
-    }
-
-    return Map<String, dynamic>.from(
-      decoded,
-    );
-  }
-
-  // =========================================================
-  // V4.1 RESILIENT SEQUENTIAL MARKET SCANNER
-  // =========================================================
-
-  Future<void> scanAllMarkets() async {
-    if (busy) {
-      return;
-    }
-
-    setState(() {
-      busy = true;
-      scanningMarkets = true;
-
-      error = null;
-
-      marketResults = [];
-      marketFailures = [];
-
-      rankedMarkets = null;
-
-      scanProgress = 0;
-      currentScanMarket = null;
-    });
-
-    final completed =
-        <Map<String, dynamic>>[];
-
-    final failures =
-        <Map<String, dynamic>>[];
-
-    try {
-      for (
-        int i = 0;
-        i < markets.length;
-        i++
-      ) {
-        if (!mounted) {
-          return;
-        }
-
-        final market = markets[i];
-
-        setState(() {
-          scanProgress = i + 1;
-          currentScanMarket = market;
-        });
-
-        final uri = Uri.parse(
-          '$apiBase/scan-market',
-        ).replace(
-          queryParameters: {
-            'market': market,
-            'risk_mode': risk,
-            'starting_balance':
-                balance.text,
-            'payout': '0.80',
-          },
-        );
-
-        try {
-          // Each market has its own timeout.
-          // A timeout no longer kills the
-          // complete 9-market scan.
-          final response = await http
-              .get(uri)
-              .timeout(
-                const Duration(
-                  seconds: 75,
-                ),
-              );
-
-          if (response.statusCode != 200) {
-            throw Exception(
-              'HTTP '
-              '${response.statusCode}',
-            );
-          }
-
-          final decoded = jsonDecode(
-            response.body,
-          );
-
-          if (decoded is! Map) {
-            throw Exception(
-              'Invalid market response',
-            );
-          }
-
-          final result =
-              Map<String, dynamic>.from(
-            decoded,
-          );
-
-          result['market'] ??= market;
-
-          completed.add(result);
-
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            marketResults =
-                List<
-                    Map<String, dynamic>
-                >.from(
-              completed,
-            );
-          });
-        } on TimeoutException {
-          failures.add({
-            'market': market,
-            'status': 'TIMEOUT',
-            'error':
-                'Market scan exceeded '
-                '75 seconds',
-          });
-
-          if (mounted) {
-            setState(() {
-              marketFailures =
-                  List<
-                      Map<String, dynamic>
-                  >.from(
-                failures,
-              );
-            });
-          }
-        } catch (e) {
-          failures.add({
-            'market': market,
-            'status': 'ERROR',
-            'error': e.toString(),
-          });
-
-          if (mounted) {
-            setState(() {
-              marketFailures =
-                  List<
-                      Map<String, dynamic>
-                  >.from(
-                failures,
-              );
-            });
-          }
-        }
-
-        // Give Render a brief recovery
-        // period before the next heavy
-        // optimisation request.
-        await Future.delayed(
-          const Duration(seconds: 2),
-        );
-      }
-
-      if (completed.isEmpty) {
-        throw Exception(
-          'No market scans completed '
-          'successfully. Please try again.',
-        );
-      }
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        currentScanMarket =
-            'Ranking markets';
-      });
-
-      final rankUri = Uri.parse(
-        '$apiBase/rank-markets',
-      ).replace(
-        queryParameters: {
-          'top_n': '3',
-        },
-      );
-
-      try {
-        final ranked =
-            await postJson(
-          rankUri,
-          completed,
-        );
-
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          rankedMarkets = ranked;
-        });
-      } catch (e) {
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          error =
-              'Market scans completed, '
-              'but ranking failed: $e';
-        });
-      }
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        error = e.toString();
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          busy = false;
-
-          scanningMarkets = false;
-
-          scanProgress = 0;
-
-          currentScanMarket = null;
-        });
-      }
-    }
   }
 
   // =========================================================
@@ -387,9 +101,7 @@ class _HomePageState extends State<HomePage> {
   // =========================================================
 
   Future<void> refreshSignal() async {
-    if (busy) {
-      return;
-    }
+    if (busy) return;
 
     setState(() {
       busy = true;
@@ -401,26 +113,21 @@ class _HomePageState extends State<HomePage> {
         '$apiBase/signal',
       ).replace(
         queryParameters: {
-          'symbol': symbol.text,
+          'symbol': symbol.text.trim(),
           'risk_mode': risk,
-          'balance': balance.text,
+          'balance': balance.text.trim(),
         },
       );
 
-      final result =
-          await getJson(uri);
+      final result = await getJson(uri);
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         sig = result;
       });
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         error = e.toString();
@@ -439,9 +146,7 @@ class _HomePageState extends State<HomePage> {
   // =========================================================
 
   Future<void> runBacktest() async {
-    if (busy) {
-      return;
-    }
+    if (busy) return;
 
     setState(() {
       busy = true;
@@ -453,27 +158,22 @@ class _HomePageState extends State<HomePage> {
         '$apiBase/backtest',
       ).replace(
         queryParameters: {
-          'symbol': symbol.text,
+          'symbol': symbol.text.trim(),
           'risk_mode': risk,
           'starting_balance':
-              balance.text,
+              balance.text.trim(),
         },
       );
 
-      final result =
-          await getJson(uri);
+      final result = await getJson(uri);
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         bt = result;
       });
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         error = e.toString();
@@ -488,22 +188,109 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // RECORD PAPER TRADE
+  // V4.2 FAST MARKET SCANNER
   // =========================================================
 
-  Future<void>
-      recordPaperTrade() async {
-    if (busy) {
+  Future<void> scanAllMarkets() async {
+    if (busy) return;
+
+    setState(() {
+      busy = true;
+      scanningMarkets = true;
+      error = null;
+      fastScan = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/fast-scan',
+      ).replace(
+        queryParameters: {
+          'period': '5d',
+          'interval': '15m',
+          'top_n': '3',
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        fastScan = result;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        error =
+            'Fast market scan failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          scanningMarkets = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // LOAD MARKET INTO LIVE SIGNAL
+  // =========================================================
+
+  Future<void> analyseMarket(
+    Map<String, dynamic> market,
+  ) async {
+    final marketSymbol =
+        market['symbol']?.toString();
+
+    if (marketSymbol == null ||
+        marketSymbol.isEmpty) {
       return;
     }
 
-    if (sig == null ||
-        ![
-          'BUY',
-          'SELL',
-        ].contains(
-          sig!['decision'],
-        )) {
+    setState(() {
+      symbol.text = marketSymbol;
+      error = null;
+    });
+
+    await refreshSignal();
+  }
+
+  // =========================================================
+  // BEST MARKET -> LIVE SIGNAL
+  // =========================================================
+
+  Future<void> analyseBestMarket() async {
+    final best =
+        fastScan?['best_candidate'];
+
+    if (best is! Map) {
+      return;
+    }
+
+    await analyseMarket(
+      Map<String, dynamic>.from(best),
+    );
+  }
+
+  // =========================================================
+  // PAPER TRADE
+  // =========================================================
+
+  Future<void> recordPaperTrade() async {
+    if (busy) return;
+
+    final decision =
+        sig?['decision']?.toString();
+
+    if (decision != 'BUY' &&
+        decision != 'SELL') {
       return;
     }
 
@@ -517,19 +304,15 @@ class _HomePageState extends State<HomePage> {
         '$apiBase/paper-trades',
       ).replace(
         queryParameters: {
-          'symbol': symbol.text,
+          'symbol': symbol.text.trim(),
           'direction':
-              sig!['decision']
-                  .toString(),
+              sig!['decision'].toString(),
           'confidence':
-              sig!['confidence']
-                  .toString(),
+              sig!['confidence'].toString(),
           'entry_price':
-              sig!['price']
-                  .toString(),
+              sig!['price'].toString(),
           'stake':
-              sig![
-                      'suggested_paper_stake']
+              sig!['suggested_paper_stake']
                   .toString(),
         },
       );
@@ -548,9 +331,7 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       ScaffoldMessenger.of(context)
           .showSnackBar(
@@ -561,9 +342,7 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         error = e.toString();
@@ -632,9 +411,6 @@ class _HomePageState extends State<HomePage> {
       case 'REJECT':
         return Colors.redAccent;
 
-      case 'TIMEOUT':
-        return Colors.orangeAccent;
-
       case 'ERROR':
         return Colors.redAccent;
 
@@ -644,28 +420,38 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // NUMBER FORMATTING
+  // FORMATTERS
   // =========================================================
 
   String formatPrice(
     dynamic value,
   ) {
     if (value is num) {
-      return value
-          .toDouble()
+      final number =
+          value.toDouble();
+
+      if (number >= 100) {
+        return number
+            .toStringAsFixed(3);
+      }
+
+      return number
           .toStringAsFixed(5);
     }
 
     return '-';
   }
 
-  String formatRsi(
-    dynamic value,
-  ) {
+  String formatNumber(
+    dynamic value, {
+    int decimals = 2,
+  }) {
     if (value is num) {
       return value
           .toDouble()
-          .toStringAsFixed(2);
+          .toStringAsFixed(
+            decimals,
+          );
     }
 
     return '-';
@@ -730,213 +516,178 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // MARKET CARD
+  // FAST SCANNER MARKET CARD
   // =========================================================
 
-  Widget marketCard(
+  Widget fastMarketCard(
     Map<String, dynamic> market,
     int rank,
   ) {
-    final winRate =
-        ((market['win_rate'] ?? 0)
-                    as num)
-                .toDouble() *
-            100;
+    final marketName =
+        market['market']
+                ?.toString() ??
+            '-';
 
-    final score =
-        ((market['market_score'] ?? 0)
-                as num)
-            .toDouble();
-
-    final profitFactor =
-        ((market['profit_factor'] ??
-                    0)
-                as num)
-            .toDouble();
-
-    final returnPct =
-        ((market['return_pct'] ?? 0)
-                    as num)
-                .toDouble() *
-            100;
+    final direction =
+        market['direction']
+                ?.toString() ??
+            'WAIT';
 
     final status =
         market['status']
                 ?.toString() ??
-            'UNKNOWN';
+            '-';
 
-    String holdText =
-        '${market['holding_candles'] ?? '-'} '
-        'candles';
+    final score =
+        ((market['fast_score'] ?? 0)
+                as num)
+            .toDouble();
 
-    final interval =
-        market['interval']
-            ?.toString();
+    final rsi =
+        market['rsi'];
 
-    final holdingCandles =
-        market['holding_candles'];
+    final price =
+        market['price'];
 
-    if (interval != null &&
-        holdingCandles is num) {
-      final holdMinutes =
-          _holdingMinutes(
-        interval,
-        holdingCandles.toInt(),
-      );
-
-      if (holdMinutes != null) {
-        holdText =
-            '${holdingCandles.toInt()} '
-            'candles • '
-            '~${_formatMinutes(holdMinutes)}';
-      }
-    }
+    final reasons =
+        (market['reasons']
+                    as List?) ??
+            const [];
 
     return Card(
-      child: Padding(
-        padding:
-            const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '#$rank '
-                    '${market['market'] ?? '-'}',
+      child: InkWell(
+        borderRadius:
+            BorderRadius.circular(12),
+        onTap: busy
+            ? null
+            : () {
+                analyseMarket(
+                  market,
+                );
+              },
+        child: Padding(
+          padding:
+              const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '#$rank $marketName',
+                      style:
+                          const TextStyle(
+                        fontSize: 20,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    direction,
+                    style:
+                        TextStyle(
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          decisionColor(
+                        direction,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 6,
+              ),
+
+              Row(
+                children: [
+                  Text(
+                    status,
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          statusColor(
+                        status,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    'Score '
+                    '${score.toStringAsFixed(1)}',
                     style:
                         const TextStyle(
-                      fontSize: 20,
                       fontWeight:
                           FontWeight.bold,
                     ),
                   ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 6,
+              ),
+
+              Text(
+                'Price '
+                '${formatPrice(price)}'
+                ' • RSI '
+                '${formatNumber(rsi)}',
+              ),
+
+              const SizedBox(
+                height: 4,
+              ),
+
+              Text(
+                '${market['interval'] ?? '-'}'
+                ' • '
+                '${market['period'] ?? '-'}',
+              ),
+
+              if (reasons.isNotEmpty) ...[
+                const SizedBox(
+                  height: 6,
                 ),
                 Text(
-                  status,
-                  style: TextStyle(
-                    fontWeight:
-                        FontWeight.bold,
+                  reasons
+                      .take(3)
+                      .join(' • '),
+                  style:
+                      const TextStyle(
+                    fontSize: 12,
                     color:
-                        statusColor(
-                      status,
-                    ),
+                        Colors.white70,
                   ),
                 ),
               ],
-            ),
 
-            const SizedBox(
-              height: 8,
-            ),
+              const SizedBox(
+                height: 6,
+              ),
 
-            Text(
-              'Score '
-              '${score.toStringAsFixed(1)}',
-            ),
-
-            const SizedBox(
-              height: 4,
-            ),
-
-            Text(
-              '${market['interval'] ?? '-'}'
-              ' • Win '
-              '${winRate.toStringAsFixed(1)}%'
-              ' • PF '
-              '${profitFactor.toStringAsFixed(2)}',
-            ),
-
-            const SizedBox(
-              height: 4,
-            ),
-
-            Text(
-              'Return '
-              '${returnPct.toStringAsFixed(2)}%'
-              ' • Trades '
-              '${market['trades'] ?? '-'}',
-            ),
-
-            const SizedBox(
-              height: 4,
-            ),
-
-            Text(
-              'Threshold '
-              '${market['threshold_pct'] ?? '-'}%'
-              ' • Hold '
-              '$holdText',
-            ),
-          ],
+              const Text(
+                'Tap to load live AI signal',
+                style:
+                    TextStyle(
+                  fontSize: 11,
+                  color:
+                      Colors.tealAccent,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
-  }
-
-  // =========================================================
-  // HOLDING TIME HELPERS
-  // =========================================================
-
-  int? _holdingMinutes(
-    String interval,
-    int holdingCandles,
-  ) {
-    final match = RegExp(
-      r'^(\d+)(m|h)$',
-    ).firstMatch(
-      interval,
-    );
-
-    if (match == null) {
-      return null;
-    }
-
-    final amount =
-        int.tryParse(
-      match.group(1)!,
-    );
-
-    if (amount == null) {
-      return null;
-    }
-
-    final unit =
-        match.group(2);
-
-    final minutesPerCandle =
-        unit == 'h'
-            ? amount * 60
-            : amount;
-
-    return minutesPerCandle *
-        holdingCandles;
-  }
-
-  String _formatMinutes(
-    int minutes,
-  ) {
-    if (minutes < 60) {
-      return '$minutes min';
-    }
-
-    if (minutes % 60 == 0) {
-      final hours =
-          minutes ~/ 60;
-
-      return '$hours h';
-    }
-
-    final hours =
-        minutes ~/ 60;
-
-    final remainder =
-        minutes % 60;
-
-    return '$hours h '
-        '$remainder min';
   }
 
   // =========================================================
@@ -969,7 +720,7 @@ class _HomePageState extends State<HomePage> {
     );
 
     final rsiText =
-        formatRsi(
+        formatNumber(
       sig?['rsi'],
     );
 
@@ -978,20 +729,45 @@ class _HomePageState extends State<HomePage> {
                     as List?) ??
             const [];
 
-    final topMarkets =
-        (rankedMarkets?[
-                    'top_markets']
+    final topCandidates =
+        (fastScan?[
+                    'top_candidates']
                 as List?) ??
             const [];
 
-    final dynamic bestMarket =
-        rankedMarkets?[
-            'best_market'];
+    final ranking =
+        (fastScan?['ranking']
+                    as List?) ??
+            const [];
+
+    final dynamic bestCandidate =
+        fastScan?[
+            'best_candidate'];
+
+    final marketsTested =
+        fastScan?[
+                'markets_tested'] ??
+            0;
+
+    final marketsSuccessful =
+        fastScan?[
+                'markets_successful'] ??
+            0;
+
+    final marketsFailed =
+        fastScan?[
+                'markets_failed'] ??
+            0;
+
+    final candidatesFound =
+        fastScan?[
+                'candidates_found'] ??
+            0;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          'Jasong AI Trader V4.1',
+          'Jasong AI Trader V4.2',
         ),
         actions: [
           IconButton(
@@ -1019,9 +795,14 @@ class _HomePageState extends State<HomePage> {
               const EdgeInsets.all(14),
 
           children: [
+            // =================================================
+            // LIVE SIGNAL SECTION
+            // =================================================
+
             const Text(
               'AI-assisted paper trading',
-              style: TextStyle(
+              style:
+                  TextStyle(
                 fontWeight:
                     FontWeight.bold,
               ),
@@ -1072,6 +853,7 @@ class _HomePageState extends State<HomePage> {
                 String>(
               initialValue:
                   risk,
+
               decoration:
                   const InputDecoration(
                 labelText:
@@ -1079,6 +861,7 @@ class _HomePageState extends State<HomePage> {
                 border:
                     OutlineInputBorder(),
               ),
+
               items: [
                 'Conservative',
                 'Balanced',
@@ -1112,10 +895,6 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(
               height: 14,
             ),
-
-            // =================================================
-            // AI SIGNAL CARD
-            // =================================================
 
             Card(
               child: Padding(
@@ -1154,10 +933,6 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ),
-
-            // =================================================
-            // SIGNAL METRICS
-            // =================================================
 
             Row(
               children: [
@@ -1201,10 +976,6 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(
               height: 10,
             ),
-
-            // =================================================
-            // BUTTONS
-            // =================================================
 
             FilledButton.icon(
               onPressed:
@@ -1255,7 +1026,7 @@ class _HomePageState extends State<HomePage> {
               ),
               label:
                   const Text(
-                'Scan All Markets',
+                'Fast Scan All Markets',
               ),
             ),
 
@@ -1285,7 +1056,7 @@ class _HomePageState extends State<HomePage> {
             ),
 
             // =================================================
-            // NORMAL LOADING
+            // LOADING
             // =================================================
 
             if (
@@ -1304,67 +1075,28 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
 
-            // =================================================
-            // MARKET SCAN PROGRESS
-            // =================================================
-
             if (scanningMarkets)
-              Padding(
+              const Padding(
                 padding:
-                    const EdgeInsets.all(
-                  12,
+                    EdgeInsets.all(
+                  16,
                 ),
                 child: Column(
                   children: [
-                    LinearProgressIndicator(
-                      value:
-                          markets.isEmpty
-                              ? null
-                              : scanProgress /
-                                  markets.length,
+                    LinearProgressIndicator(),
+                    SizedBox(
+                      height: 10,
                     ),
-
-                    const SizedBox(
-                      height: 8,
-                    ),
-
                     Text(
-                      'Scanning market '
-                      '$scanProgress of '
-                      '${markets.length}',
+                      'Scanning 9 markets...',
                     ),
-
-                    if (
-                      currentScanMarket !=
-                      null
-                    )
-                      Padding(
-                        padding:
-                            const EdgeInsets.only(
-                          top: 4,
-                        ),
-                        child:
-                            Text(
-                          currentScanMarket!,
-                          style:
-                              const TextStyle(
-                            fontWeight:
-                                FontWeight.bold,
-                          ),
-                        ),
-                      ),
-
-                    const SizedBox(
-                      height: 6,
+                    SizedBox(
+                      height: 4,
                     ),
-
                     Text(
-                      '${marketResults.length} '
-                      'completed • '
-                      '${marketFailures.length} '
-                      'skipped',
+                      'EMA • RSI • MACD • Momentum • Volatility',
                       style:
-                          const TextStyle(
+                          TextStyle(
                         fontSize: 12,
                       ),
                     ),
@@ -1373,7 +1105,7 @@ class _HomePageState extends State<HomePage> {
               ),
 
             // =================================================
-            // ERROR
+            // ERRORS
             // =================================================
 
             if (error != null)
@@ -1393,79 +1125,225 @@ class _HomePageState extends State<HomePage> {
               ),
 
             // =================================================
-            // FAILED MARKETS
+            // FAST SCANNER RESULTS
             // =================================================
 
-            if (
-              marketFailures.isNotEmpty
-            ) ...[
+            if (fastScan != null) ...[
+              const SizedBox(
+                height: 20,
+              ),
+
+              const Divider(),
+
+              const SizedBox(
+                height: 10,
+              ),
+
+              Row(
+                children: [
+                  const Icon(
+                    Icons.bolt,
+                  ),
+                  const SizedBox(
+                    width: 8,
+                  ),
+                  const Text(
+                    'V4.2 Fast Market Scanner',
+                    style:
+                        TextStyle(
+                      fontSize: 22,
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+
               const SizedBox(
                 height: 12,
               ),
 
-              Card(
-                child: Padding(
-                  padding:
-                      const EdgeInsets.all(
-                    14,
+              Row(
+                children: [
+                  metric(
+                    'Scanned',
+                    '$marketsTested',
                   ),
-                  child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${marketFailures.length} '
-                        'markets skipped',
-                        style:
-                            const TextStyle(
-                          fontWeight:
-                              FontWeight.bold,
-                          color:
-                              Colors.amberAccent,
-                        ),
-                      ),
+                  metric(
+                    'Successful',
+                    '$marketsSuccessful',
+                  ),
+                ],
+              ),
 
-                      const SizedBox(
-                        height: 8,
-                      ),
+              Row(
+                children: [
+                  metric(
+                    'Candidates',
+                    '$candidatesFound',
+                  ),
+                  metric(
+                    'Failures',
+                    '$marketsFailed',
+                  ),
+                ],
+              ),
 
-                      for (
-                        final failure
-                        in marketFailures
-                      )
-                        Padding(
-                          padding:
-                              const EdgeInsets.only(
-                            bottom: 4,
-                          ),
-                          child: Text(
-                            '${failure['market']}'
-                            ' • '
-                            '${failure['status']}',
+              // ===============================================
+              // BEST OPPORTUNITY
+              // ===============================================
+
+              if (bestCandidate != null) ...[
+                const SizedBox(
+                  height: 12,
+                ),
+
+                Card(
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.all(
+                      18,
+                    ),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'BEST OPPORTUNITY',
+                          style:
+                              TextStyle(
+                            fontSize: 14,
+                            fontWeight:
+                                FontWeight.bold,
                           ),
                         ),
-                    ],
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        Text(
+                          bestCandidate[
+                                  'market']
+                              .toString(),
+                          style:
+                              const TextStyle(
+                            fontSize: 34,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+
+                        const SizedBox(
+                          height: 6,
+                        ),
+
+                        Text(
+                          bestCandidate[
+                                  'direction']
+                              .toString(),
+                          style:
+                              TextStyle(
+                            fontSize: 30,
+                            fontWeight:
+                                FontWeight.w900,
+                            color:
+                                decisionColor(
+                              bestCandidate[
+                                      'direction']
+                                  .toString(),
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        Row(
+                          children: [
+                            metric(
+                              'Fast score',
+                              '${bestCandidate['fast_score'] ?? '-'}',
+                            ),
+                            metric(
+                              'RSI',
+                              formatNumber(
+                                bestCandidate[
+                                    'rsi'],
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        Row(
+                          children: [
+                            metric(
+                              'Price',
+                              formatPrice(
+                                bestCandidate[
+                                    'price'],
+                              ),
+                            ),
+                            metric(
+                              'Status',
+                              '${bestCandidate['status'] ?? '-'}',
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        FilledButton.icon(
+                          onPressed:
+                              busy
+                                  ? null
+                                  : analyseBestMarket,
+                          icon:
+                              const Icon(
+                            Icons.psychology,
+                          ),
+                          label:
+                              const Text(
+                            'Analyse Best Market',
+                          ),
+                        ),
+
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        const Text(
+                          'Fast score is a ranking score, '
+                          'not a guaranteed win probability.',
+                          textAlign:
+                              TextAlign.center,
+                          style:
+                              TextStyle(
+                            fontSize: 11,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
 
-            // =================================================
-            // TOP MARKETS
-            // =================================================
+              // ===============================================
+              // TOP 3
+              // ===============================================
 
-            if (
-              rankedMarkets != null
-            ) ...[
               const SizedBox(
-                height: 18,
+                height: 16,
               ),
 
               const Text(
-                'Top Markets',
+                'Top 3 Markets',
                 style:
                     TextStyle(
-                  fontSize: 22,
+                  fontSize: 20,
                   fontWeight:
                       FontWeight.bold,
                 ),
@@ -1475,9 +1353,7 @@ class _HomePageState extends State<HomePage> {
                 height: 8,
               ),
 
-              if (
-                topMarkets.isEmpty
-              )
+              if (topCandidates.isEmpty)
                 const Card(
                   child: Padding(
                     padding:
@@ -1485,9 +1361,7 @@ class _HomePageState extends State<HomePage> {
                       16,
                     ),
                     child: Text(
-                      'No market currently '
-                      'meets the V4 '
-                      'qualification rules.',
+                      'No candidates available.',
                     ),
                   ),
                 ),
@@ -1495,129 +1369,103 @@ class _HomePageState extends State<HomePage> {
               for (
                 int i = 0;
                 i <
-                    topMarkets.length;
+                    topCandidates.length;
                 i++
               )
-                marketCard(
+                fastMarketCard(
                   Map<
                       String,
                       dynamic
                   >.from(
-                    topMarkets[i],
+                    topCandidates[i],
                   ),
                   i + 1,
                 ),
 
               // ===============================================
-              // BEST OPPORTUNITY
+              // FULL RANKING
               // ===============================================
 
-              if (
-                bestMarket != null
-              )
-                Card(
-                  child: Padding(
-                    padding:
-                        const EdgeInsets.all(
-                      16,
-                    ),
-                    child: Column(
-                      children: [
-                        const Text(
-                          'BEST OPPORTUNITY',
-                          style:
-                              TextStyle(
-                            fontWeight:
-                                FontWeight.bold,
-                          ),
-                        ),
+              if (ranking.isNotEmpty) ...[
+                const SizedBox(
+                  height: 16,
+                ),
 
-                        const SizedBox(
-                          height: 8,
-                        ),
-
-                        Text(
-                          bestMarket[
-                                  'market']
-                              .toString(),
-                          style:
-                              const TextStyle(
-                            fontSize: 30,
-                            fontWeight:
-                                FontWeight.w900,
-                          ),
-                        ),
-
-                        const SizedBox(
-                          height: 4,
-                        ),
-
-                        Text(
-                          '${bestMarket['interval'] ?? '-'}'
-                          ' • Score '
-                          '${bestMarket['market_score'] ?? '-'}',
-                        ),
-
-                        const SizedBox(
-                          height: 4,
-                        ),
-
-                        Text(
-                          'Historical win rate '
-                          '${formatPercent(bestMarket['win_rate'])}%',
-                        ),
-
-                        const SizedBox(
-                          height: 4,
-                        ),
-
-                        Text(
-                          'Profit factor '
-                          '${bestMarket['profit_factor'] ?? '-'}',
-                        ),
-
-                        const SizedBox(
-                          height: 4,
-                        ),
-
-                        Text(
-                          'Threshold '
-                          '${bestMarket['threshold_pct'] ?? '-'}%',
-                        ),
-
-                        const SizedBox(
-                          height: 4,
-                        ),
-
-                        Text(
-                          'Status '
-                          '${bestMarket['status'] ?? '-'}',
-                          style:
-                              TextStyle(
-                            color:
-                                statusColor(
-                              bestMarket[
-                                          'status']
-                                      ?.toString() ??
-                                  '',
-                            ),
-                            fontWeight:
-                                FontWeight.bold,
-                          ),
-                        ),
-                      ],
+                ExpansionTile(
+                  title:
+                      const Text(
+                    'Full Market Ranking',
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
+                  children: [
+                    for (
+                      int i = 0;
+                      i <
+                          ranking.length;
+                      i++
+                    )
+                      ListTile(
+                        leading:
+                            CircleAvatar(
+                          child: Text(
+                            '${i + 1}',
+                          ),
+                        ),
+                        title:
+                            Text(
+                          '${ranking[i]['market']}',
+                        ),
+                        subtitle:
+                            Text(
+                          '${ranking[i]['direction']}'
+                          ' • '
+                          '${ranking[i]['status']}',
+                        ),
+                        trailing:
+                            Text(
+                          '${ranking[i]['fast_score']}',
+                          style:
+                              const TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                        onTap:
+                            busy
+                                ? null
+                                : () {
+                                    analyseMarket(
+                                      Map<
+                                          String,
+                                          dynamic
+                                      >.from(
+                                        ranking[i],
+                                      ),
+                                    );
+                                  },
+                      ),
+                  ],
                 ),
+              ],
             ],
 
             // =================================================
-            // BACKTEST
+            // BACKTEST SECTION
             // =================================================
 
             if (bt != null) ...[
               const SizedBox(
-                height: 18,
+                height: 20,
+              ),
+
+              const Divider(),
+
+              const SizedBox(
+                height: 10,
               ),
 
               const Text(
@@ -1716,16 +1564,18 @@ class _HomePageState extends State<HomePage> {
                 ),
                 child: Text(
                   'Safety: no Martingale, '
-                  'no forced daily-profit '
-                  'target, no live broker '
-                  'execution, and no broker '
-                  'password stored in the '
-                  'app. Historical/model '
-                  'results and market '
-                  'rankings do not guarantee '
+                  'no forced daily-profit target, '
+                  'no live broker execution, and no '
+                  'broker password stored in the app. '
+                  'Fast scores, historical/model results '
+                  'and market rankings do not guarantee '
                   'future profit.',
                 ),
               ),
+            ),
+
+            const SizedBox(
+              height: 30,
             ),
           ],
         ),
