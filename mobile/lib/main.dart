@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -31,14 +32,12 @@ class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
   @override
-  State<HomePage> createState() {
-    return _HomePageState();
-  }
+  State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
   // =========================================================
-  // SETTINGS
+  // USER SETTINGS
   // =========================================================
 
   final TextEditingController symbol =
@@ -66,161 +65,448 @@ class _HomePageState extends State<HomePage> {
 
   Map<String, dynamic>? sig;
   Map<String, dynamic>? bt;
-
   Map<String, dynamic>? fastScan;
-
   Map<String, dynamic>? verifiedTrade;
 
   List<Map<String, dynamic>>
       validationHistory = [];
 
   // =========================================================
-  // STATE
+  // APP STATE
   // =========================================================
 
   bool busy = false;
-
   bool scanningMarkets = false;
-
   bool findingVerifiedTrade = false;
 
   String? currentValidationMarket;
-
+  String? networkStatus;
   String? error;
 
+  int currentAttempt = 0;
+  int maximumAttempts = 3;
+
   // =========================================================
-  // HTTP GET
+  // GENERIC GET
   // =========================================================
 
   Future<Map<String, dynamic>> getJson(
     Uri uri, {
     int timeoutSeconds = 120,
   }) async {
-    final response = await http
-        .get(uri)
-        .timeout(
-          Duration(
-            seconds: timeoutSeconds,
-          ),
+    final client = http.Client();
+
+    try {
+      final response = await client
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Connection': 'close',
+            },
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
         );
+      }
 
-    if (response.statusCode != 200) {
-      throw Exception(
-        'HTTP ${response.statusCode}: '
-        '${response.body}',
+      final decoded = jsonDecode(
+        response.body,
       );
-    }
 
-    final decoded = jsonDecode(
-      response.body,
-    );
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected JSON response',
+        );
+      }
 
-    if (decoded is! Map) {
-      throw Exception(
-        'Invalid JSON response from server',
+      return Map<String, dynamic>.from(
+        decoded,
       );
+    } finally {
+      client.close();
     }
-
-    return Map<String, dynamic>.from(
-      decoded,
-    );
   }
 
   // =========================================================
-  // POST JSON WITH RETRY
+  // CHECK WHETHER ERROR IS NETWORK RELATED
   // =========================================================
 
-  Future<Map<String, dynamic>> postJson(
-    Uri uri,
-    dynamic body, {
-    int timeoutSeconds = 240,
-    int retries = 1,
-  }) async {
-    Exception? lastError;
+  bool isNetworkError(
+    Object error,
+  ) {
+    if (error is SocketException) {
+      return true;
+    }
 
-    for (
-      int attempt = 0;
-      attempt <= retries;
-      attempt++
-    ) {
+    if (error is TimeoutException) {
+      return true;
+    }
+
+    if (error is http.ClientException) {
+      return true;
+    }
+
+    final text =
+        error.toString().toLowerCase();
+
+    return text.contains(
+          'socketexception',
+        ) ||
+        text.contains(
+          'clientexception',
+        ) ||
+        text.contains(
+          'failed host lookup',
+        ) ||
+        text.contains(
+          'connection abort',
+        ) ||
+        text.contains(
+          'connection reset',
+        ) ||
+        text.contains(
+          'connection closed',
+        ) ||
+        text.contains(
+          'timed out',
+        ) ||
+        text.contains(
+          'timeout',
+        ) ||
+        text.contains(
+          'http 502',
+        ) ||
+        text.contains(
+          'http 503',
+        ) ||
+        text.contains(
+          'http 504',
+        );
+  }
+
+  // =========================================================
+  // HEALTH CHECK
+  // =========================================================
+
+  Future<bool> checkBackendHealth() async {
+    final uri = Uri.parse(
+      '$apiBase/health',
+    );
+
+    try {
+      final client = http.Client();
+
       try {
-        final response = await http
-            .post(
+        final response = await client
+            .get(
               uri,
               headers: {
                 'Accept':
                     'application/json',
-                'Content-Type':
-                    'application/json',
+                'Connection':
+                    'close',
               },
-              body: jsonEncode(
-                body,
-              ),
             )
             .timeout(
-              Duration(
-                seconds:
-                    timeoutSeconds,
+              const Duration(
+                seconds: 35,
               ),
             );
 
-        if (response.statusCode == 200) {
-          final decoded = jsonDecode(
-            response.body,
+        return response.statusCode == 200;
+      } finally {
+        client.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // =========================================================
+  // WAIT FOR BACKEND TO RECOVER
+  // =========================================================
+
+  Future<bool> waitForBackendRecovery(
+    String market,
+    int attempt,
+  ) async {
+    const delays = [
+      8,
+      12,
+      18,
+    ];
+
+    final delayIndex =
+        (attempt - 1).clamp(
+      0,
+      delays.length - 1,
+    );
+
+    final delay =
+        delays[delayIndex];
+
+    if (mounted) {
+      setState(() {
+        currentValidationMarket =
+            'Connection interrupted';
+
+        networkStatus =
+            'Waiting ${delay}s before '
+            'retrying $market...';
+      });
+    }
+
+    await Future.delayed(
+      Duration(
+        seconds: delay,
+      ),
+    );
+
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Checking Jasong AI '
+            'Trader server...';
+      });
+    }
+
+    bool healthy =
+        await checkBackendHealth();
+
+    if (healthy) {
+      if (mounted) {
+        setState(() {
+          networkStatus =
+              'Server online. '
+              'Retrying $market...';
+        });
+      }
+
+      await Future.delayed(
+        const Duration(
+          seconds: 2,
+        ),
+      );
+
+      return true;
+    }
+
+    // Give Render one more chance to wake.
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Server still waking. '
+            'Checking again...';
+      });
+    }
+
+    await Future.delayed(
+      const Duration(
+        seconds: 10,
+      ),
+    );
+
+    healthy =
+        await checkBackendHealth();
+
+    return healthy;
+  }
+
+  // =========================================================
+  // RESILIENT POST
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      postJsonOnce(
+    Uri uri,
+    dynamic body, {
+    int timeoutSeconds = 240,
+  }) async {
+    final client = http.Client();
+
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: {
+              'Accept':
+                  'application/json',
+              'Content-Type':
+                  'application/json',
+              'Connection':
+                  'close',
+            },
+            body: jsonEncode(
+              body,
+            ),
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
+            ),
           );
 
-          if (decoded is! Map) {
-            throw Exception(
-              'Backend returned an '
-              'unexpected response format',
-            );
-          }
-
-          return Map<String, dynamic>.from(
-            decoded,
-          );
-        }
-
-        final temporaryError =
-            response.statusCode == 502 ||
-                response.statusCode == 503 ||
-                response.statusCode == 504;
-
-        lastError = Exception(
+      if (response.statusCode != 200) {
+        throw HttpException(
           'HTTP ${response.statusCode}: '
           '${response.body}',
         );
+      }
 
-        if (!temporaryError) {
-          throw lastError;
-        }
-      } on TimeoutException catch (e) {
-        lastError = Exception(
-          'Deep validation timed out: $e',
-        );
-      } on FormatException catch (e) {
-        lastError = Exception(
-          'Invalid JSON from backend: $e',
-        );
-      } catch (e) {
-        lastError = Exception(
-          e.toString(),
+      final decoded = jsonDecode(
+        response.body,
+      );
+
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Backend returned an '
+          'unexpected JSON response',
         );
       }
 
-      if (attempt < retries) {
-        await Future.delayed(
-          const Duration(
-            seconds: 5,
-          ),
+      return Map<String, dynamic>.from(
+        decoded,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  // =========================================================
+  // RESILIENT DEEP VALIDATION
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      deepValidateWithRecovery(
+    Map<String, dynamic> candidate,
+  ) async {
+    final market =
+        candidate['market']
+                ?.toString() ??
+            'UNKNOWN';
+
+    final uri = Uri.parse(
+      '$apiBase/deep-validate',
+    ).replace(
+      queryParameters: {
+        'risk_mode':
+            risk,
+        'starting_balance':
+            balance.text.trim(),
+        'payout':
+            '0.8',
+        'max_candidates':
+            '1',
+      },
+    );
+
+    final body = [
+      {
+        'market':
+            candidate['market'],
+        'symbol':
+            candidate['symbol'],
+        'fast_score':
+            candidate['fast_score'] ??
+                candidate['score'] ??
+                0.0,
+        'direction':
+            candidate['direction'] ??
+                'WAIT',
+        'status':
+            candidate['status'] ??
+                'UNKNOWN',
+      }
+    ];
+
+    Object? lastError;
+
+    for (
+      int attempt = 1;
+      attempt <= maximumAttempts;
+      attempt++
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
         );
+      }
+
+      setState(() {
+        currentAttempt =
+            attempt;
+
+        currentValidationMarket =
+            'Deep validating $market';
+
+        networkStatus =
+            'Attempt $attempt/'
+            '$maximumAttempts';
+      });
+
+      try {
+        final result =
+            await postJsonOnce(
+          uri,
+          body,
+          timeoutSeconds: 240,
+        );
+
+        if (mounted) {
+          setState(() {
+            networkStatus =
+                '$market response received';
+          });
+        }
+
+        return result;
+      } catch (e) {
+        lastError = e;
+
+        if (!isNetworkError(e)) {
+          rethrow;
+        }
+
+        if (attempt >=
+            maximumAttempts) {
+          break;
+        }
+
+        final recovered =
+            await waitForBackendRecovery(
+          market,
+          attempt,
+        );
+
+        if (!recovered &&
+            attempt <
+                maximumAttempts) {
+          if (mounted) {
+            setState(() {
+              networkStatus =
+                  'Network still unavailable. '
+                  'Will retry $market.';
+            });
+          }
+        }
       }
     }
 
-    throw lastError ??
-        Exception(
-          'Unknown backend error',
-        );
+    throw NetworkValidationException(
+      market: market,
+      message:
+          lastError?.toString() ??
+              'Unknown network failure',
+    );
   }
 
   // =========================================================
@@ -337,7 +623,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // FAST SCAN
+  // FAST SCAN REQUEST
   // =========================================================
 
   Future<Map<String, dynamic>>
@@ -346,12 +632,9 @@ class _HomePageState extends State<HomePage> {
       '$apiBase/fast-scan',
     ).replace(
       queryParameters: {
-        'period':
-            '5d',
-        'interval':
-            '15m',
-        'top_n':
-            '3',
+        'period': '5d',
+        'interval': '15m',
+        'top_n': '3',
       },
     );
 
@@ -360,6 +643,10 @@ class _HomePageState extends State<HomePage> {
       timeoutSeconds: 180,
     );
   }
+
+  // =========================================================
+  // FAST SCAN BUTTON
+  // =========================================================
 
   Future<void> scanAllMarkets() async {
     if (busy) {
@@ -403,56 +690,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // DEEP VALIDATE ONE MARKET
-  // =========================================================
-
-  Future<Map<String, dynamic>>
-      deepValidateOne(
-    Map<String, dynamic> candidate,
-  ) async {
-    final uri = Uri.parse(
-      '$apiBase/deep-validate',
-    ).replace(
-      queryParameters: {
-        'risk_mode':
-            risk,
-        'starting_balance':
-            balance.text.trim(),
-        'payout':
-            '0.8',
-        'max_candidates':
-            '1',
-      },
-    );
-
-    final requestBody = [
-      {
-        'market':
-            candidate['market'],
-        'symbol':
-            candidate['symbol'],
-        'fast_score':
-            candidate['fast_score'] ??
-                candidate['score'] ??
-                0.0,
-        'direction':
-            candidate['direction'] ??
-                'WAIT',
-        'status':
-            candidate['status'] ??
-                'UNKNOWN',
-      }
-    ];
-
-    return postJson(
-      uri,
-      requestBody,
-      timeoutSeconds: 240,
-      retries: 1,
-    );
-  }
-
-  // =========================================================
   // FIND VERIFIED TRADE
   // =========================================================
 
@@ -474,13 +711,17 @@ class _HomePageState extends State<HomePage> {
 
       error = null;
 
+      networkStatus = null;
+
+      currentAttempt = 0;
+
       currentValidationMarket =
-          'Scanning 9 markets...';
+          'Scanning all markets...';
     });
 
     try {
       // =====================================================
-      // STEP 1: FAST SCAN
+      // 1. FAST SCAN
       // =====================================================
 
       final scanResult =
@@ -503,8 +744,8 @@ class _HomePageState extends State<HomePage> {
       if (rawCandidates == null ||
           rawCandidates.isEmpty) {
         throw Exception(
-          'Fast scan returned no '
-          'candidates',
+          'Fast scanner returned '
+          'no candidates',
         );
       }
 
@@ -524,23 +765,23 @@ class _HomePageState extends State<HomePage> {
 
       if (candidates.isEmpty) {
         throw Exception(
-          'No valid candidate records '
-          'were returned',
+          'No valid candidate '
+          'records received',
         );
       }
 
-      // =====================================================
-      // STEP 2: VALIDATE TOP THREE
-      // =====================================================
-
-      final maximum =
+      final count =
           candidates.length > 3
               ? 3
               : candidates.length;
 
+      // =====================================================
+      // 2. DEEP VALIDATE EACH MARKET
+      // =====================================================
+
       for (
         int index = 0;
-        index < maximum;
+        index < count;
         index++
       ) {
         final candidate =
@@ -558,219 +799,72 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           currentValidationMarket =
               'Deep validating '
-              '#${index + 1} '
-              '$market...';
+              '#${index + 1} $market';
+
+          networkStatus =
+              'Preparing validation...';
         });
 
+        Map<String, dynamic> deep;
+
         try {
-          final deep =
-              await deepValidateOne(
+          deep =
+              await deepValidateWithRecovery(
             candidate,
           );
-
-          // ===============================================
-          // READ EXACT V4.6 RESPONSE
-          // ===============================================
-
-          final finalStatus =
-              deep['final_status']
-                      ?.toString() ??
-                  'UNKNOWN';
-
-          Map<String, dynamic>?
-              finalMarket;
-
-          final rawFinalMarket =
-              deep['final_market'];
-
-          if (rawFinalMarket is Map) {
-            finalMarket =
-                Map<String, dynamic>.from(
-              rawFinalMarket,
-            );
-          }
-
-          // ===============================================
-          // VERIFIED?
-          // ===============================================
-
-          final verifiedByMarket =
-              finalMarket?[
-                      'verified'] ==
-                  true;
-
-          final verifiedByStatus =
-              finalStatus ==
-                  'VERIFIED_TRADE';
-
-          final verified =
-              verifiedByMarket ||
-                  verifiedByStatus;
-
-          final deepStatus =
-              finalMarket?[
-                          'status']
-                      ?.toString() ??
-                  finalStatus;
-
-          final historyItem =
-              <String, dynamic>{
-            'position':
-                index + 1,
-
-            'market':
-                market,
-
-            'symbol':
-                candidate[
-                    'symbol'],
-
-            'fast_score':
-                candidate[
-                    'fast_score'],
-
-            'fast_direction':
-                candidate[
-                    'direction'],
-
-            'deep_status':
-                deepStatus,
-
-            'verified':
-                verified,
-
-            'deep_score':
-                finalMarket?[
-                    'deep_score'],
-
-            'trades':
-                finalMarket?[
-                    'trades'],
-
-            'wins':
-                finalMarket?[
-                    'wins'],
-
-            'losses':
-                finalMarket?[
-                    'losses'],
-
-            'win_rate':
-                finalMarket?[
-                    'win_rate'],
-
-            'profit_factor':
-                finalMarket?[
-                    'profit_factor'],
-
-            'return_pct':
-                finalMarket?[
-                    'return_pct'],
-
-            'max_drawdown':
-                finalMarket?[
-                    'max_drawdown'],
-
-            'interval':
-                finalMarket?[
-                    'interval'],
-
-            'period':
-                finalMarket?[
-                    'period'],
-
-            'threshold_pct':
-                finalMarket?[
-                    'threshold_pct'],
-
-            'holding_candles':
-                finalMarket?[
-                    'holding_candles'],
-          };
-
+        } on NetworkValidationException catch (e) {
           if (!mounted) {
             return;
           }
 
           setState(() {
-            validationHistory.add(
-              historyItem,
-            );
-          });
+            validationHistory.add({
+              'position':
+                  index + 1,
 
-          // ===============================================
-          // NOT VERIFIED → NEXT MARKET
-          // ===============================================
+              'market':
+                  market,
 
-          if (!verified ||
-              finalMarket == null) {
-            continue;
-          }
+              'symbol':
+                  candidate[
+                      'symbol'],
 
-          // ===============================================
-          // DIRECTION AGREEMENT
-          // ===============================================
+              'fast_score':
+                  candidate[
+                      'fast_score'],
 
-          final fastDirection =
-              candidate[
-                      'direction']
-                  ?.toString();
+              'fast_direction':
+                  candidate[
+                      'direction'],
 
-          final deepDirection =
-              finalMarket[
-                      'direction']
-                  ?.toString();
+              'deep_status':
+                  'NETWORK_ERROR',
 
-          if (fastDirection !=
-              deepDirection) {
-            setState(() {
-              validationHistory.last[
-                      'verified'] =
-                  false;
+              'verified':
+                  false,
 
-              validationHistory.last[
-                      'deep_status'] =
-                  'DIRECTION_MISMATCH';
+              'error':
+                  e.message,
             });
 
-            continue;
-          }
-
-          // ===============================================
-          // VERIFIED TRADE FOUND
-          // ===============================================
-
-          final result = <
-              String, dynamic>{
-            ...finalMarket,
-
-            'fast_rank':
-                index + 1,
-
-            'fast_score':
-                candidate[
-                    'fast_score'],
-
-            'fast_direction':
-                fastDirection,
-
-            'direction_agreement':
-                true,
-          };
-
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            verifiedTrade = result;
-
             currentValidationMarket =
-                '$market VERIFIED';
+                '$market validation '
+                'could not complete';
+
+            networkStatus =
+                'Network connection failed '
+                'after $maximumAttempts attempts.';
           });
 
-          // STOP LOOP
-          break;
+          // IMPORTANT:
+          // Do NOT move to candidate #2 after a
+          // network failure.
+          throw NetworkValidationException(
+            market:
+                market,
+            message:
+                e.message,
+          );
         } catch (e) {
           if (!mounted) {
             return;
@@ -806,32 +900,211 @@ class _HomePageState extends State<HomePage> {
                   e.toString(),
             });
           });
+
+          // Non-network backend error:
+          // stop rather than falsely treating the
+          // candidate as rejected.
+          break;
         }
-      }
 
-      // =====================================================
-      // FINISHED WITHOUT VERIFIED TRADE
-      // =====================================================
+        // ===================================================
+        // PARSE V4.6 RESPONSE
+        // ===================================================
 
-      if (mounted &&
-          verifiedTrade == null) {
-        final hasSuccessfulValidation =
-            validationHistory.any(
-          (item) =>
-              item['deep_status'] !=
-              'ERROR',
-        );
+        final finalStatus =
+            deep['final_status']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        Map<String, dynamic>?
+            finalMarket;
+
+        final rawFinalMarket =
+            deep['final_market'];
+
+        if (rawFinalMarket is Map) {
+          finalMarket =
+              Map<String, dynamic>.from(
+            rawFinalMarket,
+          );
+        }
+
+        final verified =
+            finalMarket?[
+                        'verified'] ==
+                    true ||
+                finalStatus ==
+                    'VERIFIED_TRADE';
+
+        final deepStatus =
+            finalMarket?[
+                        'status']
+                    ?.toString() ??
+                finalStatus;
+
+        final history = <
+            String, dynamic>{
+          'position':
+              index + 1,
+
+          'market':
+              market,
+
+          'symbol':
+              candidate[
+                  'symbol'],
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              candidate[
+                  'direction'],
+
+          'deep_status':
+              deepStatus,
+
+          'verified':
+              verified,
+
+          'deep_score':
+              finalMarket?[
+                  'deep_score'],
+
+          'trades':
+              finalMarket?[
+                  'trades'],
+
+          'wins':
+              finalMarket?[
+                  'wins'],
+
+          'losses':
+              finalMarket?[
+                  'losses'],
+
+          'win_rate':
+              finalMarket?[
+                  'win_rate'],
+
+          'profit_factor':
+              finalMarket?[
+                  'profit_factor'],
+
+          'return_pct':
+              finalMarket?[
+                  'return_pct'],
+
+          'max_drawdown':
+              finalMarket?[
+                  'max_drawdown'],
+
+          'interval':
+              finalMarket?[
+                  'interval'],
+
+          'period':
+              finalMarket?[
+                  'period'],
+
+          'threshold_pct':
+              finalMarket?[
+                  'threshold_pct'],
+
+          'holding_candles':
+              finalMarket?[
+                  'holding_candles'],
+        };
+
+        if (!mounted) {
+          return;
+        }
 
         setState(() {
-          if (hasSuccessfulValidation) {
-            currentValidationMarket =
-                'No verified trade found';
-          } else {
-            currentValidationMarket =
-                'Validation failed';
-          }
+          validationHistory.add(
+            history,
+          );
+
+          networkStatus =
+              '$market validation complete';
         });
+
+        // ===================================================
+        // NOT VERIFIED
+        // ===================================================
+
+        if (!verified ||
+            finalMarket == null) {
+          continue;
+        }
+
+        // ===================================================
+        // DIRECTION AGREEMENT
+        // ===================================================
+
+        final fastDirection =
+            candidate[
+                    'direction']
+                ?.toString();
+
+        final deepDirection =
+            finalMarket[
+                    'direction']
+                ?.toString();
+
+        if (fastDirection !=
+            deepDirection) {
+          setState(() {
+            validationHistory.last[
+                    'verified'] =
+                false;
+
+            validationHistory.last[
+                    'deep_status'] =
+                'DIRECTION_MISMATCH';
+          });
+
+          continue;
+        }
+
+        // ===================================================
+        // VERIFIED
+        // ===================================================
+
+        final result = <
+            String, dynamic>{
+          ...finalMarket,
+
+          'fast_rank':
+              index + 1,
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              fastDirection,
+
+          'direction_agreement':
+              true,
+        };
+
+        setState(() {
+          verifiedTrade =
+              result;
+
+          currentValidationMarket =
+              '$market VERIFIED';
+
+          networkStatus =
+              'Deep validation passed';
+        });
+
+        break;
       }
+    } on NetworkValidationException catch (_) {
+      // Already shown in the validation card.
     } catch (e) {
       if (!mounted) {
         return;
@@ -846,9 +1119,7 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         setState(() {
           busy = false;
-
           scanningMarkets = false;
-
           findingVerifiedTrade = false;
         });
       }
@@ -856,23 +1127,25 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // ANALYSE SELECTED MARKET
+  // ANALYSE MARKET
   // =========================================================
 
   Future<void> analyseMarket(
     Map<String, dynamic> market,
   ) async {
-    final selectedSymbol =
+    final selected =
         market['symbol']
             ?.toString();
 
-    if (selectedSymbol == null ||
-        selectedSymbol.isEmpty) {
+    if (selected == null ||
+        selected.isEmpty) {
       return;
     }
 
     setState(() {
-      symbol.text = selectedSymbol;
+      symbol.text =
+          selected;
+
       error = null;
     });
 
@@ -921,28 +1194,25 @@ class _HomePageState extends State<HomePage> {
         queryParameters: {
           'symbol':
               symbol.text.trim(),
-
           'direction':
               direction!,
-
           'confidence':
               '${sig!['confidence']}',
-
           'entry_price':
               '${sig!['price']}',
-
           'stake':
               '${sig!['suggested_paper_stake']}',
         },
       );
 
-      final response = await http
-          .post(uri)
-          .timeout(
-            const Duration(
-              seconds: 30,
-            ),
-          );
+      final response =
+          await http
+              .post(uri)
+              .timeout(
+                const Duration(
+                  seconds: 30,
+                ),
+              );
 
       if (response.statusCode != 200) {
         throw Exception(
@@ -957,7 +1227,8 @@ class _HomePageState extends State<HomePage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(
         const SnackBar(
-          content: Text(
+          content:
+              Text(
             'Paper trade recorded',
           ),
         ),
@@ -968,7 +1239,8 @@ class _HomePageState extends State<HomePage> {
       }
 
       setState(() {
-        error = e.toString();
+        error =
+            e.toString();
       });
     } finally {
       if (mounted) {
@@ -1001,7 +1273,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // UI HELPERS
+  // FORMATTERS
   // =========================================================
 
   Color decisionColor(
@@ -1023,25 +1295,22 @@ class _HomePageState extends State<HomePage> {
   ) {
     switch (value) {
       case 'VERIFIED':
-        return Colors.greenAccent;
-
       case 'VERIFIED_TRADE':
-        return Colors.greenAccent;
-
       case 'STRONG':
         return Colors.greenAccent;
 
       case 'WATCH':
         return Colors.amberAccent;
 
-      case 'REJECT':
-        return Colors.redAccent;
-
-      case 'ERROR':
-        return Colors.redAccent;
+      case 'NETWORK_ERROR':
+        return Colors.orangeAccent;
 
       case 'DIRECTION_MISMATCH':
         return Colors.orangeAccent;
+
+      case 'REJECT':
+      case 'ERROR':
+        return Colors.redAccent;
 
       default:
         return Colors.white70;
@@ -1095,6 +1364,10 @@ class _HomePageState extends State<HomePage> {
 
     return '0.0';
   }
+
+  // =========================================================
+  // METRIC
+  // =========================================================
 
   Widget metric(
     String label,
@@ -1186,7 +1459,10 @@ class _HomePageState extends State<HomePage> {
                 Icon(
                   verified
                       ? Icons.verified
-                      : Icons.cancel_outlined,
+                      : status ==
+                              'NETWORK_ERROR'
+                          ? Icons.wifi_off
+                          : Icons.cancel_outlined,
                   color:
                       verified
                           ? Colors.greenAccent
@@ -1216,16 +1492,11 @@ class _HomePageState extends State<HomePage> {
             ),
 
             if (item['deep_score'] !=
-                null) ...[
-              const SizedBox(
-                height: 6,
-              ),
-
+                null)
               Text(
                 'Deep score: '
                 '${formatNumber(item['deep_score'])}',
               ),
-            ],
 
             if (item['win_rate'] !=
                 null)
@@ -1256,9 +1527,9 @@ class _HomePageState extends State<HomePage> {
                 errorMessage,
                 style:
                     const TextStyle(
-                  color:
-                      Colors.redAccent,
                   fontSize: 12,
+                  color:
+                      Colors.orangeAccent,
                 ),
               ),
             ],
@@ -1291,10 +1562,14 @@ class _HomePageState extends State<HomePage> {
                 ?.toString() ??
             '-';
 
+    final rawScore =
+        market['fast_score'] ??
+            0.0;
+
     final score =
-        (market['fast_score'] ??
-                0.0)
-            as num;
+        rawScore is num
+            ? rawScore.toDouble()
+            : 0.0;
 
     final reasons =
         (market['reasons']
@@ -1303,13 +1578,14 @@ class _HomePageState extends State<HomePage> {
 
     return Card(
       child: InkWell(
-        onTap: busy
-            ? null
-            : () {
-                analyseMarket(
-                  market,
-                );
-              },
+        onTap:
+            busy
+                ? null
+                : () {
+                    analyseMarket(
+                      market,
+                    );
+                  },
         child: Padding(
           padding:
               const EdgeInsets.all(
@@ -1323,8 +1599,7 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Expanded(
                     child: Text(
-                      '#$rank '
-                      '$marketName',
+                      '#$rank $marketName',
                       style:
                           const TextStyle(
                         fontSize: 20,
@@ -1360,12 +1635,12 @@ class _HomePageState extends State<HomePage> {
                     status,
                     style:
                         TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
                       color:
                           statusColor(
                         status,
                       ),
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
 
@@ -1411,9 +1686,9 @@ class _HomePageState extends State<HomePage> {
                       .join(' • '),
                   style:
                       const TextStyle(
+                    fontSize: 12,
                     color:
                         Colors.white70,
-                    fontSize: 12,
                   ),
                 ),
               ],
@@ -1425,7 +1700,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // MAIN UI
+  // BUILD
   // =========================================================
 
   @override
@@ -1459,24 +1734,30 @@ class _HomePageState extends State<HomePage> {
                 as List?) ??
             const [];
 
-    final allRanking =
+    final ranking =
         (fastScan?['ranking']
                     as List?) ??
             const [];
 
-    final hasValidationErrors =
-        validationHistory.isNotEmpty &&
-            validationHistory.every(
-              (item) =>
-                  item[
-                      'deep_status'] ==
-                  'ERROR',
-            );
+    final hasNetworkFailure =
+        validationHistory.any(
+      (item) =>
+          item['deep_status'] ==
+          'NETWORK_ERROR',
+    );
+
+    final hasBackendFailure =
+        validationHistory.any(
+      (item) =>
+          item['deep_status'] ==
+          'ERROR',
+    );
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Jasong AI Trader V4.6',
+        title:
+            const Text(
+          'Jasong AI Trader V4.7',
         ),
         actions: [
           IconButton(
@@ -1783,48 +2064,89 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
 
+            // =================================================
+            // NETWORK RECOVERY UI
+            // =================================================
+
             if (findingVerifiedTrade)
-              Padding(
-                padding:
-                    const EdgeInsets.all(
-                  18,
-                ),
-                child: Column(
-                  children: [
-                    const LinearProgressIndicator(),
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const LinearProgressIndicator(),
 
-                    const SizedBox(
-                      height: 10,
-                    ),
-
-                    Text(
-                      currentValidationMarket ??
-                          'Working...',
-                      textAlign:
-                          TextAlign.center,
-                      style:
-                          const TextStyle(
-                        fontWeight:
-                            FontWeight.bold,
+                      const SizedBox(
+                        height: 14,
                       ),
-                    ),
 
-                    const SizedBox(
-                      height: 4,
-                    ),
-
-                    const Text(
-                      'Please allow deep validation '
-                      'to finish. This can take longer '
-                      'than the fast scan.',
-                      textAlign:
-                          TextAlign.center,
-                      style:
-                          TextStyle(
-                        fontSize: 12,
+                      Text(
+                        currentValidationMarket ??
+                            'Working...',
+                        textAlign:
+                            TextAlign.center,
+                        style:
+                            const TextStyle(
+                          fontSize: 18,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
                       ),
-                    ),
-                  ],
+
+                      if (currentAttempt > 0) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        Text(
+                          'Attempt '
+                          '$currentAttempt/'
+                          '$maximumAttempts',
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.tealAccent,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                      ],
+
+                      if (networkStatus != null) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        Text(
+                          networkStatus!,
+                          textAlign:
+                              TextAlign.center,
+                        ),
+                      ],
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'The same candidate will be '
+                        'retried if the network drops. '
+                        'A network error will not be '
+                        'treated as a rejected trade.',
+                        textAlign:
+                            TextAlign.center,
+                        style:
+                            TextStyle(
+                          fontSize: 11,
+                          color:
+                              Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
 
@@ -1847,7 +2169,7 @@ class _HomePageState extends State<HomePage> {
               Padding(
                 padding:
                     const EdgeInsets.only(
-                  top: 12,
+                  top: 10,
                 ),
                 child: Text(
                   error!,
@@ -1860,12 +2182,12 @@ class _HomePageState extends State<HomePage> {
               ),
 
             // =================================================
-            // VERIFIED OPPORTUNITY
+            // VERIFIED TRADE
             // =================================================
 
             if (verifiedTrade != null) ...[
               const SizedBox(
-                height: 22,
+                height: 20,
               ),
 
               Card(
@@ -1878,9 +2200,9 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       const Icon(
                         Icons.verified,
+                        size: 50,
                         color:
                             Colors.greenAccent,
-                        size: 48,
                       ),
 
                       const SizedBox(
@@ -1893,6 +2215,7 @@ class _HomePageState extends State<HomePage> {
                             TextStyle(
                           color:
                               Colors.greenAccent,
+                          fontSize: 16,
                           fontWeight:
                               FontWeight.bold,
                         ),
@@ -1976,12 +2299,12 @@ class _HomePageState extends State<HomePage> {
                         children: [
                           metric(
                             'Trades',
-                            '${verifiedTrade!['trades']}',
+                            '${verifiedTrade!['trades'] ?? '-'}',
                           ),
 
                           metric(
                             'Fast rank',
-                            '#${verifiedTrade!['fast_rank']}',
+                            '#${verifiedTrade!['fast_rank'] ?? '-'}',
                           ),
                         ],
                       ),
@@ -1991,22 +2314,27 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       Text(
-                        '${verifiedTrade!['interval']}'
+                        'Validated setup: '
+                        '${verifiedTrade!['interval'] ?? '-'}'
                         ' • '
-                        '${verifiedTrade!['period']}'
+                        '${verifiedTrade!['period'] ?? '-'}'
                         ' • Hold '
-                        '${verifiedTrade!['holding_candles']} candles',
+                        '${verifiedTrade!['holding_candles'] ?? '-'} candles',
                         textAlign:
                             TextAlign.center,
                       ),
 
+                      const SizedBox(
+                        height: 4,
+                      ),
+
                       Text(
-                        'Threshold '
-                        '${verifiedTrade!['threshold_pct']}%',
+                        'Threshold: '
+                        '${verifiedTrade!['threshold_pct'] ?? '-'}%',
                       ),
 
                       const SizedBox(
-                        height: 12,
+                        height: 14,
                       ),
 
                       FilledButton.icon(
@@ -2029,10 +2357,9 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       const Text(
-                        'VERIFIED means this historical '
-                        'setup passed the validation rules. '
-                        'It does not guarantee the next '
-                        'trade will win.',
+                        'Historical verification does '
+                        'not guarantee that the next '
+                        'trade will be profitable.',
                         textAlign:
                             TextAlign.center,
                         style:
@@ -2049,12 +2376,69 @@ class _HomePageState extends State<HomePage> {
             ],
 
             // =================================================
-            // VALIDATION ERROR
+            // NETWORK FAILURE
             // =================================================
 
             if (!findingVerifiedTrade &&
                 verifiedTrade == null &&
-                hasValidationErrors)
+                hasNetworkFailure)
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.wifi_off,
+                        size: 46,
+                        color:
+                            Colors.orangeAccent,
+                      ),
+
+                      const SizedBox(
+                        height: 10,
+                      ),
+
+                      const Text(
+                        'NETWORK VALIDATION ERROR',
+                        style:
+                            TextStyle(
+                          fontSize: 20,
+                          fontWeight:
+                              FontWeight.bold,
+                          color:
+                              Colors.orangeAccent,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'The trade was NOT rejected. '
+                        'The connection to the validation '
+                        'server failed after retries. '
+                        'Run Find Verified Trade again '
+                        'when the connection is stable.',
+                        textAlign:
+                            TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // =================================================
+            // BACKEND FAILURE
+            // =================================================
+
+            if (!findingVerifiedTrade &&
+                verifiedTrade == null &&
+                hasBackendFailure &&
+                !hasNetworkFailure)
               Card(
                 child: Padding(
                   padding:
@@ -2065,7 +2449,7 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       const Icon(
                         Icons.error_outline,
-                        size: 42,
+                        size: 46,
                         color:
                             Colors.redAccent,
                       ),
@@ -2078,11 +2462,11 @@ class _HomePageState extends State<HomePage> {
                         'VALIDATION ERROR',
                         style:
                             TextStyle(
-                          fontSize: 22,
-                          fontWeight:
-                              FontWeight.bold,
                           color:
                               Colors.redAccent,
+                          fontSize: 20,
+                          fontWeight:
+                              FontWeight.bold,
                         ),
                       ),
 
@@ -2091,9 +2475,9 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       const Text(
-                        'The markets were not rejected. '
-                        'Deep validation failed to complete. '
-                        'See the error details below.',
+                        'Deep validation encountered '
+                        'an application error. '
+                        'See the details below.',
                         textAlign:
                             TextAlign.center,
                       ),
@@ -2109,7 +2493,8 @@ class _HomePageState extends State<HomePage> {
             if (!findingVerifiedTrade &&
                 verifiedTrade == null &&
                 validationHistory.isNotEmpty &&
-                !hasValidationErrors)
+                !hasNetworkFailure &&
+                !hasBackendFailure)
               Card(
                 child: Padding(
                   padding:
@@ -2120,7 +2505,7 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       const Icon(
                         Icons.hourglass_empty,
-                        size: 42,
+                        size: 44,
                         color:
                             Colors.amberAccent,
                       ),
@@ -2133,7 +2518,7 @@ class _HomePageState extends State<HomePage> {
                         'NO VERIFIED TRADE',
                         style:
                             TextStyle(
-                          fontSize: 22,
+                          fontSize: 21,
                           fontWeight:
                               FontWeight.bold,
                         ),
@@ -2143,14 +2528,10 @@ class _HomePageState extends State<HomePage> {
                         height: 8,
                       ),
 
-                      Text(
-                        '${validationHistory.length} '
-                        'candidate(s) were evaluated.',
-                      ),
-
                       const Text(
-                        'No trade should be forced when '
-                        'the validation rules are not met.',
+                        'The tested candidates did '
+                        'not satisfy deep-validation '
+                        'requirements.',
                         textAlign:
                             TextAlign.center,
                       ),
@@ -2160,7 +2541,7 @@ class _HomePageState extends State<HomePage> {
               ),
 
             // =================================================
-            // DEEP VALIDATION HISTORY
+            // VALIDATION HISTORY
             // =================================================
 
             if (validationHistory.isNotEmpty) ...[
@@ -2190,7 +2571,7 @@ class _HomePageState extends State<HomePage> {
             ],
 
             // =================================================
-            // FAST SCAN
+            // FAST SCANNER
             // =================================================
 
             if (fastScan != null) ...[
@@ -2272,7 +2653,7 @@ class _HomePageState extends State<HomePage> {
                   i + 1,
                 ),
 
-              if (allRanking.isNotEmpty)
+              if (ranking.isNotEmpty)
                 ExpansionTile(
                   title:
                       const Text(
@@ -2286,7 +2667,7 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     for (
                       int i = 0;
-                      i < allRanking.length;
+                      i < ranking.length;
                       i++
                     )
                       ListTile(
@@ -2294,19 +2675,22 @@ class _HomePageState extends State<HomePage> {
                             Text(
                           '#${i + 1}',
                         ),
+
                         title:
                             Text(
-                          '${allRanking[i]['market']}',
+                          '${ranking[i]['market']}',
                         ),
+
                         subtitle:
                             Text(
-                          '${allRanking[i]['direction']}'
+                          '${ranking[i]['direction']}'
                           ' • '
-                          '${allRanking[i]['status']}',
+                          '${ranking[i]['status']}',
                         ),
+
                         trailing:
                             Text(
-                          '${allRanking[i]['fast_score']}',
+                          '${ranking[i]['fast_score']}',
                         ),
                       ),
                   ],
@@ -2341,7 +2725,9 @@ class _HomePageState extends State<HomePage> {
 
                   metric(
                     'Win rate',
-                    '${formatPercent(bt!['win_rate'])}%',
+                    '${formatPercent(
+                      bt!['win_rate'],
+                    )}%',
                   ),
                 ],
               ),
@@ -2350,12 +2736,16 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   metric(
                     'Return',
-                    '${formatPercent(bt!['return_pct'])}%',
+                    '${formatPercent(
+                      bt!['return_pct'],
+                    )}%',
                   ),
 
                   metric(
                     'Max DD',
-                    '${formatPercent(bt!['max_drawdown'])}%',
+                    '${formatPercent(
+                      bt!['max_drawdown'],
+                    )}%',
                   ),
                 ],
               ),
@@ -2371,20 +2761,24 @@ class _HomePageState extends State<HomePage> {
                         show:
                             false,
                       ),
+
                       borderData:
                           FlBorderData(
                         show:
                             true,
                       ),
+
                       lineBarsData: [
                         LineChartBarData(
                           isCurved:
                               true,
+
                           dotData:
                               const FlDotData(
                             show:
                                 false,
                           ),
+
                           spots: [
                             for (
                               int i = 0;
@@ -2418,11 +2812,11 @@ class _HomePageState extends State<HomePage> {
                   14,
                 ),
                 child: Text(
-                  'Safety: this application is for '
-                  'AI-assisted research and paper trading. '
-                  'Historical win rates, fast scores, '
-                  'deep-validation results and model '
-                  'outputs do not guarantee future profit.',
+                  'Safety: Jasong AI Trader is for '
+                  'AI-assisted analysis and paper trading. '
+                  'A VERIFIED result means the historical '
+                  'validation criteria passed; it does not '
+                  'guarantee the next trade will win.',
                 ),
               ),
             ),
@@ -2433,6 +2827,30 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+
+// ===========================================================
+// CUSTOM NETWORK EXCEPTION
+// ===========================================================
+
+class NetworkValidationException
+    implements Exception {
+  final String market;
+  final String message;
+
+  NetworkValidationException({
+    required this.market,
+    required this.message,
+  });
+
+  @override
+  String toString() {
+    return (
+      'Network validation failed '
+      'for $market: $message'
     );
   }
 }
