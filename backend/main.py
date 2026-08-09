@@ -1,3 +1,4 @@
+from strategy_optimizer import optimise_strategy
 from optimizer import threshold_sweep
 MARKETS = {
     "EURUSD": "EURUSD=X",
@@ -308,6 +309,43 @@ def run_threshold_sweep(
         "period": period,
         "interval": interval,
         "holding_candles": holding_candles,
+        "live_execution": False,
+    })
+
+    return result
+@app.get("/strategy-optimize")
+def run_strategy_optimize(
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    raw = get_data(symbol, period, interval)
+
+    ind = add_indicators(raw)
+    model = train_model(ind)
+    enriched = enrich(ind, model)
+
+    result = optimise_strategy(
+        enriched,
+        PROFILES[risk_mode],
+        starting_balance=starting_balance,
+        payout=payout,
+    )
+
+    result.update({
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
         "live_execution": False,
     })
 
