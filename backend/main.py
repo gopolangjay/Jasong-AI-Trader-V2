@@ -1,3 +1,4 @@
+from deep_validator import validate_candidates
 from fast_scanner import fast_scan_markets
 from sequential_scanner import build_top_markets
 from fastapi import Body
@@ -521,6 +522,46 @@ def run_fast_scan(
         period=period,
         interval=interval,
         top_n=top_n,
+    )
+
+    return result
+@app.post("/deep-validate")
+def run_deep_validate(
+    candidates: list[dict],
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    max_candidates: int = 3,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="No candidates supplied"
+        )
+
+    if max_candidates < 1 or max_candidates > 3:
+        raise HTTPException(
+            status_code=400,
+            detail="max_candidates must be between 1 and 3"
+        )
+
+    result = validate_candidates(
+        candidates=candidates,
+        optimise_all_timeframes_func=optimise_all_timeframes,
+        get_data_func=get_data,
+        add_indicators_func=add_indicators,
+        train_model_func=train_model,
+        enrich_func=enrich,
+        profile=PROFILES[risk_mode],
+        starting_balance=starting_balance,
+        payout=payout,
+        max_candidates=max_candidates,
     )
 
     return result
