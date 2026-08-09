@@ -1,44 +1,4 @@
 from optimizer import threshold_sweep
-@app.get("/threshold-sweep")
-def run_threshold_sweep(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    holding_candles: int = 4,
-):
-    if risk_mode not in PROFILES:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid risk mode"
-        )
-
-    raw = get_data(symbol, period, interval)
-
-    ind = add_indicators(raw)
-    model = train_model(ind)
-    enriched = enrich(ind, model)
-
-    result = threshold_sweep(
-        enriched,
-        PROFILES[risk_mode],
-        starting_balance=starting_balance,
-        payout=payout,
-        holding_candles=holding_candles,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "period": period,
-        "interval": interval,
-        "holding_candles": holding_candles,
-        "live_execution": False,
-    })
-
-    return result
 MARKETS = {
     "EURUSD": "EURUSD=X",
     "GBPUSD": "GBPUSD=X",
@@ -192,6 +152,46 @@ def run_backtest_all(
     starting_balance: float = 10000.0,
     payout: float = 0.80,
 ):
+    @app.get("/threshold-sweep")
+def run_threshold_sweep(
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    holding_candles: int = 4,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    raw = get_data(symbol, period, interval)
+
+    ind = add_indicators(raw)
+    model = train_model(ind)
+    enriched = enrich(ind, model)
+
+    result = threshold_sweep(
+        enriched,
+        PROFILES[risk_mode],
+        starting_balance=starting_balance,
+        payout=payout,
+        holding_candles=holding_candles,
+    )
+
+    result.update({
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
+        "holding_candles": holding_candles,
+        "live_execution": False,
+    })
+
+    return result
     if risk_mode not in PROFILES:
         raise HTTPException(
             status_code=400,
