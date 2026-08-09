@@ -152,46 +152,7 @@ def run_backtest_all(
     starting_balance: float = 10000.0,
     payout: float = 0.80,
 ):
-    @app.get("/threshold-sweep")
-def run_threshold_sweep(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    holding_candles: int = 4,
-):
-    if risk_mode not in PROFILES:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid risk mode"
-        )
 
-    raw = get_data(symbol, period, interval)
-
-    ind = add_indicators(raw)
-    model = train_model(ind)
-    enriched = enrich(ind, model)
-
-    result = threshold_sweep(
-        enriched,
-        PROFILES[risk_mode],
-        starting_balance=starting_balance,
-        payout=payout,
-        holding_candles=holding_candles,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "period": period,
-        "interval": interval,
-        "holding_candles": holding_candles,
-        "live_execution": False,
-    })
-
-    return result
     if risk_mode not in PROFILES:
         raise HTTPException(
             status_code=400,
@@ -247,3 +208,107 @@ def run_threshold_sweep(
         "markets_tested": len(MARKETS),
         "results": ranked,
     }
+@app.get("/backtest-all")
+def run_backtest_all(
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    profile = PROFILES[risk_mode]
+    results = []
+
+    for name, symbol in MARKETS.items():
+        try:
+            sig = build(symbol, period, interval)
+
+            result = backtest(
+                sig,
+                profile,
+                starting_balance,
+                payout
+            )
+
+            results.append({
+                "market": name,
+                "symbol": symbol,
+                "trades": result.get("trades", 0),
+                "wins": result.get("wins", 0),
+                "losses": result.get("losses", 0),
+                "win_rate": result.get("win_rate", 0.0),
+                "return_pct": result.get("return_pct", 0.0),
+                "max_drawdown": result.get("max_drawdown", 0.0),
+                "profit_factor": result.get("profit_factor", 0.0),
+                "average_trade_pnl": result.get("average_trade_pnl", 0.0),
+            })
+
+        except Exception as e:
+            results.append({
+                "market": name,
+                "symbol": symbol,
+                "error": str(e),
+            })
+
+    ranked = sorted(
+        results,
+        key=lambda x: x.get("return_pct", -999),
+        reverse=True
+    )
+
+    return {
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
+        "live_execution": False,
+        "markets_tested": len(MARKETS),
+        "results": ranked,
+    }
+
+
+@app.get("/threshold-sweep")
+def run_threshold_sweep(
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    period: str = "1mo",
+    interval: str = "15m",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    holding_candles: int = 4,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    raw = get_data(symbol, period, interval)
+
+    ind = add_indicators(raw)
+    model = train_model(ind)
+    enriched = enrich(ind, model)
+
+    result = threshold_sweep(
+        enriched,
+        PROFILES[risk_mode],
+        starting_balance=starting_balance,
+        payout=payout,
+        holding_candles=holding_candles,
+    )
+
+    result.update({
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "period": period,
+        "interval": interval,
+        "holding_candles": holding_candles,
+        "live_execution": False,
+    })
+
+    return result
