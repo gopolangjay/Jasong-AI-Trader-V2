@@ -387,6 +387,7 @@ def run_scan_markets(
     risk_mode: str = "Balanced",
     starting_balance: float = 10000.0,
     payout: float = 0.80,
+    group: int = 1,
 ):
     if risk_mode not in PROFILES:
         raise HTTPException(
@@ -394,8 +395,32 @@ def run_scan_markets(
             detail="Invalid risk mode"
         )
 
+    market_groups = {
+        1: {
+            "EURUSD": "EURUSD=X",
+            "GBPUSD": "GBPUSD=X",
+            "USDJPY": "JPY=X",
+        },
+        2: {
+            "AUDUSD": "AUDUSD=X",
+            "NZDUSD": "NZDUSD=X",
+            "USDCAD": "CAD=X",
+        },
+        3: {
+            "USDCHF": "CHF=X",
+            "EURJPY": "EURJPY=X",
+            "GBPJPY": "GBPJPY=X",
+        },
+    }
+
+    if group not in market_groups:
+        raise HTTPException(
+            status_code=400,
+            detail="Group must be 1, 2 or 3"
+        )
+
     result = scan_markets(
-        markets=MARKETS,
+        markets=market_groups[group],
         get_data_func=get_data,
         add_indicators_func=add_indicators,
         train_model_func=train_model,
@@ -406,4 +431,5 @@ def run_scan_markets(
         payout=payout,
     )
 
+    result["group"] = group
     return result
