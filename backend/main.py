@@ -2094,3 +2094,540 @@ def run_deep_validate(
 
 
     return result
+# ============================================================
+# V4.5 AUTO VERIFIED TRADE FINDER
+# ============================================================
+
+@app.get("/find-verified-trade")
+def find_verified_trade(
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    period: str = "5d",
+    interval: str = "15m",
+    top_n: int = 3,
+):
+    """
+    V4.5 automatic trade finder.
+
+    Workflow:
+
+    1. Fast-scan all supported markets.
+    2. Take the strongest candidates.
+    3. Deep-validate them sequentially.
+    4. Stop immediately when one candidate becomes VERIFIED.
+    5. Return NO_VERIFIED_TRADE if none pass.
+
+    This endpoint finds historically validated setups.
+    It does NOT execute live trades.
+    """
+
+    # --------------------------------------------------------
+    # INPUT VALIDATION
+    # --------------------------------------------------------
+
+    validate_risk_mode(
+        risk_mode
+    )
+
+    validate_balance(
+        starting_balance
+    )
+
+    if top_n < 1 or top_n > 3:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "top_n must be between "
+                "1 and 3"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # STEP 1: FAST SCAN
+    # --------------------------------------------------------
+
+    try:
+
+        fast_result = fast_scan_markets(
+            markets=MARKETS,
+            get_data_func=get_data,
+            add_indicators_func=add_indicators,
+            period=period,
+            interval=interval,
+            top_n=top_n,
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Fast scan failed: "
+                f"{exc}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # FIND TOP CANDIDATES
+    # --------------------------------------------------------
+
+    candidates = (
+        fast_result.get("top_candidates")
+        or fast_result.get("ranking")
+        or fast_result.get("candidates")
+        or []
+    )
+
+    if not candidates:
+
+        return {
+            "version":
+                "V4.5",
+
+            "status":
+                "NO_CANDIDATES",
+
+            "message":
+                "Fast scan found no "
+                "trade candidates.",
+
+            "markets_tested":
+                fast_result.get(
+                    "markets_tested",
+                    len(MARKETS),
+                ),
+
+            "candidates_tested":
+                0,
+
+            "verified_trade":
+                None,
+
+            "validation_history":
+                [],
+
+            "live_execution":
+                False,
+        }
+
+    # Only use the requested shortlist.
+    candidates = candidates[:top_n]
+
+    validation_history = []
+
+    # --------------------------------------------------------
+    # STEP 2:
+    # DEEP VALIDATE SEQUENTIALLY
+    # --------------------------------------------------------
+
+    for index, candidate in enumerate(
+        candidates,
+        start=1,
+    ):
+
+        market = candidate.get(
+            "market"
+        )
+
+        symbol = candidate.get(
+            "symbol"
+        )
+
+        fast_score = candidate.get(
+            "fast_score",
+            candidate.get(
+                "score",
+                0.0,
+            ),
+        )
+
+        fast_direction = candidate.get(
+            "direction",
+            "WAIT",
+        )
+
+        # ----------------------------------------------------
+        # DEEP VALIDATION
+        # ----------------------------------------------------
+
+        try:
+
+            deep_result = validate_candidates(
+                candidates=[
+                    candidate
+                ],
+
+                optimise_all_timeframes_func=
+                    optimise_all_timeframes,
+
+                get_data_func=
+                    get_data,
+
+                add_indicators_func=
+                    add_indicators,
+
+                train_model_func=
+                    train_model,
+
+                enrich_func=
+                    enrich,
+
+                profile=
+                    PROFILES[
+                        risk_mode
+                    ],
+
+                starting_balance=
+                    starting_balance,
+
+                payout=
+                    payout,
+
+                max_candidates=
+                    1,
+            )
+
+        except Exception as exc:
+
+            validation_history.append({
+                "position":
+                    index,
+
+                "market":
+                    market,
+
+                "symbol":
+                    symbol,
+
+                "fast_score":
+                    fast_score,
+
+                "fast_direction":
+                    fast_direction,
+
+                "deep_status":
+                    "ERROR",
+
+                "verified":
+                    False,
+
+                "error":
+                    str(exc),
+            })
+
+            continue
+
+        # ----------------------------------------------------
+        # EXTRACT RESULT
+        # ----------------------------------------------------
+
+        final_market = (
+            deep_result.get(
+                "final_market"
+            )
+        )
+
+        final_status = (
+            deep_result.get(
+                "final_status",
+                "NOT_VERIFIED",
+            )
+        )
+
+        if final_market:
+
+            deep_status = (
+                final_market.get(
+                    "status",
+                    final_status,
+                )
+            )
+
+            verified = bool(
+                final_market.get(
+                    "verified",
+                    False,
+                )
+            )
+
+            history_item = {
+                "position":
+                    index,
+
+                "market":
+                    market,
+
+                "symbol":
+                    symbol,
+
+                "fast_score":
+                    fast_score,
+
+                "fast_direction":
+                    fast_direction,
+
+                "deep_status":
+                    deep_status,
+
+                "verified":
+                    verified,
+
+                "deep_score":
+                    final_market.get(
+                        "deep_score"
+                    ),
+
+                "trades":
+                    final_market.get(
+                        "trades"
+                    ),
+
+                "wins":
+                    final_market.get(
+                        "wins"
+                    ),
+
+                "losses":
+                    final_market.get(
+                        "losses"
+                    ),
+
+                "win_rate":
+                    final_market.get(
+                        "win_rate"
+                    ),
+
+                "profit_factor":
+                    final_market.get(
+                        "profit_factor"
+                    ),
+
+                "return_pct":
+                    final_market.get(
+                        "return_pct"
+                    ),
+
+                "max_drawdown":
+                    final_market.get(
+                        "max_drawdown"
+                    ),
+
+                "period":
+                    final_market.get(
+                        "period"
+                    ),
+
+                "interval":
+                    final_market.get(
+                        "interval"
+                    ),
+
+                "threshold":
+                    final_market.get(
+                        "threshold"
+                    ),
+
+                "holding_candles":
+                    final_market.get(
+                        "holding_candles"
+                    ),
+
+                "validated_sample":
+                    final_market.get(
+                        "validated_sample"
+                    ),
+            }
+
+        else:
+
+            verified = False
+
+            history_item = {
+                "position":
+                    index,
+
+                "market":
+                    market,
+
+                "symbol":
+                    symbol,
+
+                "fast_score":
+                    fast_score,
+
+                "fast_direction":
+                    fast_direction,
+
+                "deep_status":
+                    final_status,
+
+                "verified":
+                    False,
+            }
+
+        validation_history.append(
+            history_item
+        )
+
+        # ----------------------------------------------------
+        # STEP 3:
+        # STOP ON FIRST VERIFIED MARKET
+        # ----------------------------------------------------
+
+        if verified:
+
+            # -----------------------------------------------
+            # CHECK DIRECTION AGREEMENT
+            # -----------------------------------------------
+
+            deep_direction = (
+                final_market.get(
+                    "direction",
+                    "WAIT",
+                )
+            )
+
+            direction_agreement = (
+                fast_direction
+                == deep_direction
+            )
+
+            # If fast and deep validation disagree on
+            # direction, do NOT return it as final.
+            if not direction_agreement:
+
+                validation_history[
+                    -1
+                ][
+                    "deep_status"
+                ] = (
+                    "DIRECTION_MISMATCH"
+                )
+
+                validation_history[
+                    -1
+                ][
+                    "verified"
+                ] = False
+
+                continue
+
+            # -----------------------------------------------
+            # VERIFIED TRADE FOUND
+            # -----------------------------------------------
+
+            verified_trade = {
+                **final_market,
+
+                "fast_rank":
+                    index,
+
+                "fast_score":
+                    fast_score,
+
+                "fast_direction":
+                    fast_direction,
+
+                "direction_agreement":
+                    True,
+            }
+
+            return {
+                "version":
+                    "V4.5",
+
+                "status":
+                    "VERIFIED_TRADE_FOUND",
+
+                "message":
+                    (
+                        f"{market} passed "
+                        "fast scan and deep "
+                        "validation."
+                    ),
+
+                "risk_mode":
+                    risk_mode,
+
+                "markets_tested":
+                    fast_result.get(
+                        "markets_tested",
+                        len(MARKETS),
+                    ),
+
+                "fast_candidates":
+                    len(candidates),
+
+                "candidates_tested":
+                    index,
+
+                "verified_trade":
+                    verified_trade,
+
+                "validation_history":
+                    validation_history,
+
+                "live_execution":
+                    False,
+
+                "warning":
+                    (
+                        "Historical validation "
+                        "does not guarantee the "
+                        "next trade will win."
+                    ),
+            }
+
+    # --------------------------------------------------------
+    # NO VERIFIED TRADE
+    # --------------------------------------------------------
+
+    return {
+        "version":
+            "V4.5",
+
+        "status":
+            "NO_VERIFIED_TRADE",
+
+        "message":
+            (
+                "None of the shortlisted "
+                "markets passed deep "
+                "validation."
+            ),
+
+        "risk_mode":
+            risk_mode,
+
+        "markets_tested":
+            fast_result.get(
+                "markets_tested",
+                len(MARKETS),
+            ),
+
+        "fast_candidates":
+            len(candidates),
+
+        "candidates_tested":
+            len(
+                validation_history
+            ),
+
+        "verified_trade":
+            None,
+
+        "validation_history":
+            validation_history,
+
+        "live_execution":
+            False,
+
+        "warning":
+            (
+                "No trade should be forced "
+                "when validation criteria "
+                "are not satisfied."
+            ),
+    }
