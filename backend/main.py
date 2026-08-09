@@ -1,3 +1,4 @@
+from multi_optimizer import optimise_all_timeframes
 from strategy_optimizer import optimise_strategy
 from optimizer import threshold_sweep
 MARKETS = {
@@ -346,6 +347,36 @@ def run_strategy_optimize(
         "risk_mode": risk_mode,
         "period": period,
         "interval": interval,
+        "live_execution": False,
+    })
+
+    return result
+@app.get("/optimize-timeframes")
+def run_optimize_timeframes(
+    symbol: str = "EURUSD=X",
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    result = optimise_all_timeframes(
+        symbol=symbol,
+        get_data_func=get_data,
+        add_indicators_func=add_indicators,
+        train_model_func=train_model,
+        enrich_func=enrich,
+        profile=PROFILES[risk_mode],
+        starting_balance=starting_balance,
+        payout=payout,
+    )
+
+    result.update({
+        "risk_mode": risk_mode,
         "live_execution": False,
     })
 
