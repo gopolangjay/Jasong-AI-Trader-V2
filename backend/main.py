@@ -1,3 +1,4 @@
+from market_scanner import scan_markets
 from multi_optimizer import optimise_all_timeframes
 from strategy_optimizer import optimise_strategy
 from optimizer import threshold_sweep
@@ -379,5 +380,30 @@ def run_optimize_timeframes(
         "risk_mode": risk_mode,
         "live_execution": False,
     })
+
+    return result
+@app.get("/scan-markets")
+def run_scan_markets(
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    if risk_mode not in PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid risk mode"
+        )
+
+    result = scan_markets(
+        markets=MARKETS,
+        get_data_func=get_data,
+        add_indicators_func=add_indicators,
+        train_model_func=train_model,
+        enrich_func=enrich,
+        profiles=PROFILES,
+        risk_mode=risk_mode,
+        starting_balance=starting_balance,
+        payout=payout,
+    )
 
     return result
