@@ -40,6 +40,9 @@ from paper import (
 
 from trade_watcher import TradeWatcherEngine
 from auto_manager import AutomatedTradeManager
+from risk_gateway import RiskGateway
+from execution_gateway import ExecutionGateway
+from autonomous_controller import AutonomousController
 
 from database import (
     SessionLocal,
@@ -49,8 +52,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.7
-# GENUINE FORWARD VALIDATION + AUDIT ENGINE
+# JASONG AI TRADER V6.0
+# CONTROLLED AUTONOMOUS PAPER/DEMO TRADING ENGINE
 # ============================================================
 
 MARKETS = {
@@ -67,8 +70,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.7 API",
-    version="5.7.0",
+    title="Jasong AI Trader V6.0 API",
+    version="6.0.0",
 )
 
 app.add_middleware(
@@ -871,10 +874,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V5.7",
+            "Jasong AI Trader V6.0",
 
         "version":
-            "5.7.0",
+            "6.0.0",
 
         "mode":
             "paper-trading",
@@ -892,7 +895,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.7.0",
+        "version": "6.0.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2303,6 +2306,7 @@ def _v53_live_signal(
                 balance,
                 profile.risk_per_trade,
             ),
+        "observed_at": time.time(),
         "live_execution": False,
     })
 
@@ -2775,12 +2779,15 @@ def _v55_rank_candidates(
     return ranked
 
 
+V60_RISK_GATEWAY = RiskGateway(
+    max_open_trades=2, max_daily_loss_pct=0.04, max_drawdown_pct=0.10, max_consecutive_losses=3,
+    max_assumed_spread_bps=3.0, max_price_age_seconds=180,
+)
+V60_EXECUTION_GATEWAY = ExecutionGateway(mode="PAPER", allow_live_execution=False)
+
 V53_WATCHER_ENGINE = TradeWatcherEngine(
-    session_factory=SessionLocal,
-    trade_model=Trade,
-    signal_func=_v53_live_signal,
-    price_func=_v53_latest_price,
-    profiles=PROFILES,
+    session_factory=SessionLocal, trade_model=Trade, signal_func=_v53_live_signal, price_func=_v53_latest_price, profiles=PROFILES,
+    risk_gateway=V60_RISK_GATEWAY, execution_gateway=V60_EXECUTION_GATEWAY,
 )
 
 V53_WATCHER_ENGINE.start()
@@ -2902,6 +2909,12 @@ V55_AUTO_MANAGER = AutomatedTradeManager(
 )
 
 V55_AUTO_MANAGER.start_thread()
+
+V60_CONTROLLER = AutonomousController(
+    auto_manager=V55_AUTO_MANAGER, watcher_engine=V53_WATCHER_ENGINE, risk_gateway=V60_RISK_GATEWAY,
+    execution_gateway=V60_EXECUTION_GATEWAY, starting_balance=10000.0,
+)
+V60_CONTROLLER.start_thread()
 
 
 
@@ -3216,6 +3229,53 @@ def get_adaptive_ranking(
 
 
 # ============================================================
+# V6.0 AUTONOMOUS / RISK / EXECUTION CONTROL
+# ============================================================
+
+@app.get("/v6/status")
+def v6_status():
+    return {"version":"6.0.0","controller":V60_CONTROLLER.status(),"live_execution":False}
+
+@app.post("/v6/start")
+def v6_start(starting_balance:float=10000.0, risk_mode:str="Balanced", payout:float=0.80,
+             scan_interval_minutes:int=15, target_active_watchers:int=3, scan_top_n:int=9, overnight_mode:bool=True):
+    validate_balance(starting_balance); validate_risk_mode(risk_mode)
+    V60_EXECUTION_GATEWAY.set_mode("PAPER")
+    controller=V60_CONTROLLER.enable(starting_balance=starting_balance,overnight_mode=overnight_mode)
+    manager=V55_AUTO_MANAGER.enable(risk_mode=risk_mode,starting_balance=starting_balance,payout=payout,
+        scan_interval_minutes=scan_interval_minutes,target_active_watchers=target_active_watchers,scan_top_n=scan_top_n)
+    return {"status":"V6_AUTONOMOUS_PAPER_ENABLED","controller":controller,"auto_manager":manager,"execution_mode":"PAPER","live_execution":False}
+
+@app.post("/v6/stop")
+def v6_stop():
+    return {"status":"V6_STOPPED","controller":V60_CONTROLLER.disable(reason="MANUAL_STOP"),"live_execution":False}
+
+@app.post("/v6/emergency-stop")
+def v6_emergency_stop(reason:str="MANUAL_EMERGENCY_STOP"):
+    return {"status":"V6_EMERGENCY_STOPPED","controller":V60_CONTROLLER.emergency_stop(reason=reason),"live_execution":False}
+
+@app.post("/v6/clear-kill-switch")
+def v6_clear_kill_switch():
+    return {"status":"KILL_SWITCH_CLEARED","risk":V60_RISK_GATEWAY.clear_kill_switch(),"live_execution":False}
+
+@app.get("/risk-status")
+def v6_risk_status():
+    return {"version":"6.0.0","risk":V60_RISK_GATEWAY.status(),"live_execution":False}
+
+@app.get("/execution-status")
+def v6_execution_status():
+    return {"version":"6.0.0","execution":V60_EXECUTION_GATEWAY.status(),"live_execution":False}
+
+@app.get("/execution-orders")
+def v6_execution_orders(limit:int=200):
+    return {"version":"6.0.0","orders":V60_EXECUTION_GATEWAY.list_orders(limit=limit),"live_execution":False}
+
+@app.get("/overnight-report")
+def v6_overnight_report():
+    return V60_CONTROLLER.report()
+
+
+# ============================================================
 # V5.5.3 AUTO MODE DASHBOARD / TRADE LIFECYCLE
 # ============================================================
 
@@ -3272,7 +3332,7 @@ def get_strategy_health(
 
     return {
         "version":
-            "5.7.0",
+            "6.0.0",
         "minimum_forward_trades":
             V56_FORWARD_MIN_TRADES,
         "quarantine_minimum_trades":
@@ -3413,7 +3473,7 @@ def get_auto_dashboard(
 
     return {
         "version":
-            "5.7.0",
+            "6.0.0",
         "auto_mode":
             bool(
                 manager.get(
@@ -3493,7 +3553,7 @@ def get_auto_dashboard(
         "lifecycle":
             lifecycle[:20],
         "forward_protocol":
-            "V5.7_GENUINE_FORWARD",
+            "V6_GENUINE_FORWARD",
         "live_execution":
             False,
     }
