@@ -1,3 +1,4 @@
+
 import threading
 import time
 from dataclasses import dataclass
@@ -37,6 +38,8 @@ from paper import (
     stake_for_balance,
 )
 
+from trade_watcher import TradeWatcherEngine
+
 from database import (
     SessionLocal,
     Trade,
@@ -45,7 +48,7 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V4.6
+# JASONG AI TRADER V5.3
 # SINGLE-DOWNLOAD / RESAMPLED MULTI-TIMEFRAME DATA ENGINE
 # ============================================================
 
@@ -63,8 +66,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V4.6 API",
-    version="4.6.0",
+    title="Jasong AI Trader V5.3 API",
+    version="5.3.0",
 )
 
 app.add_middleware(
@@ -867,10 +870,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V4.6",
+            "Jasong AI Trader V5.3",
 
         "version":
-            "4.6.0",
+            "5.3.0",
 
         "mode":
             "paper-trading",
@@ -888,7 +891,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "4.6.0",
+        "version": "5.3.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -1960,3 +1963,175 @@ def get_deep_validation_job(
     ] = False
 
     return response
+
+
+
+# ============================================================
+# V5.3 VERIFIED WATCHER + FORWARD PAPER ENGINE
+# ============================================================
+
+
+def _v53_live_signal(
+    symbol: str,
+    risk_mode: str,
+    balance: float,
+):
+    """Internal live signal callback used by the watcher engine."""
+
+    profile = PROFILES[
+        risk_mode
+    ]
+
+    signal_data = build(
+        symbol,
+        "1mo",
+        "15m",
+    )
+
+    result = decision(
+        signal_data,
+        profile,
+    )
+
+    result.update({
+        "symbol": symbol,
+        "risk_mode": risk_mode,
+        "suggested_paper_stake":
+            stake_for_balance(
+                balance,
+                profile.risk_per_trade,
+            ),
+        "live_execution": False,
+    })
+
+    return result
+
+
+def _v53_latest_price(
+    symbol: str,
+) -> float:
+    data = get_data(
+        symbol,
+        "5d",
+        "15m",
+    )
+
+    if data is None or data.empty:
+        raise ValueError(
+            f"No latest price available for {symbol}"
+        )
+
+    return float(
+        data["Close"].iloc[-1]
+    )
+
+
+V53_WATCHER_ENGINE = TradeWatcherEngine(
+    session_factory=SessionLocal,
+    trade_model=Trade,
+    signal_func=_v53_live_signal,
+    price_func=_v53_latest_price,
+    profiles=PROFILES,
+)
+
+V53_WATCHER_ENGINE.start()
+
+
+@app.post("/watchers")
+def create_verified_watcher(
+    candidate: dict = Body(...),
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    """Create a server-side watcher for one VERIFIED historical setup."""
+
+    validate_risk_mode(
+        risk_mode
+    )
+
+    validate_balance(
+        starting_balance
+    )
+
+    try:
+        watcher = V53_WATCHER_ENGINE.create(
+            candidate=candidate,
+            risk_mode=risk_mode,
+            starting_balance=starting_balance,
+            payout=payout,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    return {
+        "status": "WATCHER_CREATED",
+        "watcher": watcher,
+        "live_execution": False,
+    }
+
+
+@app.get("/watchers")
+def list_verified_watchers():
+    return {
+        "watchers":
+            V53_WATCHER_ENGINE.list(),
+        "live_execution": False,
+    }
+
+
+@app.get("/watchers/{watcher_id}")
+def get_verified_watcher(
+    watcher_id: str,
+):
+    watcher = V53_WATCHER_ENGINE.get(
+        watcher_id
+    )
+
+    if watcher is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Watcher not found",
+        )
+
+    return {
+        "watcher": watcher,
+        "live_execution": False,
+    }
+
+
+@app.post("/watchers/{watcher_id}/check")
+def check_verified_watcher_now(
+    watcher_id: str,
+):
+    watcher = V53_WATCHER_ENGINE.check_now(
+        watcher_id
+    )
+
+    if watcher is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Watcher not found",
+        )
+
+    return {
+        "watcher": watcher,
+        "live_execution": False,
+    }
+
+
+@app.get("/forward-stats")
+def get_forward_stats(
+    starting_balance: float = 10000.0,
+):
+    validate_balance(
+        starting_balance
+    )
+
+    return V53_WATCHER_ENGINE.forward_stats(
+        starting_balance=starting_balance
+    )
