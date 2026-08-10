@@ -49,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.5.1
-# ASYNC AUTO MANAGER STABILITY FIX
+# JASONG AI TRADER V5.5.2
+# PROGRESSIVE AUTO MANAGER + SINGLE DEEP VALIDATION CYCLE
 # ============================================================
 
 MARKETS = {
@@ -67,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.5.1 API",
-    version="5.5.1",
+    title="Jasong AI Trader V5.5.2 API",
+    version="5.5.2",
 )
 
 app.add_middleware(
@@ -892,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.5.1",
+        "version": "5.5.2",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
