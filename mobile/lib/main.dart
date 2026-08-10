@@ -3162,7 +3162,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V6.0',
+          'Jasong AI Trader V6.1',
         ),
         actions: [
           IconButton(
@@ -3830,7 +3830,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V6 remains PAPER/DEMO-only with LIVE hard-disabled. VERIFIED setups '
+                            'V6.1 remains PAPER/DEMO-only with LIVE hard-disabled. VERIFIED setups '
                             'still require live confirmation and risk controls '
                             'before an automatic paper entry is opened.',
                             textAlign:
