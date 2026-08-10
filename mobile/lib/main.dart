@@ -73,8 +73,15 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? serverWatcher;
   List<Map<String, dynamic>> serverWatchers = [];
   Map<String, dynamic>? forwardStats;
+
+  Map<String, dynamic>? autoDashboard;
+  Map<String, dynamic>? autoManagerJob;
+
   Timer? watcherPollTimer;
+  Timer? autoDashboardPollTimer;
+
   bool watcherBusy = false;
+  bool autoManagerBusy = false;
 
   List<Map<String, dynamic>>
       validationHistory = [];
@@ -1345,6 +1352,315 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
+  // V5.5.3 AUTO MANAGER / FORWARD LIFECYCLE
+  // =========================================================
+
+  Future<void> loadAutoDashboard() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-dashboard',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        autoDashboard = response;
+
+        final rawWatchers =
+            response['lifecycle'];
+
+        if (rawWatchers is List) {
+          serverWatchers = rawWatchers
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    Map<String, dynamic>.from(
+                  item,
+                ),
+              )
+              .toList();
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            serverWatchers,
+          );
+        }
+
+        final rawForward =
+            response['forward'];
+
+        if (rawForward is Map) {
+          forwardStats =
+              Map<String, dynamic>.from(
+            rawForward,
+          );
+        }
+      });
+    } catch (_) {
+      // Auto dashboard is supplemental.
+    }
+  }
+
+  void startAutoDashboardPolling() {
+    autoDashboardPollTimer?.cancel();
+
+    autoDashboardPollTimer =
+        Timer.periodic(
+      const Duration(
+        seconds: 20,
+      ),
+      (_) {
+        loadAutoDashboard();
+      },
+    );
+
+    Future.microtask(
+      loadAutoDashboard,
+    );
+  }
+
+  Future<void> startAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+          'scan_interval_minutes':
+              '15',
+          'target_active_watchers':
+              '3',
+          'scan_top_n': '5',
+        },
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not start Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/stop',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not stop Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> runAutoManagerNow() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/run-now',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(
+        response.body,
+      );
+
+      if (decoded is Map &&
+          mounted) {
+        setState(() {
+          autoManagerJob =
+              Map<String, dynamic>.from(
+            decoded,
+          );
+        });
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Auto Manager run failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  String formatEpochTime(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final seconds =
+        double.tryParse(
+      value.toString(),
+    );
+
+    if (seconds == null ||
+        seconds <= 0) {
+      return '-';
+    }
+
+    final dt = DateTime
+        .fromMillisecondsSinceEpoch(
+      (seconds * 1000).round(),
+      isUtc: true,
+    )
+        .toLocal();
+
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String watcherLifecycleSubtitle(
+    Map<String, dynamic> watcher,
+  ) {
+    final status =
+        watcher['status']
+                ?.toString() ??
+            '-';
+
+    if (status == 'OPEN') {
+      return 'Entry ${formatPrice(watcher['entry_price'])} • '
+          'Exit target ${watcher['target_exit_at_iso'] ?? '-'}';
+    }
+
+    if (status == 'WIN' ||
+        status == 'LOSS') {
+      return 'P&L ${watcher['pnl'] ?? '-'} • '
+          'Entry ${formatPrice(watcher['entry_price'])} → '
+          '${formatPrice(watcher['exit_price'])}';
+    }
+
+    return watcher['last_reason']
+            ?.toString() ??
+        'Awaiting next lifecycle update';
+  }
+
+  // =========================================================
   // V5.3 SERVER VERIFIED WATCHER
   // =========================================================
 
@@ -2228,11 +2544,18 @@ class _HomePageState extends State<HomePage> {
     Future.microtask(
       loadForwardStats,
     );
+
+    Future.microtask(
+      loadAutoDashboard,
+    );
+
+    startAutoDashboardPolling();
   }
 
   @override
   void dispose() {
     watcherPollTimer?.cancel();
+    autoDashboardPollTimer?.cancel();
     symbol.dispose();
     balance.dispose();
 
@@ -2831,7 +3154,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.4',
+          'Jasong AI Trader V5.5.3',
         ),
         actions: [
           IconButton(
@@ -3136,6 +3459,390 @@ class _HomePageState extends State<HomePage> {
                   const Text(
                 'Record Paper Trade',
               ),
+            ),
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            // =================================================
+            // V5.5.3 AUTO MODE DASHBOARD
+            // =================================================
+
+            if (autoDashboard != null)
+              Builder(
+                builder: (context) {
+                  final dashboard =
+                      autoDashboard!;
+
+                  final manager =
+                      dashboard['manager']
+                              is Map
+                          ? Map<String, dynamic>.from(
+                              dashboard[
+                                      'manager']
+                                  as Map,
+                            )
+                          : <String, dynamic>{};
+
+                  final summary =
+                      dashboard['summary']
+                              is Map
+                          ? Map<String, dynamic>.from(
+                              dashboard[
+                                      'summary']
+                                  as Map,
+                            )
+                          : <String, dynamic>{};
+
+                  final autoOn =
+                      dashboard['auto_mode']
+                              == true;
+
+                  final stage =
+                      summary['current_stage']
+                              ?.toString() ??
+                          'IDLE';
+
+                  final progress =
+                      int.tryParse(
+                            '${summary['progress_percent'] ?? 0}',
+                          ) ??
+                          0;
+
+                  final lifecycle =
+                      (dashboard[
+                                  'lifecycle']
+                              as List?) ??
+                          const [];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment
+                                .stretch,
+                        children: [
+                          Row(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .spaceBetween,
+                            children: [
+                              const Text(
+                                'V5.5.3 AUTO MODE',
+                                style:
+                                    TextStyle(
+                                  fontSize: 20,
+                                  fontWeight:
+                                      FontWeight
+                                          .bold,
+                                ),
+                              ),
+                              Text(
+                                autoOn
+                                    ? 'ON'
+                                    : 'OFF',
+                                style:
+                                    TextStyle(
+                                  fontSize: 20,
+                                  fontWeight:
+                                      FontWeight
+                                          .w900,
+                                  color: autoOn
+                                      ? Colors
+                                          .greenAccent
+                                      : Colors
+                                          .amberAccent,
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          LinearProgressIndicator(
+                            value:
+                                progress <= 0
+                                    ? 0
+                                    : progress /
+                                        100.0,
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '$stage • '
+                            '${summary['current_message'] ?? 'Waiting'}',
+                            textAlign:
+                                TextAlign.center,
+                          ),
+
+                          if (summary[
+                                  'current_candidate'] !=
+                              null)
+                            Text(
+                              'Current: '
+                              '${summary['current_candidate']}',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.tealAccent,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Watchers',
+                                '${summary['active_watchers'] ?? 0} / '
+                                '${summary['target_active_watchers'] ?? 3}',
+                              ),
+                              metric(
+                                'Open Trades',
+                                '${summary['open_trades'] ?? 0}',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Next Scan',
+                                formatEpochTime(
+                                  summary[
+                                      'next_scan_at'],
+                                ),
+                              ),
+                              metric(
+                                'Last Scan',
+                                formatEpochTime(
+                                  summary[
+                                      'last_scan_at'],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          if (forwardStats !=
+                              null)
+                            Row(
+                              children: [
+                                metric(
+                                  'Forward Trades',
+                                  '${forwardStats!['forward_trades'] ?? 0}',
+                                ),
+                                metric(
+                                  'Paper Balance',
+                                  '${forwardStats!['paper_balance'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          Row(
+                            children: [
+                              Expanded(
+                                child:
+                                    FilledButton.icon(
+                                  onPressed:
+                                      autoManagerBusy
+                                          ? null
+                                          : autoOn
+                                              ? stopAutoMode
+                                              : startAutoMode,
+                                  icon:
+                                      Icon(
+                                    autoOn
+                                        ? Icons.stop_circle
+                                        : Icons.play_circle,
+                                  ),
+                                  label:
+                                      Text(
+                                    autoOn
+                                        ? 'Stop Auto Mode'
+                                        : 'Start Auto Mode',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                autoManagerBusy
+                                    ? null
+                                    : runAutoManagerNow,
+                            icon:
+                                const Icon(
+                              Icons.bolt,
+                            ),
+                            label:
+                                const Text(
+                              'Run One Cycle Now',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                loadAutoDashboard,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Refresh Auto Dashboard',
+                            ),
+                          ),
+
+                          if (lifecycle
+                              .isNotEmpty) ...[
+                            const Divider(
+                              height: 28,
+                            ),
+
+                            const Text(
+                              'TRADE LIFECYCLE',
+                              style:
+                                  TextStyle(
+                                fontSize: 17,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+
+                            const SizedBox(
+                              height: 6,
+                            ),
+
+                            ...lifecycle
+                                .take(6)
+                                .whereType<Map>()
+                                .map(
+                                  (raw) {
+                                final watcher =
+                                    Map<String, dynamic>.from(
+                                  raw,
+                                );
+
+                                final status =
+                                    watcher['status']
+                                            ?.toString() ??
+                                        '-';
+
+                                return ListTile(
+                                  dense: true,
+                                  contentPadding:
+                                      EdgeInsets.zero,
+                                  leading:
+                                      Icon(
+                                    status ==
+                                            'WIN'
+                                        ? Icons
+                                            .check_circle
+                                        : status ==
+                                                'LOSS'
+                                            ? Icons
+                                                .cancel
+                                            : status ==
+                                                'OPEN'
+                                                ? Icons
+                                                    .show_chart
+                                                : Icons
+                                                    .visibility,
+                                    color:
+                                        watcherStatusColor(
+                                      status,
+                                    ),
+                                  ),
+                                  title:
+                                      Text(
+                                    '${watcher['market'] ?? watcher['symbol'] ?? '-'} '
+                                    '${watcher['direction'] ?? ''}',
+                                    style:
+                                        const TextStyle(
+                                      fontWeight:
+                                          FontWeight
+                                              .bold,
+                                    ),
+                                  ),
+                                  subtitle:
+                                      Text(
+                                    watcherLifecycleSubtitle(
+                                      watcher,
+                                    ),
+                                  ),
+                                  trailing:
+                                      Text(
+                                    status,
+                                    style:
+                                        TextStyle(
+                                      color:
+                                          watcherStatusColor(
+                                        status,
+                                      ),
+                                      fontWeight:
+                                          FontWeight
+                                              .bold,
+                                    ),
+                                  ),
+                                );
+                              }),
+                          ],
+
+                          const SizedBox(
+                            height: 6,
+                          ),
+
+                          const Text(
+                            'Auto Mode remains paper-only. VERIFIED setups '
+                            'still require live confirmation and risk controls '
+                            'before an automatic paper entry is opened.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+            const SizedBox(
+              height: 8,
             ),
 
             // =================================================
@@ -3696,7 +4403,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.4 WATCH PORTFOLIO',
+                            'V5.5.3 WATCH PORTFOLIO',
                             style:
                                 TextStyle(
                               fontSize: 15,
@@ -3939,7 +4646,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.4 can keep multiple VERIFIED candidates under '
+                            'V5.5.3 keeps multiple VERIFIED candidates under '
                             'observation. A waiting or overextended market does '
                             'not block another candidate from confirming. Paper '
                             'entries still require live confirmation and risk controls.',
