@@ -17,7 +17,7 @@ from forward_guard import (
 
 
 class TradeWatcherEngine:
-    """Server-side genuine-forward watcher for Jasong AI Trader V6.0.
+    """Server-side genuine-forward watcher for Jasong AI Trader V6.1.
 
     The engine keeps verified candidates under observation, confirms live entry
     conditions, applies paper-risk circuit breakers, opens paper trades, closes
@@ -40,6 +40,7 @@ class TradeWatcherEngine:
         profiles: Dict[str, Any],
         risk_gateway=None,
         execution_gateway=None,
+        state_store=None,
     ):
         self.session_factory = session_factory
         self.Trade = trade_model
@@ -48,11 +49,35 @@ class TradeWatcherEngine:
         self.profiles = profiles
         self.risk_gateway = risk_gateway
         self.execution_gateway = execution_gateway
+        self.state_store = state_store
 
         self._watchers: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        self._restore_state()
+
+
+    def _restore_state(self) -> None:
+        if self.state_store is None:
+            return
+        saved = self.state_store.load("watchers", {})
+        if not isinstance(saved, dict):
+            return
+        with self._lock:
+            self._watchers = {
+                str(key): dict(value)
+                for key, value in saved.items()
+                if isinstance(value, dict)
+            }
+
+    def _persist_state(self) -> None:
+        if self.state_store is None:
+            return
+        with self._lock:
+            snapshot = {key: dict(value) for key, value in self._watchers.items()}
+        self.state_store.save("watchers", snapshot)
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -558,7 +583,7 @@ class TradeWatcherEngine:
             "explanation": candidate.get("explanation"),
             # V5.7 genuine forward audit fields. These are populated only
             # when a live-confirmed forward trade actually opens.
-            "forward_protocol": "V6_GENUINE_FORWARD",
+            "forward_protocol": "V6.1_GENUINE_FORWARD",
             "entry_snapshot": None,
             "entry_snapshot_hash": None,
             "entry_price_effective": None,
@@ -580,6 +605,8 @@ class TradeWatcherEngine:
                     existing["status"] = "SUPERSEDED"
                     existing["last_reason"] = "Replaced by newer verified setup."
             self._watchers[watcher_id] = watcher
+
+        self._persist_state()
 
         # The background loop will evaluate immediately.
         return self._public(watcher)
@@ -751,7 +778,7 @@ class TradeWatcherEngine:
                     execution_order = self.execution_gateway.place_order(
                         symbol=watcher["symbol"], direction=direction, requested_price=entry_price, fill_price=effective_entry,
                         stake=risk["stake"], idempotency_key=f"{watcher_id}:{int(now)}:{direction}",
-                        metadata={"watcher_id": watcher_id, "forward_protocol": "V6_GENUINE_FORWARD", "snapshot_hash": frozen["snapshot_hash"]},
+                        metadata={"watcher_id": watcher_id, "forward_protocol": "V6.1_GENUINE_FORWARD", "snapshot_hash": frozen["snapshot_hash"]},
                     )
                 except Exception as exc:
                     with self._lock:
@@ -785,15 +812,17 @@ class TradeWatcherEngine:
                     watcher["entry_snapshot_hash"] = frozen["snapshot_hash"]
                     watcher["settlement_guard_passed"] = None
                     watcher["last_reason"] = (
-                        "V6 live entry confirmed. Genuine forward paper trade "
+                        "V6.1 live entry confirmed. Genuine forward paper trade "
                         "opened with frozen parameters and no future data."
                     )
+            self._persist_state()
         finally:
             db.close()
 
     def check_now(self, watcher_id: str) -> Optional[Dict[str, Any]]:
         self._resolve_open(watcher_id, force=False)
         self._evaluate(watcher_id, force=True)
+        self._persist_state()
         return self.get(watcher_id)
 
     # ------------------------------------------------------------------
@@ -891,10 +920,11 @@ class TradeWatcherEngine:
                     watcher["pnl"] = round(pnl, 2)
                     watcher["settlement_guard_passed"] = True
                     watcher["last_reason"] = (
-                        "V6 genuine forward trade resolved only after the "
+                        "V6.1 genuine forward trade resolved only after the "
                         "pre-committed holding horizon using adverse execution "
                         "assumptions."
                     )
+            self._persist_state()
         finally:
             db.close()
 
@@ -947,7 +977,7 @@ class TradeWatcherEngine:
             open_trades = self._open_count(db)
 
             return {
-                "forward_protocol": "V6_GENUINE_FORWARD",
+                "forward_protocol": "V6.1_GENUINE_FORWARD",
                 "forward_trades": len(closed),
                 "wins": wins,
                 "losses": losses,
@@ -1010,13 +1040,13 @@ class TradeWatcherEngine:
                     "closed": bool(row.closed),
                     "result": row.result,
                     "pnl": row.pnl,
-                    "forward_protocol": "V6_GENUINE_FORWARD",
+                    "forward_protocol": "V6.1_GENUINE_FORWARD",
                     "audit": watcher,
                 })
 
             return {
                 "version": "5.7.0",
-                "forward_protocol": "V6_GENUINE_FORWARD",
+                "forward_protocol": "V6.1_GENUINE_FORWARD",
                 "entries": entries,
                 "count": len(entries),
                 "live_execution": False,
@@ -1037,6 +1067,7 @@ class TradeWatcherEngine:
                 for watcher_id in ids:
                     self._resolve_open(watcher_id)
                     self._evaluate(watcher_id)
+                self._persist_state()
             except Exception:
                 # One watcher must never kill the daemon loop.
                 pass
