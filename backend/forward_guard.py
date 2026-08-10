@@ -5,7 +5,7 @@ import json
 from typing import Any, Dict
 
 
-V57_ENGINE_VERSION = "5.7.0"
+V57_ENGINE_VERSION = "6.0.0"
 DEFAULT_SPREAD_BPS = 1.0
 DEFAULT_SLIPPAGE_BPS = 0.5
 
@@ -45,7 +45,7 @@ def freeze_forward_snapshot(
     spread_bps: float = DEFAULT_SPREAD_BPS,
     slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
 ) -> Dict[str, Any]:
-    """Freeze exactly what V5.7 knew when the forward trade was opened.
+    """Freeze exactly what V6.0 knew when the forward trade was opened.
 
     The hash makes accidental strategy mutation detectable before settlement.
     It does not claim cryptographic non-repudiation; it is an integrity guard.
