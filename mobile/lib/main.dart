@@ -1183,6 +1183,34 @@ class _HomePageState extends State<HomePage> {
           'holding_candles':
               finalMarket?[
                   'holding_candles'],
+
+          'sample_reliability_pct':
+              finalMarket?[
+                  'sample_reliability_pct'],
+
+          'wilson_lower_win_rate_pct':
+              finalMarket?[
+                  'wilson_lower_win_rate_pct'],
+
+          'reliability_adjusted_score':
+              finalMarket?[
+                  'reliability_adjusted_score'],
+
+          'near_verified':
+              finalMarket?[
+                  'near_verified'] == true,
+
+          'primary_reason':
+              finalMarket?[
+                  'primary_reason'],
+
+          'rejection_reasons':
+              finalMarket?[
+                  'rejection_reasons'],
+
+          'explanation':
+              finalMarket?[
+                  'explanation'],
         };
 
         if (!mounted) {
@@ -1467,6 +1495,9 @@ class _HomePageState extends State<HomePage> {
       case 'STRONG':
         return Colors.greenAccent;
 
+      case 'NEAR_VERIFIED':
+        return Colors.amberAccent;
+
       case 'WATCH':
         return Colors.amberAccent;
 
@@ -1595,8 +1626,20 @@ class _HomePageState extends State<HomePage> {
     final verified =
         item['verified'] == true;
 
+    final nearVerified =
+        item['near_verified'] == true ||
+            status == 'NEAR_VERIFIED';
+
     final errorMessage =
         item['error']
+            ?.toString();
+
+    final explanation =
+        item['explanation']
+            ?.toString();
+
+    final primaryReason =
+        item['primary_reason']
             ?.toString();
 
     return Card(
@@ -1623,17 +1666,21 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                 ),
-
                 Icon(
                   verified
                       ? Icons.verified
-                      : status ==
-                              'NETWORK_ERROR'
-                          ? Icons.wifi_off
-                          : Icons.cancel_outlined,
+                      : nearVerified
+                          ? Icons
+                              .verified_outlined
+                          : status ==
+                                  'NETWORK_ERROR'
+                              ? Icons.wifi_off
+                              : Icons
+                                  .cancel_outlined,
                   color:
                       verified
-                          ? Colors.greenAccent
+                          ? Colors
+                              .greenAccent
                           : statusColor(
                               status,
                             ),
@@ -1646,7 +1693,10 @@ class _HomePageState extends State<HomePage> {
             ),
 
             Text(
-              status,
+              status.replaceAll(
+                '_',
+                ' ',
+              ),
               style:
                   TextStyle(
                 fontSize: 16,
@@ -1659,38 +1709,102 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
 
-            if (item['deep_score'] !=
-                null)
+            const SizedBox(
+              height: 8,
+            ),
+
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Deep score: '
+                    '${formatNumber(item['deep_score'])}',
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    'Reliable score: '
+                    '${formatNumber(item['reliability_adjusted_score'])}',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 4,
+            ),
+
+            Text(
+              'Historical: '
+              '${item['wins'] ?? '-'} wins / '
+              '${item['losses'] ?? '-'} losses '
+              '(${formatPercent(item['win_rate'])}% WR)',
+            ),
+
+            Text(
+              'Trades: ${item['trades'] ?? '-'}'
+              ' • PF ${formatNumber(item['profit_factor'])}'
+              ' • Max DD '
+              '${formatPercent(item['max_drawdown'])}%',
+            ),
+
+            Text(
+              'Reliability: '
+              '${formatNumber(item['sample_reliability_pct'], decimals: 1)}%'
+              ' • Conservative WR: '
+              '${formatNumber(item['wilson_lower_win_rate_pct'], decimals: 1)}%',
+            ),
+
+            if (item['interval'] != null ||
+                item['period'] != null)
               Text(
-                'Deep score: '
-                '${formatNumber(item['deep_score'])}',
+                'Setup: '
+                '${item['interval'] ?? '-'}'
+                ' • ${item['period'] ?? '-'}'
+                ' • Hold '
+                '${item['holding_candles'] ?? '-'} candles',
               ),
 
-            if (item['win_rate'] !=
-                null)
-              Text(
-                'Win rate: '
-                '${formatPercent(item['win_rate'])}%',
+            if (primaryReason != null &&
+                primaryReason.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
               ),
+              Text(
+                'Reason: '
+                '${primaryReason.replaceAll('_', ' ')}',
+                style:
+                    TextStyle(
+                  color:
+                      statusColor(
+                    status,
+                  ),
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
 
-            if (item['trades'] != null)
-              Text(
-                'Trades: '
-                '${item['trades']}',
+            if (explanation != null &&
+                explanation.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
               ),
-
-            if (item['profit_factor'] !=
-                null)
               Text(
-                'Profit factor: '
-                '${formatNumber(item['profit_factor'])}',
+                explanation,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
+                  fontSize: 12,
+                ),
               ),
+            ],
 
             if (errorMessage != null) ...[
               const SizedBox(
                 height: 10,
               ),
-
               Text(
                 errorMessage,
                 style:
@@ -1706,6 +1820,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+
 
   // =========================================================
   // FAST MARKET CARD
@@ -1815,8 +1930,8 @@ class _HomePageState extends State<HomePage> {
                   const Spacer(),
 
                   Text(
-                    'Score '
-                    '${score.toStringAsFixed(1)}',
+                    'Fast Score '
+                    '${score.toStringAsFixed(1)}/100',
                     style:
                         const TextStyle(
                       fontWeight:
@@ -1925,7 +2040,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V4.8',
+          'Jasong AI Trader V5.0',
         ),
         actions: [
           IconButton(
@@ -2369,7 +2484,7 @@ class _HomePageState extends State<HomePage> {
                     children: [
                       const Icon(
                         Icons.verified,
-                        size: 50,
+                        size: 54,
                         color:
                             Colors.greenAccent,
                       ),
@@ -2379,44 +2494,14 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       const Text(
-                        'VERIFIED OPPORTUNITY',
+                        'VERIFIED TRADE',
                         style:
                             TextStyle(
                           color:
                               Colors.greenAccent,
-                          fontSize: 16,
-                          fontWeight:
-                              FontWeight.bold,
-                        ),
-                      ),
-
-                      const SizedBox(
-                        height: 12,
-                      ),
-
-                      Text(
-                        '${verifiedTrade!['market']}',
-                        style:
-                            const TextStyle(
-                          fontSize: 36,
+                          fontSize: 18,
                           fontWeight:
                               FontWeight.w900,
-                        ),
-                      ),
-
-                      Text(
-                        '${verifiedTrade!['direction']}',
-                        style:
-                            TextStyle(
-                          fontSize: 30,
-                          fontWeight:
-                              FontWeight.w900,
-                          color:
-                              decisionColor(
-                            verifiedTrade![
-                                    'direction']
-                                .toString(),
-                          ),
                         ),
                       ),
 
@@ -2425,17 +2510,55 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       Row(
+                        mainAxisAlignment:
+                            MainAxisAlignment
+                                .center,
+                        children: [
+                          Text(
+                            '${verifiedTrade!['market']}',
+                            style:
+                                const TextStyle(
+                              fontSize: 34,
+                              fontWeight:
+                                  FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(
+                            width: 16,
+                          ),
+                          Text(
+                            '${verifiedTrade!['direction']}',
+                            style:
+                                TextStyle(
+                              fontSize: 30,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  decisionColor(
+                                verifiedTrade![
+                                        'direction']
+                                    .toString(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 14,
+                      ),
+
+                      Row(
                         children: [
                           metric(
-                            'Deep score',
+                            'Deep Score',
                             formatNumber(
                               verifiedTrade![
                                   'deep_score'],
                             ),
                           ),
-
                           metric(
-                            'Win rate',
+                            'Historical WR',
                             '${formatPercent(
                               verifiedTrade![
                                   'win_rate'],
@@ -2447,13 +2570,47 @@ class _HomePageState extends State<HomePage> {
                       Row(
                         children: [
                           metric(
-                            'Profit factor',
+                            'Reliability',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'sample_reliability_pct'],
+                              decimals: 1,
+                            )}%',
+                          ),
+                          metric(
+                            'Conservative WR',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'wilson_lower_win_rate_pct'],
+                              decimals: 1,
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${verifiedTrade!['wins'] ?? '-'} / '
+                            '${verifiedTrade!['losses'] ?? '-'}',
+                          ),
+                          metric(
+                            'Trades',
+                            '${verifiedTrade!['trades'] ?? '-'}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Profit Factor',
                             formatNumber(
                               verifiedTrade![
                                   'profit_factor'],
                             ),
                           ),
-
                           metric(
                             'Max DD',
                             '${formatPercent(
@@ -2467,40 +2624,166 @@ class _HomePageState extends State<HomePage> {
                       Row(
                         children: [
                           metric(
-                            'Trades',
-                            '${verifiedTrade!['trades'] ?? '-'}',
+                            'Backtest Return',
+                            '${formatPercent(
+                              verifiedTrade![
+                                  'return_pct'],
+                            )}%',
                           ),
-
                           metric(
-                            'Fast rank',
-                            '#${verifiedTrade!['fast_rank'] ?? '-'}',
+                            'Fast Score',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'fast_score'],
+                              decimals: 1,
+                            )}/100',
                           ),
                         ],
                       ),
 
                       const SizedBox(
-                        height: 10,
+                        height: 12,
                       ),
 
-                      Text(
-                        'Validated setup: '
-                        '${verifiedTrade!['interval'] ?? '-'}'
-                        ' • '
-                        '${verifiedTrade!['period'] ?? '-'}'
-                        ' • Hold '
-                        '${verifiedTrade!['holding_candles'] ?? '-'} candles',
-                        textAlign:
-                            TextAlign.center,
+                      Card(
+                        child: Padding(
+                          padding:
+                              const EdgeInsets.all(
+                            14,
+                          ),
+                          child: Column(
+                            children: [
+                              Text(
+                                'TIMEFRAME  '
+                                '${verifiedTrade!['interval'] ?? '-'}',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'HISTORICAL WINDOW  '
+                                '${verifiedTrade!['period'] ?? '-'}',
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'HOLDING WINDOW  '
+                                '${verifiedTrade!['holding_candles'] ?? '-'} candles',
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'ENTRY THRESHOLD  '
+                                '${verifiedTrade!['threshold_pct'] ?? '-'}%',
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
 
                       const SizedBox(
-                        height: 4,
+                        height: 12,
                       ),
 
-                      Text(
-                        'Threshold: '
-                        '${verifiedTrade!['threshold_pct'] ?? '-'}%',
+                      const Align(
+                        alignment:
+                            Alignment.centerLeft,
+                        child: Text(
+                          'Validation checks',
+                          style:
+                              TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
                       ),
+
+                      const SizedBox(
+                        height: 6,
+                      ),
+
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Sample size passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Historical win rate passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Profit factor passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Drawdown limit passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Validated sample passed',
+                        ),
+                      ),
+
+                      if (verifiedTrade![
+                              'explanation'] !=
+                          null) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+                        Text(
+                          '${verifiedTrade!['explanation']}',
+                          textAlign:
+                              TextAlign.center,
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
 
                       const SizedBox(
                         height: 14,
@@ -2522,13 +2805,42 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       const SizedBox(
+                        height: 8,
+                      ),
+
+                      OutlinedButton.icon(
+                        onPressed:
+                            busy ||
+                                    sig == null ||
+                                    ![
+                                      'BUY',
+                                      'SELL',
+                                    ].contains(
+                                      sig![
+                                              'decision']
+                                          ?.toString(),
+                                    )
+                                ? null
+                                : recordPaperTrade,
+                        icon:
+                            const Icon(
+                          Icons.edit_note,
+                        ),
+                        label:
+                            const Text(
+                          'Record Paper Trade',
+                        ),
+                      ),
+
+                      const SizedBox(
                         height: 10,
                       ),
 
                       const Text(
-                        'Historical verification does '
-                        'not guarantee that the next '
-                        'trade will be profitable.',
+                        'VERIFIED means the historical setup '
+                        'passed the configured validation rules. '
+                        'Historical win rate and scores are not '
+                        'guarantees of the next trade outcome.',
                         textAlign:
                             TextAlign.center,
                         style:
@@ -2983,9 +3295,9 @@ class _HomePageState extends State<HomePage> {
                 child: Text(
                   'Safety: Jasong AI Trader is for '
                   'AI-assisted analysis and paper trading. '
-                  'A VERIFIED result means the historical '
-                  'validation criteria passed; it does not '
-                  'guarantee the next trade will win.',
+                  'Fast Score is a ranking score, not a win probability. '
+                  'A VERIFIED result means historical validation rules '
+                  'passed; it does not guarantee the next trade will win.',
                 ),
               ),
             ),
