@@ -71,6 +71,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? liveEntryAssessment;
 
   Map<String, dynamic>? serverWatcher;
+  List<Map<String, dynamic>> serverWatchers = [];
   Map<String, dynamic>? forwardStats;
   Timer? watcherPollTimer;
   bool watcherBusy = false;
@@ -884,6 +885,7 @@ class _HomePageState extends State<HomePage> {
 
       liveEntryAssessment = null;
       serverWatcher = null;
+      serverWatchers = [];
       forwardStats = null;
       watcherPollTimer?.cancel();
 
@@ -1299,21 +1301,25 @@ class _HomePageState extends State<HomePage> {
         };
 
         setState(() {
-          verifiedTrade =
+          verifiedTrade ??=
               result;
 
           currentValidationMarket =
               '$market VERIFIED';
 
           networkStatus =
-              'Deep validation passed';
+              'Deep validation passed • '
+              'adding candidate to V5.4 watch portfolio';
         });
 
         await createServerWatcher(
           result,
         );
 
-        break;
+        // V5.4 intentionally continues through the remaining
+        // shortlisted candidates. Multiple VERIFIED setups can
+        // be watched simultaneously, so a waiting/overextended
+        // #1 candidate does not block a better live entry in #2/#3.
       }
     } on NetworkValidationException catch (_) {
       // Already shown in the validation card.
@@ -1377,10 +1383,25 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      final created =
+          Map<String, dynamic>.from(
+        rawWatcher,
+      );
+
       setState(() {
+        serverWatchers.removeWhere(
+          (item) =>
+              item['watcher_id'] ==
+              created['watcher_id'],
+        );
+
+        serverWatchers.add(
+          created,
+        );
+
         serverWatcher =
-            Map<String, dynamic>.from(
-          rawWatcher,
+            _selectPrimaryWatcher(
+          serverWatchers,
         );
       });
 
@@ -1407,27 +1428,68 @@ class _HomePageState extends State<HomePage> {
         seconds: 20,
       ),
       (_) {
-        refreshServerWatcher();
+        refreshServerWatchers();
       },
     );
 
     Future.microtask(
-      refreshServerWatcher,
+      refreshServerWatchers,
     );
   }
 
-  Future<void> refreshServerWatcher() async {
-    if (watcherBusy ||
-        serverWatcher == null) {
-      return;
+  Map<String, dynamic>? _selectPrimaryWatcher(
+    List<Map<String, dynamic>> watchers,
+  ) {
+    if (watchers.isEmpty) {
+      return null;
     }
 
-    final watcherId =
-        serverWatcher!['watcher_id']
-            ?.toString();
+    int priority(
+      Map<String, dynamic> item,
+    ) {
+      switch (
+          item['status']
+                  ?.toString() ??
+              '') {
+        case 'OPEN':
+          return 100;
+        case 'READY':
+          return 90;
+        case 'WATCHING':
+          return 80;
+        case 'RISK_BLOCKED':
+          return 70;
+        case 'WIN':
+          return 60;
+        case 'LOSS':
+          return 50;
+        case 'EXPIRED':
+          return 30;
+        case 'INVALIDATED':
+          return 20;
+        case 'SUPERSEDED':
+          return 10;
+        default:
+          return 0;
+      }
+    }
 
-    if (watcherId == null ||
-        watcherId.isEmpty) {
+    final sorted = [
+      ...watchers,
+    ];
+
+    sorted.sort(
+      (a, b) =>
+          priority(b).compareTo(
+        priority(a),
+      ),
+    );
+
+    return sorted.first;
+  }
+
+  Future<void> refreshServerWatchers() async {
+    if (watcherBusy) {
       return;
     }
 
@@ -1435,7 +1497,7 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final uri = Uri.parse(
-        '$apiBase/watchers/$watcherId',
+        '$apiBase/watchers',
       );
 
       final response = await getJson(
@@ -1443,41 +1505,44 @@ class _HomePageState extends State<HomePage> {
         timeoutSeconds: 45,
       );
 
-      final raw = response['watcher'];
+      final raw =
+          response['watchers'];
 
-      if (raw is Map && mounted) {
-        final updated =
-            Map<String, dynamic>.from(
-          raw,
-        );
+      if (raw is List &&
+          mounted) {
+        final updated = <
+            Map<String, dynamic>>[];
+
+        for (final item in raw) {
+          if (item is Map) {
+            updated.add(
+              Map<String, dynamic>.from(
+                item,
+              ),
+            );
+          }
+        }
 
         setState(() {
-          serverWatcher = updated;
+          serverWatchers = updated;
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            updated,
+          );
         });
-
-        final status =
-            updated['status']
-                    ?.toString() ??
-                '';
-
-        if ([
-          'WIN',
-          'LOSS',
-          'EXPIRED',
-          'INVALIDATED',
-          'SUPERSEDED',
-        ].contains(status)) {
-          watcherPollTimer?.cancel();
-        }
       }
 
       await loadForwardStats();
     } catch (_) {
-      // The watcher runs on the server. A temporary mobile
-      // polling failure must not alter or invalidate it.
+      // Watchers remain active on the server.
     } finally {
       watcherBusy = false;
     }
+  }
+
+  Future<void> refreshServerWatcher() async {
+    await refreshServerWatchers();
   }
 
   Future<void> checkServerWatcherNow() async {
@@ -1533,14 +1598,35 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      final checked =
+          Map<String, dynamic>.from(
+        decoded['watcher'] as Map,
+      );
+
       setState(() {
+        final index =
+            serverWatchers.indexWhere(
+          (item) =>
+              item['watcher_id'] ==
+              checked['watcher_id'],
+        );
+
+        if (index >= 0) {
+          serverWatchers[index] =
+              checked;
+        } else {
+          serverWatchers.add(
+            checked,
+          );
+        }
+
         serverWatcher =
-            Map<String, dynamic>.from(
-          decoded['watcher'] as Map,
+            _selectPrimaryWatcher(
+          serverWatchers,
         );
       });
 
-      await loadForwardStats();
+      await refreshServerWatchers();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -2614,14 +2700,34 @@ class _HomePageState extends State<HomePage> {
 
                   const Spacer(),
 
-                  Text(
-                    'Fast Score '
-                    '${score.toStringAsFixed(1)}/100',
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
+                  Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        'Smart Score '
+                        '${score.toStringAsFixed(1)}/100',
+                        style:
+                            const TextStyle(
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                      if (market[
+                              'quality_tier'] !=
+                          null)
+                        Text(
+                          'Tier '
+                          '${market['quality_tier']}'
+                          '${market['raw_fast_score'] != null ? ' • Raw ${formatNumber(market['raw_fast_score'], decimals: 1)}' : ''}',
+                          style:
+                              const TextStyle(
+                            fontSize: 11,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -2725,7 +2831,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.3',
+          'Jasong AI Trader V5.4',
         ),
         actions: [
           IconButton(
@@ -3590,12 +3696,28 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.3 SERVER TRADE WATCHER',
+                            'V5.4 WATCH PORTFOLIO',
                             style:
                                 TextStyle(
                               fontSize: 15,
                               fontWeight:
                                   FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 6,
+                          ),
+
+                          Text(
+                            '${serverWatchers.length} verified '
+                            '${serverWatchers.length == 1 ? 'candidate' : 'candidates'} '
+                            'in watcher history/portfolio',
+                            style:
+                                const TextStyle(
+                              fontSize: 12,
+                              color:
+                                  Colors.white70,
                             ),
                           ),
 
@@ -3817,9 +3939,10 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'The server keeps this verified candidate under '
-                            'observation. A paper trade opens only after live '
-                            'confirmation and risk controls pass.',
+                            'V5.4 can keep multiple VERIFIED candidates under '
+                            'observation. A waiting or overextended market does '
+                            'not block another candidate from confirming. Paper '
+                            'entries still require live confirmation and risk controls.',
                             textAlign:
                                 TextAlign.center,
                             style:
@@ -4673,7 +4796,7 @@ class _HomePageState extends State<HomePage> {
                   'Safety: Jasong AI Trader is for '
                   'AI-assisted analysis and paper trading. '
                   'Fast Score is a ranking score, not a win probability. '
-                  'VERIFIED refers to historical validation; the V5.3 watcher '
+                  'VERIFIED refers to historical validation; the V5.4 watch portfolio '
                   'opens paper trades only after live confirmation and risk controls. '
                   'No historical or forward result guarantees profit.',
                 ),
