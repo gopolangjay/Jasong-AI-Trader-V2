@@ -39,6 +39,7 @@ from paper import (
 )
 
 from trade_watcher import TradeWatcherEngine
+from auto_manager import AutomatedTradeManager
 
 from database import (
     SessionLocal,
@@ -48,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.4
-# SMART RANKING + MULTI-CANDIDATE WATCH PORTFOLIO
+# JASONG AI TRADER V5.5
+# AUTOMATED TRADE MANAGER + ADAPTIVE RANKING
 # ============================================================
 
 MARKETS = {
@@ -66,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.4 API",
-    version="5.4.0",
+    title="Jasong AI Trader V5.5 API",
+    version="5.5.0",
 )
 
 app.add_middleware(
@@ -891,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.4.0",
+        "version": "5.5.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2327,6 +2328,295 @@ def _v53_latest_price(
     )
 
 
+
+# ============================================================
+# V5.5 FORWARD PERFORMANCE BY SYMBOL
+# ============================================================
+
+def _v55_symbol_forward_stats(
+    symbol: str,
+    payout: float = 0.80,
+) -> dict:
+    """Forward paper performance for one symbol.
+
+    Used only as an ADAPTIVE ranking input after enough unseen forward
+    trades exist. Historical validation remains separate.
+    """
+
+    db = SessionLocal()
+
+    try:
+        rows = (
+            db.query(Trade)
+            .filter(Trade.mode == "paper")
+            .filter(Trade.closed == True)  # noqa: E712
+            .filter(Trade.symbol == symbol)
+            .order_by(Trade.created_at.asc())
+            .all()
+        )
+
+        closed = [
+            row
+            for row in rows
+            if str(
+                getattr(
+                    row,
+                    "result",
+                    "",
+                )
+                or ""
+            ).upper()
+            in {"WIN", "LOSS"}
+        ]
+
+        wins = sum(
+            1
+            for row in closed
+            if str(
+                getattr(
+                    row,
+                    "result",
+                    "",
+                )
+            ).upper()
+            == "WIN"
+        )
+
+        losses = len(closed) - wins
+
+        gross_profit = sum(
+            max(
+                float(
+                    getattr(
+                        row,
+                        "pnl",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                0.0,
+            )
+            for row in closed
+        )
+
+        gross_loss = abs(
+            sum(
+                min(
+                    float(
+                        getattr(
+                            row,
+                            "pnl",
+                            0.0,
+                        )
+                        or 0.0
+                    ),
+                    0.0,
+                )
+                for row in closed
+            )
+        )
+
+        win_rate = (
+            wins / len(closed)
+            if closed
+            else 0.0
+        )
+
+        profit_factor = (
+            gross_profit / gross_loss
+            if gross_loss > 0
+            else (
+                99.0
+                if gross_profit > 0
+                else 0.0
+            )
+        )
+
+        return {
+            "symbol": symbol,
+            "trades": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(
+                win_rate,
+                4,
+            ),
+            "profit_factor": round(
+                profit_factor,
+                4,
+            ),
+            "break_even_win_rate": round(
+                1.0 / (
+                    1.0 + float(payout)
+                ),
+                4,
+            ),
+        }
+
+    finally:
+        db.close()
+
+
+def _v55_adaptive_candidate_score(
+    candidate: dict,
+    payout: float = 0.80,
+) -> dict:
+    """Blend Smart Fast Score with real forward evidence.
+
+    Forward evidence is ignored until at least 10 completed paper trades
+    exist for the symbol. Even then, the adjustment is capped so forward
+    performance cannot bypass deep validation.
+    """
+
+    item = dict(candidate)
+
+    base_score = float(
+        item.get(
+            "smart_fast_score",
+            item.get(
+                "fast_score",
+                0.0,
+            ),
+        )
+        or 0.0
+    )
+
+    symbol = str(
+        item.get("symbol")
+        or ""
+    )
+
+    stats = _v55_symbol_forward_stats(
+        symbol=symbol,
+        payout=payout,
+    )
+
+    adjustment = 0.0
+    evidence_active = (
+        stats["trades"] >= 10
+    )
+
+    if evidence_active:
+        break_even = float(
+            stats[
+                "break_even_win_rate"
+            ]
+        )
+
+        win_rate = float(
+            stats["win_rate"]
+        )
+
+        profit_factor = float(
+            stats["profit_factor"]
+        )
+
+        # Win-rate evidence: capped at +/- 8 points.
+        wr_adjustment = max(
+            -8.0,
+            min(
+                8.0,
+                (
+                    win_rate
+                    - break_even
+                )
+                * 40.0,
+            ),
+        )
+
+        # Profit-factor evidence: capped at +/- 4 points.
+        if profit_factor >= 2.0:
+            pf_adjustment = 4.0
+        elif profit_factor >= 1.5:
+            pf_adjustment = 2.5
+        elif profit_factor >= 1.2:
+            pf_adjustment = 1.0
+        elif profit_factor < 1.0:
+            pf_adjustment = -4.0
+        else:
+            pf_adjustment = -1.0
+
+        adjustment = (
+            wr_adjustment
+            + pf_adjustment
+        )
+
+    adaptive_score = max(
+        0.0,
+        min(
+            100.0,
+            base_score
+            + adjustment,
+        ),
+    )
+
+    item[
+        "adaptive_rank_score"
+    ] = round(
+        adaptive_score,
+        2,
+    )
+
+    item[
+        "forward_evidence_adjustment"
+    ] = round(
+        adjustment,
+        2,
+    )
+
+    item[
+        "forward_evidence_active"
+    ] = evidence_active
+
+    item[
+        "forward_symbol_stats"
+    ] = stats
+
+    return item
+
+
+def _v55_rank_candidates(
+    candidates: list[dict],
+    payout: float = 0.80,
+) -> list[dict]:
+    ranked = [
+        _v55_adaptive_candidate_score(
+            candidate=item,
+            payout=payout,
+        )
+        for item in candidates
+        if isinstance(
+            item,
+            dict,
+        )
+    ]
+
+    ranked.sort(
+        key=lambda item: (
+            float(
+                item.get(
+                    "adaptive_rank_score",
+                    0.0,
+                )
+                or 0.0
+            ),
+            float(
+                item.get(
+                    "smart_fast_score",
+                    item.get(
+                        "fast_score",
+                        0.0,
+                    ),
+                )
+                or 0.0
+            ),
+        ),
+        reverse=True,
+    )
+
+    return ranked
+
+
 V53_WATCHER_ENGINE = TradeWatcherEngine(
     session_factory=SessionLocal,
     trade_model=Trade,
@@ -2336,6 +2626,125 @@ V53_WATCHER_ENGINE = TradeWatcherEngine(
 )
 
 V53_WATCHER_ENGINE.start()
+
+
+# ============================================================
+# V5.5 AUTOMATED TRADE MANAGER
+# ============================================================
+
+def _v55_scan_candidates(
+    top_n: int = 5,
+    payout: float = 0.80,
+) -> list[dict]:
+    raw = run_fast_scan(
+        period="5d",
+        interval="15m",
+        top_n=max(
+            1,
+            min(
+                int(top_n),
+                len(MARKETS),
+            ),
+        ),
+    )
+
+    candidates = (
+        raw.get(
+            "ranking"
+        )
+        or raw.get(
+            "top_candidates"
+        )
+        or []
+    )
+
+    return _v55_rank_candidates(
+        candidates=[
+            dict(item)
+            for item in candidates
+            if isinstance(
+                item,
+                dict,
+            )
+        ],
+        payout=payout,
+    )
+
+
+def _v55_validate_candidate(
+    candidate: dict,
+    risk_mode: str,
+    starting_balance: float,
+    payout: float,
+) -> dict:
+    result = validate_candidates(
+        candidates=[
+            candidate
+        ],
+        optimise_all_timeframes_func=
+            optimise_all_timeframes,
+        get_data_func=get_data,
+        add_indicators_func=
+            add_indicators,
+        train_model_func=
+            train_model,
+        enrich_func=enrich,
+        profile=
+            PROFILES[
+                risk_mode
+            ],
+        starting_balance=
+            starting_balance,
+        payout=payout,
+        max_candidates=1,
+    )
+
+    final_market = (
+        result.get(
+            "final_market"
+        )
+    )
+
+    if isinstance(
+        final_market,
+        dict,
+    ):
+        return dict(
+            final_market
+        )
+
+    return {
+        "market":
+            candidate.get(
+                "market"
+            ),
+        "symbol":
+            candidate.get(
+                "symbol"
+            ),
+        "status":
+            result.get(
+                "final_status",
+                "NOT_VERIFIED",
+            ),
+        "verified":
+            False,
+        "explanation":
+            "No verified market returned by deep validation.",
+    }
+
+
+V55_AUTO_MANAGER = AutomatedTradeManager(
+    scan_candidates_func=
+        _v55_scan_candidates,
+    validate_candidate_func=
+        _v55_validate_candidate,
+    watcher_engine=
+        V53_WATCHER_ENGINE,
+)
+
+V55_AUTO_MANAGER.start_thread()
+
 
 
 @app.post("/watchers")
@@ -2444,6 +2853,146 @@ def check_verified_watcher_now(
     return {
         "watcher": watcher,
         "live_execution": False,
+    }
+
+
+
+# ============================================================
+# V5.5 AUTO MANAGER API
+# ============================================================
+
+@app.get("/auto-manager")
+def get_auto_manager_status():
+    return {
+        "manager":
+            V55_AUTO_MANAGER.status(),
+        "live_execution":
+            False,
+    }
+
+
+@app.post("/auto-manager/start")
+def start_auto_manager(
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+    scan_interval_minutes: int = 15,
+    target_active_watchers: int = 3,
+    scan_top_n: int = 5,
+):
+    validate_risk_mode(
+        risk_mode
+    )
+
+    validate_balance(
+        starting_balance
+    )
+
+    try:
+        state = V55_AUTO_MANAGER.enable(
+            risk_mode=
+                risk_mode,
+            starting_balance=
+                starting_balance,
+            payout=
+                payout,
+            scan_interval_minutes=
+                scan_interval_minutes,
+            target_active_watchers=
+                target_active_watchers,
+            scan_top_n=
+                scan_top_n,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    return {
+        "status":
+            "AUTO_MANAGER_ENABLED",
+        "manager":
+            state,
+        "live_execution":
+            False,
+    }
+
+
+@app.post("/auto-manager/stop")
+def stop_auto_manager():
+    state = (
+        V55_AUTO_MANAGER.disable()
+    )
+
+    return {
+        "status":
+            "AUTO_MANAGER_DISABLED",
+        "manager":
+            state,
+        "live_execution":
+            False,
+    }
+
+
+@app.post("/auto-manager/run-now")
+def run_auto_manager_now():
+    result = (
+        V55_AUTO_MANAGER.run_now()
+    )
+
+    return {
+        "status":
+            "AUTO_MANAGER_RUN_COMPLETE",
+        "result":
+            result,
+        "manager":
+            V55_AUTO_MANAGER.status(),
+        "live_execution":
+            False,
+    }
+
+
+@app.get("/adaptive-ranking")
+def get_adaptive_ranking(
+    top_n: int = 9,
+    payout: float = 0.80,
+):
+    if (
+        top_n < 1
+        or top_n > len(MARKETS)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"top_n must be between "
+                f"1 and {len(MARKETS)}"
+            ),
+        )
+
+    candidates = (
+        _v55_scan_candidates(
+            top_n=top_n,
+            payout=payout,
+        )
+    )
+
+    return {
+        "ranking":
+            candidates[
+                :top_n
+            ],
+        "forward_evidence_min_trades":
+            10,
+        "note":
+            (
+                "Adaptive ranking uses forward paper evidence "
+                "only after 10 completed forward trades per symbol. "
+                "Deep validation remains mandatory before watching."
+            ),
+        "live_execution":
+            False,
     }
 
 
