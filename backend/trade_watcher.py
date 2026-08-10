@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Optional
 
 
 class TradeWatcherEngine:
-    """Server-side paper-trade watcher for Jasong AI Trader V5.3.
+    """Server-side paper-trade watcher for Jasong AI Trader V5.6.
 
     The engine keeps verified candidates under observation, confirms live entry
     conditions, applies paper-risk circuit breakers, opens paper trades, closes
@@ -53,7 +53,7 @@ class TradeWatcherEngine:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._loop,
-            name="jasong-v53-paper-watcher",
+            name="jasong-v56-paper-watcher",
             daemon=True,
         )
         self._thread.start()
@@ -176,6 +176,139 @@ class TradeWatcherEngine:
             is not None
         )
 
+    @staticmethod
+    def _fx_pair(
+        symbol: str,
+    ) -> tuple[str, str] | None:
+        clean = str(
+            symbol
+            or ""
+        ).upper().replace(
+            "=X",
+            "",
+        ).replace(
+            "/",
+            "",
+        )
+
+        if len(clean) != 6:
+            return None
+
+        return (
+            clean[:3],
+            clean[3:],
+        )
+
+    def _currency_exposure(
+        self,
+        symbol: str,
+        direction: str,
+    ) -> dict[str, int]:
+        pair = self._fx_pair(
+            symbol
+        )
+
+        if pair is None:
+            return {}
+
+        base, quote = pair
+
+        if str(
+            direction
+            or ""
+        ).upper() == "BUY":
+            return {
+                base: 1,
+                quote: -1,
+            }
+
+        return {
+            base: -1,
+            quote: 1,
+        }
+
+    def _correlated_open_exposure(
+        self,
+        db,
+        symbol: str,
+        direction: str,
+    ) -> list[str]:
+        """Block strongly redundant currency-leg exposure.
+
+        Example: BUY EURUSD + BUY GBPUSD both create short-USD exposure.
+        This is intentionally simple/conservative and only acts on currently
+        open paper trades.
+        """
+
+        proposed = self._currency_exposure(
+            symbol,
+            direction,
+        )
+
+        if not proposed:
+            return []
+
+        conflicts = []
+
+        rows = (
+            db.query(
+                self.Trade
+            )
+            .filter(
+                self.Trade.mode
+                == "paper"
+            )
+            .filter(
+                self.Trade.closed
+                == False  # noqa: E712
+            )
+            .all()
+        )
+
+        for row in rows:
+            existing = (
+                self._currency_exposure(
+                    str(
+                        getattr(
+                            row,
+                            "symbol",
+                            "",
+                        )
+                        or ""
+                    ),
+                    str(
+                        getattr(
+                            row,
+                            "direction",
+                            "",
+                        )
+                        or ""
+                    ),
+                )
+            )
+
+            shared_same_side = [
+                currency
+                for currency, side
+                in proposed.items()
+                if currency
+                in existing
+                and existing[
+                    currency
+                ]
+                == side
+            ]
+
+            if shared_same_side:
+                conflicts.append(
+                    (
+                        f"{getattr(row, 'symbol', '')}:"
+                        f"{','.join(shared_same_side)}"
+                    )
+                )
+
+        return conflicts
+
     # ------------------------------------------------------------------
     # risk engine
     # ------------------------------------------------------------------
@@ -213,6 +346,37 @@ class TradeWatcherEngine:
         if self._duplicate_open(db, watcher["symbol"]):
             blocks.append("DUPLICATE_MARKET_EXPOSURE")
 
+        correlation_conflicts = (
+            self._correlated_open_exposure(
+                db=db,
+                symbol=watcher["symbol"],
+                direction=str(
+                    watcher.get(
+                        "direction",
+                        "",
+                    )
+                ),
+            )
+        )
+
+        if correlation_conflicts:
+            blocks.append(
+                "CORRELATED_CURRENCY_EXPOSURE"
+            )
+
+        strategy_health = str(
+            watcher.get(
+                "strategy_health",
+                "PROBATION",
+            )
+            or "PROBATION"
+        ).upper()
+
+        if strategy_health == "QUARANTINED":
+            blocks.append(
+                "STRATEGY_QUARANTINED"
+            )
+
         reliability = self._safe_float(
             watcher.get("sample_reliability", 0.0)
         )
@@ -246,7 +410,12 @@ class TradeWatcherEngine:
         if max_drawdown > 0.03:
             quality -= min((max_drawdown - 0.03) * 4.0, 0.20)
 
-        quality = min(max(quality, 0.50), 1.00)
+        if strategy_health == "DEGRADING":
+            quality *= 0.70
+        elif strategy_health == "PROBATION":
+            quality *= 0.85
+
+        quality = min(max(quality, 0.40), 1.00)
         risk_fraction = profile.risk_per_trade * quality
         stake = round(max(current_balance * risk_fraction, 0.0), 2)
 
@@ -258,6 +427,8 @@ class TradeWatcherEngine:
             "daily_pnl": round(daily_pnl, 2),
             "consecutive_losses": consecutive_losses,
             "open_trades": open_count,
+            "strategy_health": strategy_health,
+            "correlation_conflicts": correlation_conflicts,
             "base_risk_fraction": float(profile.risk_per_trade),
             "quality_multiplier": round(quality, 4),
             "effective_risk_fraction": round(risk_fraction, 6),
@@ -345,6 +516,10 @@ class TradeWatcherEngine:
                 "wilson_lower_win_rate_pct"
             ),
             "fast_score": candidate.get("fast_score"),
+            "adaptive_rank_score": candidate.get("adaptive_rank_score"),
+            "strategy_health": candidate.get("strategy_health", "PROBATION"),
+            "strategy_health_reason": candidate.get("strategy_health_reason"),
+            "forward_symbol_stats": candidate.get("forward_symbol_stats"),
             "explanation": candidate.get("explanation"),
         }
 
