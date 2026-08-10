@@ -48,8 +48,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.3
-# SINGLE-DOWNLOAD / RESAMPLED MULTI-TIMEFRAME DATA ENGINE
+# JASONG AI TRADER V5.4
+# SMART RANKING + MULTI-CANDIDATE WATCH PORTFOLIO
 # ============================================================
 
 MARKETS = {
@@ -66,8 +66,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.3 API",
-    version="5.3.0",
+    title="Jasong AI Trader V5.4 API",
+    version="5.4.0",
 )
 
 app.add_middleware(
@@ -891,7 +891,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.3.0",
+        "version": "5.4.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -1578,6 +1578,302 @@ def rank_markets(
 
 
 # ============================================================
+# V5.4 SMART FAST-SCORE LAYER
+# ============================================================
+
+def _v54_quality_tier(score: float) -> str:
+    if score >= 90.0:
+        return "A+"
+    if score >= 82.0:
+        return "A"
+    if score >= 72.0:
+        return "B"
+    if score >= 62.0:
+        return "C"
+    return "REJECT"
+
+
+def _v54_rescore_candidate(
+    candidate: dict,
+) -> dict:
+    """Make Fast Score more discriminating.
+
+    The original scanner remains the discovery engine. V5.4 applies
+    transparent penalties for obvious entry-quality contradictions so a
+    saturated 100/100 does not look like a 100% win probability.
+
+    This score is still a RANKING score only.
+    """
+
+    item = dict(candidate)
+
+    raw_score = float(
+        item.get(
+            "raw_fast_score",
+            item.get("fast_score", 0.0),
+        )
+        or 0.0
+    )
+
+    direction = str(
+        item.get("direction", "WAIT")
+        or "WAIT"
+    ).upper()
+
+    try:
+        rsi = float(
+            item.get("rsi", 50.0)
+            or 50.0
+        )
+    except (TypeError, ValueError):
+        rsi = 50.0
+
+    reasons = [
+        str(reason)
+        for reason in (
+            item.get("reasons")
+            or []
+        )
+    ]
+
+    reason_text = " | ".join(
+        reasons
+    ).lower()
+
+    penalties = []
+    bonuses = []
+
+    # --------------------------------------------------------
+    # RSI extension penalties
+    # --------------------------------------------------------
+
+    if direction == "BUY":
+        if rsi >= 80.0:
+            penalties.append(
+                ("RSI_EXTREME", 24.0)
+            )
+        elif rsi >= 75.0:
+            penalties.append(
+                ("RSI_OVEREXTENDED", 18.0)
+            )
+        elif rsi >= 70.0:
+            penalties.append(
+                ("RSI_ELEVATED", 10.0)
+            )
+        elif 52.0 <= rsi <= 66.0:
+            bonuses.append(
+                ("RSI_HEALTHY_BUY_ZONE", 2.0)
+            )
+
+    elif direction == "SELL":
+        if rsi <= 20.0:
+            penalties.append(
+                ("RSI_EXTREME", 24.0)
+            )
+        elif rsi <= 25.0:
+            penalties.append(
+                ("RSI_OVEREXTENDED", 18.0)
+            )
+        elif rsi <= 30.0:
+            penalties.append(
+                ("RSI_DEPRESSED", 10.0)
+            )
+        elif 34.0 <= rsi <= 48.0:
+            bonuses.append(
+                ("RSI_HEALTHY_SELL_ZONE", 2.0)
+            )
+
+    # --------------------------------------------------------
+    # Indicator contradiction penalties
+    # --------------------------------------------------------
+
+    if (
+        direction == "BUY"
+        and "macd bearish"
+        in reason_text
+    ):
+        penalties.append(
+            ("MACD_CONTRADICTS_BUY", 12.0)
+        )
+
+    if (
+        direction == "SELL"
+        and "macd bullish"
+        in reason_text
+    ):
+        penalties.append(
+            ("MACD_CONTRADICTS_SELL", 12.0)
+        )
+
+    if (
+        direction == "BUY"
+        and "bearish ema"
+        in reason_text
+    ):
+        penalties.append(
+            ("EMA_CONTRADICTS_BUY", 18.0)
+        )
+
+    if (
+        direction == "SELL"
+        and "bullish ema"
+        in reason_text
+    ):
+        penalties.append(
+            ("EMA_CONTRADICTS_SELL", 18.0)
+        )
+
+    if "positive momentum" in reason_text:
+        if direction == "BUY":
+            bonuses.append(
+                ("POSITIVE_MOMENTUM", 2.0)
+            )
+
+    if "negative momentum" in reason_text:
+        if direction == "SELL":
+            bonuses.append(
+                ("NEGATIVE_MOMENTUM", 2.0)
+            )
+
+    penalty_total = sum(
+        amount
+        for _name, amount
+        in penalties
+    )
+
+    bonus_total = sum(
+        amount
+        for _name, amount
+        in bonuses
+    )
+
+    smart_score = max(
+        0.0,
+        min(
+            100.0,
+            raw_score
+            - penalty_total
+            + bonus_total,
+        ),
+    )
+
+    item["raw_fast_score"] = round(
+        raw_score,
+        2,
+    )
+    item["fast_score"] = round(
+        smart_score,
+        2,
+    )
+    item["smart_fast_score"] = round(
+        smart_score,
+        2,
+    )
+    item["quality_tier"] = (
+        _v54_quality_tier(
+            smart_score
+        )
+    )
+    item["score_penalties"] = [
+        {
+            "code": name,
+            "points": amount,
+        }
+        for name, amount
+        in penalties
+    ]
+    item["score_bonuses"] = [
+        {
+            "code": name,
+            "points": amount,
+        }
+        for name, amount
+        in bonuses
+    ]
+    item["ranking_note"] = (
+        "V5.4 Fast Score is a discovery ranking score, "
+        "not a probability of winning."
+    )
+
+    return item
+
+
+def _v54_rescore_fast_scan(
+    result: dict,
+    top_n: int,
+) -> dict:
+    """Re-rank scanner output without changing the discovery engine."""
+
+    output = dict(result)
+
+    raw_ranking = (
+        result.get("ranking")
+        or []
+    )
+
+    rescored = []
+
+    for raw in raw_ranking:
+        if isinstance(raw, dict):
+            rescored.append(
+                _v54_rescore_candidate(
+                    raw
+                )
+            )
+
+    rescored.sort(
+        key=lambda item: (
+            float(
+                item.get(
+                    "fast_score",
+                    0.0,
+                )
+                or 0.0
+            ),
+            float(
+                item.get(
+                    "raw_fast_score",
+                    0.0,
+                )
+                or 0.0
+            ),
+        ),
+        reverse=True,
+    )
+
+    if rescored:
+        output["ranking"] = rescored
+        output["top_candidates"] = (
+            rescored[:top_n]
+        )
+        output["best_candidate"] = (
+            rescored[0]
+        )
+        output["candidates_found"] = len(
+            [
+                item
+                for item in rescored
+                if item.get(
+                    "quality_tier"
+                )
+                != "REJECT"
+            ]
+        )
+
+    output["scanner"] = (
+        "V5.4_SMART_FAST_SCAN"
+    )
+    output["ranking_version"] = (
+        "V5.4"
+    )
+    output["fast_score_is_probability"] = (
+        False
+    )
+
+    return output
+
+
+# ============================================================
 # FAST SCAN
 # ============================================================
 
@@ -1599,13 +1895,18 @@ def run_fast_scan(
             ),
         )
 
-    return fast_scan_markets(
+    raw_result = fast_scan_markets(
         markets=MARKETS,
         get_data_func=get_data,
         add_indicators_func=
             add_indicators,
         period=period,
         interval=interval,
+        top_n=top_n,
+    )
+
+    return _v54_rescore_fast_scan(
+        result=raw_result,
         top_n=top_n,
     )
 
@@ -2077,9 +2378,31 @@ def create_verified_watcher(
 
 @app.get("/watchers")
 def list_verified_watchers():
+    watchers = (
+        V53_WATCHER_ENGINE.list()
+    )
+
+    active_statuses = {
+        "WATCHING",
+        "READY",
+        "RISK_BLOCKED",
+        "OPEN",
+    }
+
+    active = [
+        item
+        for item in watchers
+        if item.get("status")
+        in active_statuses
+    ]
+
     return {
-        "watchers":
-            V53_WATCHER_ENGINE.list(),
+        "watchers": watchers,
+        "active_watchers": len(active),
+        "portfolio_mode":
+            "V5.4_MULTI_CANDIDATE",
+        "max_open_trades":
+            V53_WATCHER_ENGINE.MAX_OPEN_TRADES,
         "live_execution": False,
     }
 
