@@ -7,6 +7,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
+from forward_guard import (
+    DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_SPREAD_BPS,
+    adverse_execution_price,
+    freeze_forward_snapshot,
+    verify_forward_snapshot,
+)
+
 
 class TradeWatcherEngine:
     """Server-side paper-trade watcher for Jasong AI Trader V5.6.
@@ -53,7 +61,7 @@ class TradeWatcherEngine:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._loop,
-            name="jasong-v56-paper-watcher",
+            name="jasong-v57-forward-watcher",
             daemon=True,
         )
         self._thread.start()
@@ -114,7 +122,7 @@ class TradeWatcherEngine:
     # ------------------------------------------------------------------
 
     def _db_rows(self, db, closed: Optional[bool] = None):
-        query = db.query(self.Trade).filter(self.Trade.mode == "paper")
+        query = db.query(self.Trade).filter(self.Trade.mode == "forward")
         if closed is not None:
             query = query.filter(self.Trade.closed == closed)
         return query.order_by(self.Trade.created_at.asc()).all()
@@ -142,7 +150,7 @@ class TradeWatcherEngine:
     def _consecutive_losses(self, db) -> int:
         rows = (
             db.query(self.Trade)
-            .filter(self.Trade.mode == "paper")
+            .filter(self.Trade.mode == "forward")
             .filter(self.Trade.closed == True)  # noqa: E712
             .order_by(self.Trade.created_at.desc())
             .limit(20)
@@ -161,7 +169,7 @@ class TradeWatcherEngine:
     def _open_count(self, db) -> int:
         return (
             db.query(self.Trade)
-            .filter(self.Trade.mode == "paper")
+            .filter(self.Trade.mode == "forward")
             .filter(self.Trade.closed == False)  # noqa: E712
             .count()
         )
@@ -169,7 +177,7 @@ class TradeWatcherEngine:
     def _duplicate_open(self, db, symbol: str) -> bool:
         return (
             db.query(self.Trade)
-            .filter(self.Trade.mode == "paper")
+            .filter(self.Trade.mode == "forward")
             .filter(self.Trade.closed == False)  # noqa: E712
             .filter(self.Trade.symbol == symbol)
             .first()
@@ -521,6 +529,17 @@ class TradeWatcherEngine:
             "strategy_health_reason": candidate.get("strategy_health_reason"),
             "forward_symbol_stats": candidate.get("forward_symbol_stats"),
             "explanation": candidate.get("explanation"),
+            # V5.7 genuine forward audit fields. These are populated only
+            # when a live-confirmed forward trade actually opens.
+            "forward_protocol": "V5.7_GENUINE_FORWARD",
+            "entry_snapshot": None,
+            "entry_snapshot_hash": None,
+            "entry_price_effective": None,
+            "exit_price_effective": None,
+            "spread_bps": DEFAULT_SPREAD_BPS,
+            "slippage_bps": DEFAULT_SLIPPAGE_BPS,
+            "settlement_guard_passed": None,
+            "settlement_due_at": None,
         }
 
         with self._lock:
@@ -681,17 +700,37 @@ class TradeWatcherEngine:
             if entry_price <= 0:
                 entry_price = self.price_func(watcher["symbol"])
 
+            frozen = freeze_forward_snapshot(
+                watcher=watcher,
+                live_signal=live,
+                entry_price=entry_price,
+                stake=risk["stake"],
+                entry_time=now,
+                spread_bps=DEFAULT_SPREAD_BPS,
+                slippage_bps=DEFAULT_SLIPPAGE_BPS,
+            )
+
+            effective_entry = adverse_execution_price(
+                raw_price=entry_price,
+                direction=direction,
+                leg="ENTRY",
+                spread_bps=DEFAULT_SPREAD_BPS,
+                slippage_bps=DEFAULT_SLIPPAGE_BPS,
+            )
+
             trade = self.Trade(
                 symbol=watcher["symbol"],
                 direction=direction,
                 confidence=confidence,
-                entry_price=entry_price,
+                entry_price=effective_entry,
                 stake=risk["stake"],
-                mode="paper",
+                mode="forward",
             )
             db.add(trade)
             db.commit()
             db.refresh(trade)
+
+            due_at = now + watcher["holding_minutes"] * 60
 
             with self._lock:
                 watcher = self._watchers.get(watcher_id)
@@ -699,12 +738,16 @@ class TradeWatcherEngine:
                     watcher["status"] = "OPEN"
                     watcher["trade_id"] = trade.id
                     watcher["entry_price"] = entry_price
+                    watcher["entry_price_effective"] = effective_entry
                     watcher["entry_time"] = now
-                    watcher["target_exit_at"] = (
-                        now + watcher["holding_minutes"] * 60
-                    )
+                    watcher["target_exit_at"] = due_at
+                    watcher["settlement_due_at"] = due_at
+                    watcher["entry_snapshot"] = frozen["snapshot"]
+                    watcher["entry_snapshot_hash"] = frozen["snapshot_hash"]
+                    watcher["settlement_guard_passed"] = None
                     watcher["last_reason"] = (
-                        "Live entry confirmed and paper trade opened automatically."
+                        "V5.7 live entry confirmed. Genuine forward paper trade "
+                        "opened with frozen parameters and no future data."
                     )
         finally:
             db.close()
@@ -723,8 +766,22 @@ class TradeWatcherEngine:
             watcher = self._watchers.get(watcher_id)
             if not watcher or watcher.get("status") != "OPEN":
                 return
-            target = self._safe_float(watcher.get("target_exit_at"))
-            if not force and time.time() < target:
+            target = self._safe_float(watcher.get("settlement_due_at") or watcher.get("target_exit_at"))
+            # V5.7 NEVER permits early settlement, even from a forced/manual check.
+            # The outcome may only be observed after the pre-committed horizon.
+            if time.time() < target:
+                return
+
+            if not verify_forward_snapshot(
+                watcher.get("entry_snapshot"),
+                watcher.get("entry_snapshot_hash"),
+            ):
+                watcher["status"] = "AUDIT_BLOCKED"
+                watcher["settlement_guard_passed"] = False
+                watcher["last_reason"] = (
+                    "Forward settlement blocked: frozen entry snapshot failed "
+                    "its V5.7 integrity check."
+                )
                 return
             trade_id = watcher.get("trade_id")
             symbol = watcher["symbol"]
@@ -741,7 +798,31 @@ class TradeWatcherEngine:
                     watcher["last_reason"] = f"Exit price unavailable: {exc}"
             return
 
-        won = exit_price > entry_price if direction == "BUY" else exit_price < entry_price
+        spread_bps = self._safe_float(
+            watcher.get("spread_bps"),
+            DEFAULT_SPREAD_BPS,
+        )
+        slippage_bps = self._safe_float(
+            watcher.get("slippage_bps"),
+            DEFAULT_SLIPPAGE_BPS,
+        )
+        effective_entry = self._safe_float(
+            watcher.get("entry_price_effective"),
+            entry_price,
+        )
+        effective_exit = adverse_execution_price(
+            raw_price=exit_price,
+            direction=direction,
+            leg="EXIT",
+            spread_bps=spread_bps,
+            slippage_bps=slippage_bps,
+        )
+
+        won = (
+            effective_exit > effective_entry
+            if direction == "BUY"
+            else effective_exit < effective_entry
+        )
 
         db = self.session_factory()
         try:
@@ -760,11 +841,15 @@ class TradeWatcherEngine:
                 if watcher:
                     watcher["status"] = "WIN" if won else "LOSS"
                     watcher["exit_price"] = exit_price
+                    watcher["exit_price_effective"] = effective_exit
                     watcher["closed_at"] = time.time()
                     watcher["result"] = "WIN" if won else "LOSS"
                     watcher["pnl"] = round(pnl, 2)
+                    watcher["settlement_guard_passed"] = True
                     watcher["last_reason"] = (
-                        "Paper trade resolved at the validated holding horizon."
+                        "V5.7 genuine forward trade resolved only after the "
+                        "pre-committed holding horizon using adverse execution "
+                        "assumptions."
                     )
         finally:
             db.close()
@@ -818,6 +903,7 @@ class TradeWatcherEngine:
             open_trades = self._open_count(db)
 
             return {
+                "forward_protocol": "V5.7_GENUINE_FORWARD",
                 "forward_trades": len(closed),
                 "wins": wins,
                 "losses": losses,
@@ -833,6 +919,62 @@ class TradeWatcherEngine:
                 ),
                 "max_drawdown": max_dd,
                 "open_trades": open_trades,
+                "live_execution": False,
+            }
+        finally:
+            db.close()
+
+    def forward_journal(self, limit: int = 100) -> Dict[str, Any]:
+        """Audit view of genuine forward trades.
+
+        Persisted trade rows provide the durable outcome record. Rich frozen
+        setup snapshots are returned for watchers still present in this server
+        process. This endpoint never changes a result.
+        """
+        db = self.session_factory()
+        try:
+            rows = (
+                db.query(self.Trade)
+                .filter(self.Trade.mode == "forward")
+                .order_by(self.Trade.created_at.desc())
+                .limit(max(1, min(int(limit), 500)))
+                .all()
+            )
+
+            with self._lock:
+                by_trade_id = {
+                    item.get("trade_id"): self._public(item)
+                    for item in self._watchers.values()
+                    if item.get("trade_id") is not None
+                }
+
+            entries = []
+            for row in rows:
+                watcher = by_trade_id.get(row.id)
+                entries.append({
+                    "trade_id": row.id,
+                    "created_at": (
+                        row.created_at.isoformat()
+                        if getattr(row, "created_at", None) is not None
+                        else None
+                    ),
+                    "symbol": row.symbol,
+                    "direction": row.direction,
+                    "confidence": row.confidence,
+                    "entry_price_effective": row.entry_price,
+                    "stake": row.stake,
+                    "closed": bool(row.closed),
+                    "result": row.result,
+                    "pnl": row.pnl,
+                    "forward_protocol": "V5.7_GENUINE_FORWARD",
+                    "audit": watcher,
+                })
+
+            return {
+                "version": "5.7.0",
+                "forward_protocol": "V5.7_GENUINE_FORWARD",
+                "entries": entries,
+                "count": len(entries),
                 "live_execution": False,
             }
         finally:
