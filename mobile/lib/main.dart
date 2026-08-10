@@ -70,6 +70,11 @@ class _HomePageState extends State<HomePage> {
 
   Map<String, dynamic>? liveEntryAssessment;
 
+  Map<String, dynamic>? serverWatcher;
+  Map<String, dynamic>? forwardStats;
+  Timer? watcherPollTimer;
+  bool watcherBusy = false;
+
   List<Map<String, dynamic>>
       validationHistory = [];
 
@@ -878,6 +883,9 @@ class _HomePageState extends State<HomePage> {
       verifiedTrade = null;
 
       liveEntryAssessment = null;
+      serverWatcher = null;
+      forwardStats = null;
+      watcherPollTimer?.cancel();
 
       validationHistory = [];
 
@@ -1301,6 +1309,10 @@ class _HomePageState extends State<HomePage> {
               'Deep validation passed';
         });
 
+        await createServerWatcher(
+          result,
+        );
+
         break;
       }
     } on NetworkValidationException catch (_) {
@@ -1325,6 +1337,299 @@ class _HomePageState extends State<HomePage> {
       }
     }
   }
+
+  // =========================================================
+  // V5.3 SERVER VERIFIED WATCHER
+  // =========================================================
+
+  Future<void> createServerWatcher(
+    Map<String, dynamic> verified,
+  ) async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+        },
+      );
+
+      final response =
+          await postJsonOnce(
+        uri,
+        verified,
+        timeoutSeconds: 60,
+      );
+
+      final rawWatcher =
+          response['watcher'];
+
+      if (rawWatcher is! Map) {
+        throw const FormatException(
+          'Watcher server did not return a watcher object',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        serverWatcher =
+            Map<String, dynamic>.from(
+          rawWatcher,
+        );
+      });
+
+      startWatcherPolling();
+      await loadForwardStats();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified setup passed, but server watcher could not start: $e';
+      });
+    }
+  }
+
+  void startWatcherPolling() {
+    watcherPollTimer?.cancel();
+
+    watcherPollTimer =
+        Timer.periodic(
+      const Duration(
+        seconds: 20,
+      ),
+      (_) {
+        refreshServerWatcher();
+      },
+    );
+
+    Future.microtask(
+      refreshServerWatcher,
+    );
+  }
+
+  Future<void> refreshServerWatcher() async {
+    if (watcherBusy ||
+        serverWatcher == null) {
+      return;
+    }
+
+    final watcherId =
+        serverWatcher!['watcher_id']
+            ?.toString();
+
+    if (watcherId == null ||
+        watcherId.isEmpty) {
+      return;
+    }
+
+    watcherBusy = true;
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers/$watcherId',
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      final raw = response['watcher'];
+
+      if (raw is Map && mounted) {
+        final updated =
+            Map<String, dynamic>.from(
+          raw,
+        );
+
+        setState(() {
+          serverWatcher = updated;
+        });
+
+        final status =
+            updated['status']
+                    ?.toString() ??
+                '';
+
+        if ([
+          'WIN',
+          'LOSS',
+          'EXPIRED',
+          'INVALIDATED',
+          'SUPERSEDED',
+        ].contains(status)) {
+          watcherPollTimer?.cancel();
+        }
+      }
+
+      await loadForwardStats();
+    } catch (_) {
+      // The watcher runs on the server. A temporary mobile
+      // polling failure must not alter or invalidate it.
+    } finally {
+      watcherBusy = false;
+    }
+  }
+
+  Future<void> checkServerWatcherNow() async {
+    if (watcherBusy ||
+        serverWatcher == null) {
+      return;
+    }
+
+    final watcherId =
+        serverWatcher!['watcher_id']
+            ?.toString();
+
+    if (watcherId == null ||
+        watcherId.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      watcherBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers/$watcherId/check',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 120,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: ${response.body}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(response.body);
+
+      if (decoded is! Map ||
+          decoded['watcher'] is! Map) {
+        throw const FormatException(
+          'Unexpected watcher response',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        serverWatcher =
+            Map<String, dynamic>.from(
+          decoded['watcher'] as Map,
+        );
+      });
+
+      await loadForwardStats();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Watcher check failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          watcherBusy = false;
+        });
+      } else {
+        watcherBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadForwardStats() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/forward-stats',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final stats = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (mounted) {
+        setState(() {
+          forwardStats = stats;
+        });
+      }
+    } catch (_) {
+      // Forward stats are supplemental. Do not interrupt
+      // an active watcher when this request fails.
+    }
+  }
+
+  Color watcherStatusColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'WATCHING':
+      case 'READY':
+      case 'RISK_BLOCKED':
+        return Colors.amberAccent;
+      case 'LOSS':
+      case 'EXPIRED':
+      case 'INVALIDATED':
+      case 'SUPERSEDED':
+        return Colors.redAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData watcherStatusIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+        return Icons.play_circle_fill;
+      case 'WIN':
+        return Icons.emoji_events;
+      case 'LOSS':
+        return Icons.cancel;
+      case 'WATCHING':
+        return Icons.visibility;
+      case 'RISK_BLOCKED':
+        return Icons.shield;
+      case 'EXPIRED':
+        return Icons.timer_off;
+      case 'INVALIDATED':
+        return Icons.block;
+      default:
+        return Icons.sync;
+    }
+  }
+
 
   // =========================================================
   // ANALYSE MARKET
@@ -1833,10 +2138,15 @@ class _HomePageState extends State<HomePage> {
     Future.microtask(
       refreshSignal,
     );
+
+    Future.microtask(
+      loadForwardStats,
+    );
   }
 
   @override
   void dispose() {
+    watcherPollTimer?.cancel();
     symbol.dispose();
     balance.dispose();
 
@@ -2415,7 +2725,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.1',
+          'Jasong AI Trader V5.3',
         ),
         actions: [
           IconButton(
@@ -3232,7 +3542,411 @@ class _HomePageState extends State<HomePage> {
             ],
 
             // =================================================
-            // V5.1 LIVE ENTRY CONFIRMATION
+            // V5.3 SERVER TRADE WATCHER
+            // =================================================
+
+            if (serverWatcher != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Builder(
+                builder: (context) {
+                  final watcher =
+                      serverWatcher!;
+
+                  final status =
+                      watcher['status']
+                              ?.toString() ??
+                          'WATCHING';
+
+                  final live =
+                      watcher['last_live_signal'];
+
+                  final riskDecision =
+                      watcher['risk_decision'];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            watcherStatusIcon(
+                              status,
+                            ),
+                            size: 52,
+                            color:
+                                watcherStatusColor(
+                              status,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          const Text(
+                            'V5.3 SERVER TRADE WATCHER',
+                            style:
+                                TextStyle(
+                              fontSize: 15,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            status.replaceAll(
+                              '_',
+                              ' ',
+                            ),
+                            style:
+                                TextStyle(
+                              fontSize: 28,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  watcherStatusColor(
+                                status,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Text(
+                            '${watcher['market']}  '
+                            '${watcher['direction']}',
+                            style:
+                                const TextStyle(
+                              fontSize: 22,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '${watcher['last_reason'] ?? ''}',
+                            textAlign:
+                                TextAlign.center,
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Timeframe',
+                                '${watcher['interval'] ?? '-'}',
+                              ),
+                              metric(
+                                'Hold',
+                                '${watcher['holding_minutes'] ?? '-'} min',
+                              ),
+                            ],
+                          ),
+
+                          if (live is Map) ...[
+                            Row(
+                              children: [
+                                metric(
+                                  'Live Signal',
+                                  '${live['decision'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Confidence',
+                                  '${formatPercent(live['confidence'])}%',
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Live Price',
+                                  formatPrice(
+                                    live['price'],
+                                  ),
+                                ),
+                                metric(
+                                  'RSI',
+                                  formatNumber(
+                                    live['rsi'],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+
+                          if (riskDecision is Map) ...[
+                            const Divider(),
+                            const Text(
+                              'Risk Engine',
+                              style:
+                                  TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Paper Balance',
+                                  '${riskDecision['current_balance'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Dynamic Stake',
+                                  '${riskDecision['stake'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Daily P&L',
+                                  '${riskDecision['daily_pnl'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Open Trades',
+                                  '${riskDecision['open_trades'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+                          ],
+
+                          if (status == 'OPEN') ...[
+                            const Divider(),
+                            Text(
+                              'Paper trade #${watcher['trade_id']} OPEN',
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.greenAccent,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Entry: ${formatPrice(watcher['entry_price'])}',
+                            ),
+                            Text(
+                              'Target exit: '
+                              '${watcher['target_exit_at_iso'] ?? '-'}',
+                              textAlign:
+                                  TextAlign.center,
+                            ),
+                          ],
+
+                          if (status == 'WIN' ||
+                              status == 'LOSS') ...[
+                            const Divider(),
+                            Text(
+                              '$status • P&L ${watcher['pnl'] ?? '-'}',
+                              style:
+                                  TextStyle(
+                                color:
+                                    watcherStatusColor(
+                                  status,
+                                ),
+                                fontSize: 20,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Entry ${formatPrice(watcher['entry_price'])} '
+                              '→ Exit ${formatPrice(watcher['exit_price'])}',
+                            ),
+                          ],
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          FilledButton.icon(
+                            onPressed:
+                                watcherBusy
+                                    ? null
+                                    : checkServerWatcherNow,
+                            icon:
+                                const Icon(
+                              Icons.bolt,
+                            ),
+                            label:
+                                const Text(
+                              'Check Watcher Now',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                watcherBusy
+                                    ? null
+                                    : refreshServerWatcher,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Refresh Watcher',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          const Text(
+                            'The server keeps this verified candidate under '
+                            'observation. A paper trade opens only after live '
+                            'confirmation and risk controls pass.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+
+            // =================================================
+            // V5.3 FORWARD PERFORMANCE
+            // =================================================
+
+            if (forwardStats != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Text(
+                        'FORWARD PAPER PERFORMANCE',
+                        style:
+                            TextStyle(
+                          fontSize: 18,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 10,
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Forward Trades',
+                            '${forwardStats!['forward_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward WR',
+                            '${formatPercent(forwardStats!['win_rate'])}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${forwardStats!['wins'] ?? 0} / '
+                            '${forwardStats!['losses'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward PF',
+                            formatNumber(
+                              forwardStats!['profit_factor'],
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Paper Balance',
+                            '${forwardStats!['paper_balance'] ?? '-'}',
+                          ),
+                          metric(
+                            'Total P&L',
+                            '${forwardStats!['total_pnl'] ?? '-'}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Forward Return',
+                            '${formatPercent(forwardStats!['return_pct'])}%',
+                          ),
+                          metric(
+                            'Forward Max DD',
+                            '${formatPercent(forwardStats!['max_drawdown'])}%',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      OutlinedButton.icon(
+                        onPressed:
+                            loadForwardStats,
+                        icon:
+                            const Icon(
+                          Icons.query_stats,
+                        ),
+                        label:
+                            const Text(
+                          'Refresh Forward Stats',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // =================================================
+            // V5.3 MANUAL LIVE ENTRY DIAGNOSTIC
             // =================================================
 
             if (liveEntryAssessment != null) ...[
@@ -3959,8 +4673,9 @@ class _HomePageState extends State<HomePage> {
                   'Safety: Jasong AI Trader is for '
                   'AI-assisted analysis and paper trading. '
                   'Fast Score is a ranking score, not a win probability. '
-                  'VERIFIED refers to historical validation; live-entry '
-                  'confirmation is a separate filter and neither guarantees profit.',
+                  'VERIFIED refers to historical validation; the V5.3 watcher '
+                  'opens paper trades only after live confirmation and risk controls. '
+                  'No historical or forward result guarantees profit.',
                 ),
               ),
             ),
