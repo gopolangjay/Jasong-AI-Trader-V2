@@ -49,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.5
-# AUTOMATED TRADE MANAGER + ADAPTIVE RANKING
+# JASONG AI TRADER V5.5.1
+# ASYNC AUTO MANAGER STABILITY FIX
 # ============================================================
 
 MARKETS = {
@@ -67,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.5 API",
-    version="5.5.0",
+    title="Jasong AI Trader V5.5.1 API",
+    version="5.5.1",
 )
 
 app.add_middleware(
@@ -892,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.5.0",
+        "version": "5.5.1",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2938,15 +2938,75 @@ def stop_auto_manager():
 
 @app.post("/auto-manager/run-now")
 def run_auto_manager_now():
-    result = (
-        V55_AUTO_MANAGER.run_now()
+    queued = (
+        V55_AUTO_MANAGER.queue_run(
+            source="manual",
+        )
     )
 
     return {
-        "status":
-            "AUTO_MANAGER_RUN_COMPLETE",
-        "result":
-            result,
+        "status": (
+            "AUTO_RUN_QUEUED"
+            if queued.get(
+                "accepted"
+            )
+            else "AUTO_RUN_ALREADY_RUNNING"
+        ),
+        "accepted":
+            bool(
+                queued.get(
+                    "accepted",
+                    False,
+                )
+            ),
+        "job_id":
+            queued.get(
+                "job_id"
+            ),
+        "job":
+            queued.get(
+                "job"
+            ),
+        "manager":
+            V55_AUTO_MANAGER.status(),
+        "live_execution":
+            False,
+    }
+
+
+@app.get("/auto-manager/job/{job_id}")
+def get_auto_manager_job(
+    job_id: str,
+):
+    job = (
+        V55_AUTO_MANAGER.get_job(
+            job_id
+        )
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Auto Manager job not found"
+            ),
+        )
+
+    return {
+        "job":
+            job,
+        "manager":
+            V55_AUTO_MANAGER.status(),
+        "live_execution":
+            False,
+    }
+
+
+@app.get("/auto-manager/jobs")
+def list_auto_manager_jobs():
+    return {
+        "jobs":
+            V55_AUTO_MANAGER.list_jobs(),
         "manager":
             V55_AUTO_MANAGER.status(),
         "live_execution":
