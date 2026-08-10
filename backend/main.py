@@ -49,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.6
-# MULTI-CANDIDATE ROTATION + FORWARD INTELLIGENCE
+# JASONG AI TRADER V5.7
+# GENUINE FORWARD VALIDATION + AUDIT ENGINE
 # ============================================================
 
 MARKETS = {
@@ -67,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.6 API",
-    version="5.6.0",
+    title="Jasong AI Trader V5.7 API",
+    version="5.7.0",
 )
 
 app.add_middleware(
@@ -871,10 +871,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V5.3",
+            "Jasong AI Trader V5.7",
 
         "version":
-            "5.3.0",
+            "5.7.0",
 
         "mode":
             "paper-trading",
@@ -892,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.6.0",
+        "version": "5.7.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2353,7 +2353,7 @@ def _v56_forward_health(
     try:
         query = (
             db.query(Trade)
-            .filter(Trade.mode == "paper")
+            .filter(Trade.mode == "forward")
             .filter(Trade.closed == True)  # noqa: E712
             .filter(Trade.symbol == symbol)
         )
@@ -3205,7 +3205,7 @@ def get_adaptive_ranking(
             V56_FORWARD_MIN_TRADES,
         "note":
             (
-                "V5.6 adaptive ranking uses direction-specific forward paper evidence "
+                "V5.7 adaptive ranking uses direction-specific forward paper evidence "
                 "after the configured minimum settled trades. "
                 "Deep validation remains mandatory before watching."
             ),
@@ -3224,7 +3224,7 @@ def get_adaptive_ranking(
 def get_strategy_health(
     payout: float = 0.80,
 ):
-    """V5.6 forward health table for all configured market directions."""
+    """V5.7 forward health table for all configured market directions."""
 
     output = []
 
@@ -3272,7 +3272,7 @@ def get_strategy_health(
 
     return {
         "version":
-            "5.6.0",
+            "5.7.0",
         "minimum_forward_trades":
             V56_FORWARD_MIN_TRADES,
         "quarantine_minimum_trades":
@@ -3413,7 +3413,7 @@ def get_auto_dashboard(
 
     return {
         "version":
-            "5.6.0",
+            "5.7.0",
         "auto_mode":
             bool(
                 manager.get(
@@ -3492,9 +3492,21 @@ def get_auto_dashboard(
             watching,
         "lifecycle":
             lifecycle[:20],
+        "forward_protocol":
+            "V5.7_GENUINE_FORWARD",
         "live_execution":
             False,
     }
+
+
+@app.get("/forward-journal")
+def get_forward_journal(
+    limit: int = 100,
+):
+    """Immutable-observation view of V5.7 genuine forward entries/outcomes."""
+    return V53_WATCHER_ENGINE.forward_journal(
+        limit=limit
+    )
 
 
 @app.get("/forward-stats")
