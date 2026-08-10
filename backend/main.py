@@ -1,4 +1,3 @@
-
 import threading
 import time
 from dataclasses import dataclass
@@ -43,6 +42,7 @@ from auto_manager import AutomatedTradeManager
 from risk_gateway import RiskGateway
 from execution_gateway import ExecutionGateway
 from autonomous_controller import AutonomousController
+from persistent_state import PersistentStateStore
 
 from database import (
     SessionLocal,
@@ -70,8 +70,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.0 API",
-    version="6.0.0",
+    title="Jasong AI Trader V6.1 API",
+    version="6.1.0",
 )
 
 app.add_middleware(
@@ -874,10 +874,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.0",
+            "Jasong AI Trader V6.1",
 
         "version":
-            "6.0.0",
+            "6.1.0",
 
         "mode":
             "paper-trading",
@@ -895,7 +895,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2784,10 +2784,12 @@ V60_RISK_GATEWAY = RiskGateway(
     max_assumed_spread_bps=3.0, max_price_age_seconds=180,
 )
 V60_EXECUTION_GATEWAY = ExecutionGateway(mode="PAPER", allow_live_execution=False)
+V61_STATE_STORE = PersistentStateStore("data/jasong_v61_state.json")
 
 V53_WATCHER_ENGINE = TradeWatcherEngine(
     session_factory=SessionLocal, trade_model=Trade, signal_func=_v53_live_signal, price_func=_v53_latest_price, profiles=PROFILES,
     risk_gateway=V60_RISK_GATEWAY, execution_gateway=V60_EXECUTION_GATEWAY,
+    state_store=V61_STATE_STORE,
 )
 
 V53_WATCHER_ENGINE.start()
@@ -2906,6 +2908,7 @@ V55_AUTO_MANAGER = AutomatedTradeManager(
         _v55_validate_candidate,
     watcher_engine=
         V53_WATCHER_ENGINE,
+    state_store=V61_STATE_STORE,
 )
 
 V55_AUTO_MANAGER.start_thread()
@@ -3234,7 +3237,7 @@ def get_adaptive_ranking(
 
 @app.get("/v6/status")
 def v6_status():
-    return {"version":"6.0.0","controller":V60_CONTROLLER.status(),"live_execution":False}
+    return {"version":"6.1.0","controller":V60_CONTROLLER.status(),"live_execution":False}
 
 @app.post("/v6/start")
 def v6_start(starting_balance:float=10000.0, risk_mode:str="Balanced", payout:float=0.80,
@@ -3260,15 +3263,15 @@ def v6_clear_kill_switch():
 
 @app.get("/risk-status")
 def v6_risk_status():
-    return {"version":"6.0.0","risk":V60_RISK_GATEWAY.status(),"live_execution":False}
+    return {"version":"6.1.0","risk":V60_RISK_GATEWAY.status(),"live_execution":False}
 
 @app.get("/execution-status")
 def v6_execution_status():
-    return {"version":"6.0.0","execution":V60_EXECUTION_GATEWAY.status(),"live_execution":False}
+    return {"version":"6.1.0","execution":V60_EXECUTION_GATEWAY.status(),"live_execution":False}
 
 @app.get("/execution-orders")
 def v6_execution_orders(limit:int=200):
-    return {"version":"6.0.0","orders":V60_EXECUTION_GATEWAY.list_orders(limit=limit),"live_execution":False}
+    return {"version":"6.1.0","orders":V60_EXECUTION_GATEWAY.list_orders(limit=limit),"live_execution":False}
 
 @app.get("/overnight-report")
 def v6_overnight_report():
@@ -3332,7 +3335,7 @@ def get_strategy_health(
 
     return {
         "version":
-            "6.0.0",
+            "6.1.0",
         "minimum_forward_trades":
             V56_FORWARD_MIN_TRADES,
         "quarantine_minimum_trades":
@@ -3473,7 +3476,7 @@ def get_auto_dashboard(
 
     return {
         "version":
-            "6.0.0",
+            "6.1.0",
         "auto_mode":
             bool(
                 manager.get(
@@ -3580,3 +3583,16 @@ def get_forward_stats(
     return V53_WATCHER_ENGINE.forward_stats(
         starting_balance=starting_balance
     )
+
+
+@app.get("/persistent-state")
+def persistent_state_status():
+    snapshot = V61_STATE_STORE.snapshot()
+    return {
+        "status": "ok",
+        "version": "6.1.0",
+        "path": str(V61_STATE_STORE.path),
+        "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
+        "meta": snapshot.get("_meta", {}),
+        "live_execution": False,
+    }
