@@ -3162,7 +3162,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.6',
+          'Jasong AI Trader V5.7',
         ),
         actions: [
           IconButton(
@@ -3541,7 +3541,7 @@ class _HomePageState extends State<HomePage> {
                                     .spaceBetween,
                             children: [
                               const Text(
-                                'V5.6 AUTO INTELLIGENCE',
+                                'V5.7 FORWARD INTELLIGENCE',
                                 style:
                                     TextStyle(
                                   fontSize: 20,
@@ -3830,7 +3830,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.6 remains paper-only. VERIFIED setups '
+                            'V5.7 remains paper-only. VERIFIED setups '
                             'still require live confirmation and risk controls '
                             'before an automatic paper entry is opened.',
                             textAlign:
@@ -4411,7 +4411,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.6 WATCH PORTFOLIO',
+                            'V5.7 FORWARD WATCH PORTFOLIO',
                             style:
                                 TextStyle(
                               fontSize: 15,
@@ -4654,7 +4654,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.6 keeps multiple VERIFIED candidates under '
+                            'V5.7 keeps multiple VERIFIED candidates under '
                             'observation. A waiting or overextended market does '
                             'not block another candidate from confirming. Paper '
                             'entries still require live confirmation and risk controls.',
@@ -4693,7 +4693,7 @@ class _HomePageState extends State<HomePage> {
                   child: Column(
                     children: [
                       const Text(
-                        'FORWARD PAPER PERFORMANCE',
+                        'GENUINE FORWARD PERFORMANCE',
                         style:
                             TextStyle(
                           fontSize: 18,
