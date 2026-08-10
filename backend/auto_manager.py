@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Dict, List
+import uuid
+from typing import Any, Callable, Dict, List, Optional
 
 
 class AutomatedTradeManager:
-    """Paper-only automated candidate management for Jasong AI Trader V5.5.
+    """Paper-only automated candidate manager for Jasong AI Trader V5.5.1.
 
-    Responsibilities:
-      - periodically scan markets
-      - rank candidates
-      - deep-validate candidates
-      - create watchers for VERIFIED setups
-      - replace expired/rejected opportunities automatically
-      - leave entry, risk control, opening and settlement to TradeWatcherEngine
+    Stability changes:
+      - only ONE heavy auto-manager cycle can run at a time
+      - enabling Auto Mode schedules the first automatic cycle for LATER
+      - manual run-now is queued and returns immediately
+      - job status is polled separately
+      - scheduler queues jobs instead of blocking itself in a heavy cycle
 
-    No broker execution is performed.
+    No live broker execution is performed.
     """
 
     ACTIVE_WATCHER_STATUSES = {
@@ -25,6 +25,14 @@ class AutomatedTradeManager:
         "RISK_BLOCKED",
         "OPEN",
     }
+
+    TERMINAL_JOB_STATUSES = {
+        "COMPLETED",
+        "FAILED",
+        "SKIPPED",
+    }
+
+    MAX_JOB_HISTORY = 30
 
     def __init__(
         self,
@@ -37,8 +45,12 @@ class AutomatedTradeManager:
         self.watcher_engine = watcher_engine
 
         self._lock = threading.RLock()
+        self._run_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread = None
+        self._thread: Optional[threading.Thread] = None
+
+        self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._job_order: List[str] = []
 
         self._state = {
             "enabled": False,
@@ -54,6 +66,9 @@ class AutomatedTradeManager:
             "runs": 0,
             "verified_created": 0,
             "last_error": None,
+            "run_in_progress": False,
+            "active_job_id": None,
+            "last_job_id": None,
         }
 
     # --------------------------------------------------------------
@@ -72,7 +87,7 @@ class AutomatedTradeManager:
 
             self._thread = threading.Thread(
                 target=self._loop,
-                name="jasong-v55-auto-manager",
+                name="jasong-v551-auto-manager-scheduler",
                 daemon=True,
             )
 
@@ -108,6 +123,8 @@ class AutomatedTradeManager:
                 "scan_top_n must be >= target_active_watchers and <= 9"
             )
 
+        now = time.time()
+
         with self._lock:
             self._state.update({
                 "enabled": True,
@@ -127,7 +144,14 @@ class AutomatedTradeManager:
                 "scan_top_n": int(
                     scan_top_n
                 ),
-                "next_run_at": time.time(),
+                # V5.5.1: DO NOT launch a heavy scan immediately.
+                "next_run_at": (
+                    now
+                    + int(
+                        scan_interval_minutes
+                    )
+                    * 60
+                ),
                 "last_error": None,
             })
 
@@ -147,15 +171,317 @@ class AutomatedTradeManager:
 
     def status(self) -> dict:
         with self._lock:
-            return dict(
+            state = dict(
                 self._state
             )
+
+            state[
+                "queued_or_running_jobs"
+            ] = sum(
+                1
+                for job in self._jobs.values()
+                if job.get(
+                    "status"
+                )
+                in {
+                    "QUEUED",
+                    "RUNNING",
+                }
+            )
+
+            return state
+
+    # --------------------------------------------------------------
+    # jobs
+    # --------------------------------------------------------------
+
+    def _prune_jobs(self) -> None:
+        with self._lock:
+            while (
+                len(
+                    self._job_order
+                )
+                > self.MAX_JOB_HISTORY
+            ):
+                oldest = (
+                    self._job_order.pop(
+                        0
+                    )
+                )
+
+                if (
+                    oldest
+                    == self._state.get(
+                        "active_job_id"
+                    )
+                ):
+                    self._job_order.append(
+                        oldest
+                    )
+                    break
+
+                self._jobs.pop(
+                    oldest,
+                    None,
+                )
+
+    def get_job(
+        self,
+        job_id: str,
+    ) -> Optional[dict]:
+        with self._lock:
+            job = self._jobs.get(
+                job_id
+            )
+
+            return (
+                dict(job)
+                if job is not None
+                else None
+            )
+
+    def list_jobs(self) -> List[dict]:
+        with self._lock:
+            return [
+                dict(
+                    self._jobs[
+                        job_id
+                    ]
+                )
+                for job_id in reversed(
+                    self._job_order
+                )
+                if job_id
+                in self._jobs
+            ]
+
+    def queue_run(
+        self,
+        source: str = "manual",
+    ) -> dict:
+        """Queue one heavy cycle and return immediately."""
+
+        with self._lock:
+            active_job_id = (
+                self._state.get(
+                    "active_job_id"
+                )
+            )
+
+            if active_job_id:
+                active_job = (
+                    self._jobs.get(
+                        active_job_id
+                    )
+                )
+
+                if (
+                    active_job
+                    and active_job.get(
+                        "status"
+                    )
+                    in {
+                        "QUEUED",
+                        "RUNNING",
+                    }
+                ):
+                    return {
+                        "accepted": False,
+                        "status": "ALREADY_RUNNING",
+                        "job_id":
+                            active_job_id,
+                        "job":
+                            dict(
+                                active_job
+                            ),
+                    }
+
+            job_id = str(
+                uuid.uuid4()
+            )
+
+            now = time.time()
+
+            job = {
+                "job_id": job_id,
+                "status": "QUEUED",
+                "source": source,
+                "created_at": now,
+                "started_at": None,
+                "completed_at": None,
+                "result": None,
+                "error": None,
+            }
+
+            self._jobs[
+                job_id
+            ] = job
+
+            self._job_order.append(
+                job_id
+            )
+
+            self._state[
+                "active_job_id"
+            ] = job_id
+
+            self._state[
+                "last_job_id"
+            ] = job_id
+
+        self._prune_jobs()
+
+        worker = threading.Thread(
+            target=self._job_worker,
+            args=(
+                job_id,
+            ),
+            name=(
+                f"jasong-v551-auto-job-"
+                f"{job_id[:8]}"
+            ),
+            daemon=True,
+        )
+
+        worker.start()
+
+        return {
+            "accepted": True,
+            "status": "QUEUED",
+            "job_id": job_id,
+            "job": self.get_job(
+                job_id
+            ),
+        }
+
+    def _job_worker(
+        self,
+        job_id: str,
+    ) -> None:
+        # Absolute single-cycle protection.
+        if not self._run_lock.acquire(
+            blocking=False
+        ):
+            with self._lock:
+                job = self._jobs.get(
+                    job_id
+                )
+
+                if job is not None:
+                    job[
+                        "status"
+                    ] = "SKIPPED"
+                    job[
+                        "completed_at"
+                    ] = time.time()
+                    job[
+                        "error"
+                    ] = (
+                        "Another auto-manager cycle is already running."
+                    )
+
+                if (
+                    self._state.get(
+                        "active_job_id"
+                    )
+                    == job_id
+                ):
+                    self._state[
+                        "active_job_id"
+                    ] = None
+
+            return
+
+        try:
+            with self._lock:
+                job = self._jobs.get(
+                    job_id
+                )
+
+                if job is None:
+                    return
+
+                job[
+                    "status"
+                ] = "RUNNING"
+                job[
+                    "started_at"
+                ] = time.time()
+
+                self._state[
+                    "run_in_progress"
+                ] = True
+
+            result = (
+                self._run_cycle()
+            )
+
+            with self._lock:
+                job = self._jobs.get(
+                    job_id
+                )
+
+                if job is not None:
+                    job[
+                        "status"
+                    ] = "COMPLETED"
+                    job[
+                        "result"
+                    ] = result
+                    job[
+                        "completed_at"
+                    ] = time.time()
+
+        except Exception as exc:
+            with self._lock:
+                job = self._jobs.get(
+                    job_id
+                )
+
+                if job is not None:
+                    job[
+                        "status"
+                    ] = "FAILED"
+                    job[
+                        "error"
+                    ] = str(
+                        exc
+                    )
+                    job[
+                        "completed_at"
+                    ] = time.time()
+
+                self._state[
+                    "last_error"
+                ] = str(
+                    exc
+                )
+
+        finally:
+            with self._lock:
+                self._state[
+                    "run_in_progress"
+                ] = False
+
+                if (
+                    self._state.get(
+                        "active_job_id"
+                    )
+                    == job_id
+                ):
+                    self._state[
+                        "active_job_id"
+                    ] = None
+
+            self._run_lock.release()
 
     # --------------------------------------------------------------
     # watcher portfolio
     # --------------------------------------------------------------
 
-    def _active_watchers(self) -> List[dict]:
+    def _active_watchers(
+        self,
+    ) -> List[dict]:
         return [
             item
             for item in self.watcher_engine.list()
@@ -165,7 +491,9 @@ class AutomatedTradeManager:
             in self.ACTIVE_WATCHER_STATUSES
         ]
 
-    def _active_symbols(self) -> set[str]:
+    def _active_symbols(
+        self,
+    ) -> set[str]:
         return {
             str(
                 item.get(
@@ -173,7 +501,8 @@ class AutomatedTradeManager:
                 )
                 or ""
             )
-            for item in self._active_watchers()
+            for item
+            in self._active_watchers()
             if item.get(
                 "symbol"
             )
@@ -183,7 +512,9 @@ class AutomatedTradeManager:
     # one automated cycle
     # --------------------------------------------------------------
 
-    def run_now(self) -> dict:
+    def _run_cycle(
+        self,
+    ) -> dict:
         with self._lock:
             settings = dict(
                 self._state
@@ -301,8 +632,6 @@ class AutomatedTradeManager:
                     ] += 1
                     continue
 
-                # REJECT-tier discovery candidates are not worth a heavy
-                # deep-validation request.
                 if (
                     candidate.get(
                         "quality_tier"
@@ -389,7 +718,6 @@ class AutomatedTradeManager:
                 ):
                     continue
 
-                # Preserve discovery/adaptive context in the watcher snapshot.
                 validated[
                     "adaptive_rank_score"
                 ] = candidate.get(
@@ -483,12 +811,14 @@ class AutomatedTradeManager:
                 ),
             )
 
+            # Keep error inside the completed job result instead of
+            # crashing the HTTP request/process.
             return result
 
     def _finish_run(
         self,
         result: dict,
-        error: str | None,
+        error: Optional[str],
     ) -> None:
         now = time.time()
 
@@ -554,7 +884,9 @@ class AutomatedTradeManager:
     # background scheduler
     # --------------------------------------------------------------
 
-    def _loop(self) -> None:
+    def _loop(
+        self,
+    ) -> None:
         while not self._stop_event.is_set():
             try:
                 with self._lock:
@@ -571,19 +903,48 @@ class AutomatedTradeManager:
                         )
                     )
 
+                    run_in_progress = bool(
+                        self._state.get(
+                            "run_in_progress",
+                            False,
+                        )
+                    )
+
                 now = time.time()
 
                 if (
                     enabled
-                    and (
-                        next_run_at is None
-                        or now
-                        >= float(
-                            next_run_at
-                        )
+                    and not run_in_progress
+                    and next_run_at is not None
+                    and now
+                    >= float(
+                        next_run_at
                     )
                 ):
-                    self.run_now()
+                    queued = self.queue_run(
+                        source="scheduler"
+                    )
+
+                    # Prevent scheduler from queueing repeatedly while the
+                    # worker is still being created.
+                    if queued.get(
+                        "accepted"
+                    ):
+                        with self._lock:
+                            interval_minutes = int(
+                                self._state.get(
+                                    "scan_interval_minutes",
+                                    15,
+                                )
+                            )
+
+                            self._state[
+                                "next_run_at"
+                            ] = (
+                                now
+                                + interval_minutes
+                                * 60
+                            )
 
             except Exception as exc:
                 with self._lock:
