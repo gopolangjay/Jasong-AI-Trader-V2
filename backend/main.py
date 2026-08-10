@@ -49,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.5.3
-# AUTO DASHBOARD + FORWARD TRADE LIFECYCLE
+# JASONG AI TRADER V5.6
+# MULTI-CANDIDATE ROTATION + FORWARD INTELLIGENCE
 # ============================================================
 
 MARKETS = {
@@ -67,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.5.3 API",
-    version="5.5.3",
+    title="Jasong AI Trader V5.6 API",
+    version="5.6.0",
 )
 
 app.add_middleware(
@@ -892,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.5.3",
+        "version": "5.6.0",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -2330,28 +2330,52 @@ def _v53_latest_price(
 
 
 # ============================================================
-# V5.5 FORWARD PERFORMANCE BY SYMBOL
+# V5.6 FORWARD INTELLIGENCE / STRATEGY HEALTH
 # ============================================================
 
-def _v55_symbol_forward_stats(
+V56_FORWARD_MIN_TRADES = 10
+V56_QUARANTINE_MIN_TRADES = 15
+
+
+def _v56_forward_health(
     symbol: str,
+    direction: str | None = None,
     payout: float = 0.80,
 ) -> dict:
-    """Forward paper performance for one symbol.
+    """Forward paper evidence for a symbol/direction.
 
-    Used only as an ADAPTIVE ranking input after enough unseen forward
-    trades exist. Historical validation remains separate.
+    Historical validation remains independent. Forward evidence only starts
+    influencing ranking after enough unseen paper trades have settled.
     """
 
     db = SessionLocal()
 
     try:
-        rows = (
+        query = (
             db.query(Trade)
             .filter(Trade.mode == "paper")
             .filter(Trade.closed == True)  # noqa: E712
             .filter(Trade.symbol == symbol)
-            .order_by(Trade.created_at.asc())
+        )
+
+        clean_direction = str(
+            direction or ""
+        ).upper()
+
+        if clean_direction in {
+            "BUY",
+            "SELL",
+        }:
+            query = query.filter(
+                Trade.direction
+                == clean_direction
+            )
+
+        rows = (
+            query
+            .order_by(
+                Trade.created_at.asc()
+            )
             .all()
         )
 
@@ -2366,7 +2390,10 @@ def _v55_symbol_forward_stats(
                 )
                 or ""
             ).upper()
-            in {"WIN", "LOSS"}
+            in {
+                "WIN",
+                "LOSS",
+            }
         ]
 
         wins = sum(
@@ -2378,11 +2405,15 @@ def _v55_symbol_forward_stats(
                     "result",
                     "",
                 )
+                or ""
             ).upper()
             == "WIN"
         )
 
-        losses = len(closed) - wins
+        losses = (
+            len(closed)
+            - wins
+        )
 
         gross_profit = sum(
             max(
@@ -2416,14 +2447,19 @@ def _v55_symbol_forward_stats(
             )
         )
 
+        trades = len(
+            closed
+        )
+
         win_rate = (
-            wins / len(closed)
-            if closed
+            wins / trades
+            if trades
             else 0.0
         )
 
         profit_factor = (
-            gross_profit / gross_loss
+            gross_profit
+            / gross_loss
             if gross_loss > 0
             else (
                 99.0
@@ -2432,43 +2468,151 @@ def _v55_symbol_forward_stats(
             )
         )
 
+        break_even = (
+            1.0
+            / (
+                1.0
+                + float(
+                    payout
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # Strategy health classification
+        # ----------------------------------------------------
+
+        if trades < V56_FORWARD_MIN_TRADES:
+            health = "PROBATION"
+            health_reason = (
+                "Not enough settled forward trades yet."
+            )
+
+        elif (
+            trades
+            >= V56_QUARANTINE_MIN_TRADES
+            and (
+                win_rate
+                < break_even
+                - 0.03
+                or profit_factor
+                < 0.85
+            )
+        ):
+            health = "QUARANTINED"
+            health_reason = (
+                "Forward evidence has fallen materially below "
+                "the configured profitability floor."
+            )
+
+        elif (
+            win_rate
+            >= break_even
+            + 0.08
+            and profit_factor
+            >= 1.30
+        ):
+            health = "HEALTHY"
+            health_reason = (
+                "Forward win rate and profit factor support the "
+                "historical edge."
+            )
+
+        else:
+            health = "DEGRADING"
+            health_reason = (
+                "Forward edge exists or remains inconclusive, but "
+                "does not currently satisfy the HEALTHY threshold."
+            )
+
+        health_adjustment = {
+            "PROBATION": 0.0,
+            "HEALTHY": 6.0,
+            "DEGRADING": -6.0,
+            "QUARANTINED": -30.0,
+        }[
+            health
+        ]
+
         return {
-            "symbol": symbol,
-            "trades": len(closed),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(
-                win_rate,
-                4,
-            ),
-            "profit_factor": round(
-                profit_factor,
-                4,
-            ),
-            "break_even_win_rate": round(
-                1.0 / (
-                    1.0 + float(payout)
+            "symbol":
+                symbol,
+            "direction":
+                clean_direction
+                or None,
+            "trades":
+                trades,
+            "wins":
+                wins,
+            "losses":
+                losses,
+            "win_rate":
+                round(
+                    win_rate,
+                    4,
                 ),
-                4,
-            ),
+            "win_rate_pct":
+                round(
+                    win_rate
+                    * 100.0,
+                    1,
+                ),
+            "profit_factor":
+                round(
+                    profit_factor,
+                    4,
+                ),
+            "break_even_win_rate":
+                round(
+                    break_even,
+                    4,
+                ),
+            "break_even_win_rate_pct":
+                round(
+                    break_even
+                    * 100.0,
+                    1,
+                ),
+            "health":
+                health,
+            "health_reason":
+                health_reason,
+            "ranking_adjustment":
+                health_adjustment,
+            "evidence_active":
+                trades
+                >= V56_FORWARD_MIN_TRADES,
+            "quarantined":
+                health
+                == "QUARANTINED",
         }
 
     finally:
         db.close()
 
 
-def _v55_adaptive_candidate_score(
+def _v55_symbol_forward_stats(
+    symbol: str,
+    payout: float = 0.80,
+) -> dict:
+    """Backward-compatible V5.5 symbol-level forward stats."""
+
+    return _v56_forward_health(
+        symbol=symbol,
+        direction=None,
+        payout=payout,
+    )
+
+
+def _v56_adaptive_candidate_score(
     candidate: dict,
     payout: float = 0.80,
 ) -> dict:
-    """Blend Smart Fast Score with real forward evidence.
+    """V5.6 ranking = Smart Fast Score + direction-specific forward health."""
 
-    Forward evidence is ignored until at least 10 completed paper trades
-    exist for the symbol. Even then, the adjustment is capped so forward
-    performance cannot bypass deep validation.
-    """
-
-    item = dict(candidate)
+    item = dict(
+        candidate
+    )
 
     base_score = float(
         item.get(
@@ -2482,64 +2626,32 @@ def _v55_adaptive_candidate_score(
     )
 
     symbol = str(
-        item.get("symbol")
+        item.get(
+            "symbol"
+        )
         or ""
     )
 
-    stats = _v55_symbol_forward_stats(
+    direction = str(
+        item.get(
+            "direction"
+        )
+        or ""
+    ).upper()
+
+    health = _v56_forward_health(
         symbol=symbol,
+        direction=direction,
         payout=payout,
     )
 
-    adjustment = 0.0
-    evidence_active = (
-        stats["trades"] >= 10
+    adjustment = float(
+        health.get(
+            "ranking_adjustment",
+            0.0,
+        )
+        or 0.0
     )
-
-    if evidence_active:
-        break_even = float(
-            stats[
-                "break_even_win_rate"
-            ]
-        )
-
-        win_rate = float(
-            stats["win_rate"]
-        )
-
-        profit_factor = float(
-            stats["profit_factor"]
-        )
-
-        # Win-rate evidence: capped at +/- 8 points.
-        wr_adjustment = max(
-            -8.0,
-            min(
-                8.0,
-                (
-                    win_rate
-                    - break_even
-                )
-                * 40.0,
-            ),
-        )
-
-        # Profit-factor evidence: capped at +/- 4 points.
-        if profit_factor >= 2.0:
-            pf_adjustment = 4.0
-        elif profit_factor >= 1.5:
-            pf_adjustment = 2.5
-        elif profit_factor >= 1.2:
-            pf_adjustment = 1.0
-        elif profit_factor < 1.0:
-            pf_adjustment = -4.0
-        else:
-            pf_adjustment = -1.0
-
-        adjustment = (
-            wr_adjustment
-            + pf_adjustment
-        )
 
     adaptive_score = max(
         0.0,
@@ -2566,13 +2678,52 @@ def _v55_adaptive_candidate_score(
 
     item[
         "forward_evidence_active"
-    ] = evidence_active
+    ] = bool(
+        health.get(
+            "evidence_active",
+            False,
+        )
+    )
 
+    # Keep the old key so V5.5.x UI/code remains compatible.
     item[
         "forward_symbol_stats"
-    ] = stats
+    ] = health
+
+    item[
+        "strategy_health"
+    ] = health.get(
+        "health"
+    )
+
+    item[
+        "strategy_health_reason"
+    ] = health.get(
+        "health_reason"
+    )
+
+    item[
+        "strategy_quarantined"
+    ] = bool(
+        health.get(
+            "quarantined",
+            False,
+        )
+    )
 
     return item
+
+
+def _v55_adaptive_candidate_score(
+    candidate: dict,
+    payout: float = 0.80,
+) -> dict:
+    """Backward-compatible name, now powered by V5.6 health."""
+
+    return _v56_adaptive_candidate_score(
+        candidate=candidate,
+        payout=payout,
+    )
 
 
 def _v55_rank_candidates(
@@ -2580,11 +2731,12 @@ def _v55_rank_candidates(
     payout: float = 0.80,
 ) -> list[dict]:
     ranked = [
-        _v55_adaptive_candidate_score(
+        _v56_adaptive_candidate_score(
             candidate=item,
             payout=payout,
         )
-        for item in candidates
+        for item
+        in candidates
         if isinstance(
             item,
             dict,
@@ -2593,6 +2745,12 @@ def _v55_rank_candidates(
 
     ranked.sort(
         key=lambda item: (
+            bool(
+                not item.get(
+                    "strategy_quarantined",
+                    False,
+                )
+            ),
             float(
                 item.get(
                     "adaptive_rank_score",
@@ -2633,7 +2791,7 @@ V53_WATCHER_ENGINE.start()
 # ============================================================
 
 def _v55_scan_candidates(
-    top_n: int = 5,
+    top_n: int = 9,
     payout: float = 0.80,
 ) -> list[dict]:
     raw = run_fast_scan(
@@ -2878,7 +3036,7 @@ def start_auto_manager(
     payout: float = 0.80,
     scan_interval_minutes: int = 15,
     target_active_watchers: int = 3,
-    scan_top_n: int = 5,
+    scan_top_n: int = 9,
 ):
     validate_risk_mode(
         risk_mode
@@ -3044,11 +3202,11 @@ def get_adaptive_ranking(
                 :top_n
             ],
         "forward_evidence_min_trades":
-            10,
+            V56_FORWARD_MIN_TRADES,
         "note":
             (
-                "Adaptive ranking uses forward paper evidence "
-                "only after 10 completed forward trades per symbol. "
+                "V5.6 adaptive ranking uses direction-specific forward paper evidence "
+                "after the configured minimum settled trades. "
                 "Deep validation remains mandatory before watching."
             ),
         "live_execution":
@@ -3060,6 +3218,71 @@ def get_adaptive_ranking(
 # ============================================================
 # V5.5.3 AUTO MODE DASHBOARD / TRADE LIFECYCLE
 # ============================================================
+
+
+@app.get("/strategy-health")
+def get_strategy_health(
+    payout: float = 0.80,
+):
+    """V5.6 forward health table for all configured market directions."""
+
+    output = []
+
+    for market, symbol in MARKETS.items():
+        for direction in (
+            "BUY",
+            "SELL",
+        ):
+            output.append(
+                {
+                    "market":
+                        market,
+                    **_v56_forward_health(
+                        symbol=symbol,
+                        direction=direction,
+                        payout=payout,
+                    ),
+                }
+            )
+
+    health_order = {
+        "HEALTHY": 0,
+        "PROBATION": 1,
+        "DEGRADING": 2,
+        "QUARANTINED": 3,
+    }
+
+    output.sort(
+        key=lambda item: (
+            health_order.get(
+                item.get(
+                    "health"
+                ),
+                9,
+            ),
+            -int(
+                item.get(
+                    "trades",
+                    0,
+                )
+                or 0
+            ),
+        )
+    )
+
+    return {
+        "version":
+            "5.6.0",
+        "minimum_forward_trades":
+            V56_FORWARD_MIN_TRADES,
+        "quarantine_minimum_trades":
+            V56_QUARANTINE_MIN_TRADES,
+        "strategies":
+            output,
+        "live_execution":
+            False,
+    }
+
 
 @app.get("/auto-dashboard")
 def get_auto_dashboard(
@@ -3190,7 +3413,7 @@ def get_auto_dashboard(
 
     return {
         "version":
-            "5.5.3",
+            "5.6.0",
         "auto_mode":
             bool(
                 manager.get(
@@ -3250,6 +3473,19 @@ def get_auto_dashboard(
         },
         "forward":
             forward,
+        "strategy_health": [
+            {
+                "market": item.get("market"),
+                "symbol": item.get("symbol"),
+                "direction": item.get("direction"),
+                **_v56_forward_health(
+                    symbol=str(item.get("symbol") or ""),
+                    direction=str(item.get("direction") or ""),
+                    payout=float(item.get("payout") or 0.80),
+                ),
+            }
+            for item in active
+        ],
         "open_positions":
             open_watchers,
         "watching_positions":
