@@ -69,6 +69,11 @@ class AutomatedTradeManager:
             "run_in_progress": False,
             "active_job_id": None,
             "last_job_id": None,
+            "progress_stage": "IDLE",
+            "progress_message": "Waiting for next cycle",
+            "progress_percent": 0,
+            "progress_candidate": None,
+            "max_deep_validations_per_cycle": 1,
         }
 
     # --------------------------------------------------------------
@@ -153,6 +158,11 @@ class AutomatedTradeManager:
                     * 60
                 ),
                 "last_error": None,
+                "progress_stage": "IDLE",
+                "progress_message": "Waiting for next cycle",
+                "progress_percent": 0,
+                "progress_candidate": None,
+                "max_deep_validations_per_cycle": 1,
             })
 
         return self.status()
@@ -190,6 +200,34 @@ class AutomatedTradeManager:
             )
 
             return state
+
+    def _set_progress(
+        self,
+        stage: str,
+        message: str,
+        percent: int,
+        candidate: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            pct = max(0, min(100, int(percent)))
+
+            self._state["progress_stage"] = stage
+            self._state["progress_message"] = message
+            self._state["progress_percent"] = pct
+            self._state["progress_candidate"] = candidate
+
+            active_job_id = self._state.get("active_job_id")
+
+            if active_job_id:
+                job = self._jobs.get(active_job_id)
+
+                if job is not None:
+                    job["progress"] = {
+                        "stage": stage,
+                        "message": message,
+                        "percent": pct,
+                        "candidate": candidate,
+                    }
 
     # --------------------------------------------------------------
     # jobs
@@ -311,6 +349,12 @@ class AutomatedTradeManager:
                 "completed_at": None,
                 "result": None,
                 "error": None,
+                "progress": {
+                    "stage": "QUEUED",
+                    "message": "Waiting for worker",
+                    "percent": 0,
+                    "candidate": None,
+                },
             }
 
             self._jobs[
@@ -412,6 +456,12 @@ class AutomatedTradeManager:
                     "run_in_progress"
                 ] = True
 
+            self._set_progress(
+                stage="STARTING",
+                message="Preparing automated cycle",
+                percent=5,
+            )
+
             result = (
                 self._run_cycle()
             )
@@ -431,6 +481,12 @@ class AutomatedTradeManager:
                     job[
                         "completed_at"
                     ] = time.time()
+
+            self._set_progress(
+                stage="COMPLETED",
+                message="Automated cycle completed",
+                percent=100,
+            )
 
         except Exception as exc:
             with self._lock:
@@ -562,6 +618,8 @@ class AutomatedTradeManager:
                 0,
             "candidates":
                 [],
+            "max_deep_validations_per_cycle":
+                1,
         }
 
         if available_slots <= 0:
@@ -579,6 +637,12 @@ class AutomatedTradeManager:
             return result
 
         try:
+            self._set_progress(
+                stage="FAST_SCAN",
+                message="Scanning and ranking markets",
+                percent=15,
+            )
+
             candidates = (
                 self.scan_candidates_func(
                     top_n=int(
@@ -602,8 +666,25 @@ class AutomatedTradeManager:
                 candidates
             )
 
+            self._set_progress(
+                stage="RANKING",
+                message=(
+                    f"Ranked {len(candidates)} candidates; "
+                    "selecting the best eligible market"
+                ),
+                percent=30,
+            )
+
             active_symbols = (
                 self._active_symbols()
+            )
+
+            deep_attempts = 0
+            max_deep_attempts = int(
+                settings.get(
+                    "max_deep_validations_per_cycle",
+                    1,
+                )
             )
 
             for candidate in candidates:
@@ -639,6 +720,30 @@ class AutomatedTradeManager:
                     == "REJECT"
                 ):
                     continue
+
+                if deep_attempts >= max_deep_attempts:
+                    result["reason"] = (
+                        "V5.5.2 cycle limit reached: "
+                        "one heavy deep validation per cycle."
+                    )
+                    break
+
+                deep_attempts += 1
+
+                market_name = str(
+                    candidate.get("market")
+                    or symbol
+                )
+
+                self._set_progress(
+                    stage="DEEP_VALIDATION",
+                    message=(
+                        f"Deep validating {market_name} "
+                        f"({deep_attempts}/{max_deep_attempts})"
+                    ),
+                    percent=55,
+                    candidate=market_name,
+                )
 
                 validated = (
                     self.validate_candidate_func(
@@ -745,6 +850,15 @@ class AutomatedTradeManager:
                     "forward_symbol_stats"
                 )
 
+                self._set_progress(
+                    stage="WATCHER_CREATION",
+                    message=(
+                        f"{market_name} VERIFIED; creating server watcher"
+                    ),
+                    percent=85,
+                    candidate=market_name,
+                )
+
                 watcher = (
                     self.watcher_engine.create(
                         candidate=
@@ -789,6 +903,15 @@ class AutomatedTradeManager:
                 ] = watcher.get(
                     "status"
                 )
+
+            self._set_progress(
+                stage="FINALISING",
+                message=(
+                    "Cycle finished. The next scheduled cycle "
+                    "will reconsider the live ranking."
+                ),
+                percent=95,
+            )
 
             self._finish_run(
                 result=result,
