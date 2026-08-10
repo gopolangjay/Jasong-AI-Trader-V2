@@ -17,7 +17,7 @@ from forward_guard import (
 
 
 class TradeWatcherEngine:
-    """Server-side paper-trade watcher for Jasong AI Trader V5.6.
+    """Server-side genuine-forward watcher for Jasong AI Trader V6.0.
 
     The engine keeps verified candidates under observation, confirms live entry
     conditions, applies paper-risk circuit breakers, opens paper trades, closes
@@ -38,12 +38,16 @@ class TradeWatcherEngine:
         signal_func: Callable[[str, str, float], Dict[str, Any]],
         price_func: Callable[[str], float],
         profiles: Dict[str, Any],
+        risk_gateway=None,
+        execution_gateway=None,
     ):
         self.session_factory = session_factory
         self.Trade = trade_model
         self.signal_func = signal_func
         self.price_func = price_func
         self.profiles = profiles
+        self.risk_gateway = risk_gateway
+        self.execution_gateway = execution_gateway
 
         self._watchers: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -264,7 +268,7 @@ class TradeWatcherEngine:
             )
             .filter(
                 self.Trade.mode
-                == "paper"
+                == "forward"
             )
             .filter(
                 self.Trade.closed
@@ -427,6 +431,27 @@ class TradeWatcherEngine:
         risk_fraction = profile.risk_per_trade * quality
         stake = round(max(current_balance * risk_fraction, 0.0), 2)
 
+        v6_gateway = None
+        if self.risk_gateway is not None:
+            balance_curve = starting_balance
+            peak = starting_balance
+            max_dd = 0.0
+            for row in self._db_rows(db, closed=True):
+                balance_curve += self._safe_float(getattr(row, "pnl", 0.0))
+                peak = max(peak, balance_curve)
+                if peak > 0:
+                    max_dd = min(max_dd, (balance_curve - peak) / peak)
+            v6_gateway = self.risk_gateway.evaluate(
+                symbol=watcher["symbol"], direction=str(watcher.get("direction", "")),
+                starting_balance=starting_balance, current_balance=current_balance, daily_pnl=daily_pnl,
+                max_drawdown=abs(max_dd), consecutive_losses=consecutive_losses, open_trades=open_count,
+                strategy_health=strategy_health, live_signal=live_signal,
+                assumed_spread_bps=float(watcher.get("spread_bps", DEFAULT_SPREAD_BPS) or DEFAULT_SPREAD_BPS),
+                correlation_conflicts=correlation_conflicts, duplicate_open=self._duplicate_open(db, watcher["symbol"]),
+            )
+            if not v6_gateway.get("allowed", False):
+                blocks.extend([x for x in v6_gateway.get("blocks", []) if x not in blocks])
+
         return {
             "allowed": not blocks and stake > 0,
             "blocks": blocks,
@@ -441,6 +466,7 @@ class TradeWatcherEngine:
             "quality_multiplier": round(quality, 4),
             "effective_risk_fraction": round(risk_fraction, 6),
             "stake": stake,
+            "v6_gateway": v6_gateway,
         }
 
     # ------------------------------------------------------------------
@@ -493,6 +519,7 @@ class TradeWatcherEngine:
             "next_check_at": now,
             "last_checked_at": None,
             "trade_id": None,
+            "execution_order_id": None,
             "entry_price": None,
             "entry_time": None,
             "target_exit_at": None,
@@ -531,7 +558,7 @@ class TradeWatcherEngine:
             "explanation": candidate.get("explanation"),
             # V5.7 genuine forward audit fields. These are populated only
             # when a live-confirmed forward trade actually opens.
-            "forward_protocol": "V5.7_GENUINE_FORWARD",
+            "forward_protocol": "V6_GENUINE_FORWARD",
             "entry_snapshot": None,
             "entry_snapshot_hash": None,
             "entry_price_effective": None,
@@ -718,13 +745,24 @@ class TradeWatcherEngine:
                 slippage_bps=DEFAULT_SLIPPAGE_BPS,
             )
 
+            execution_order = None
+            if self.execution_gateway is not None:
+                try:
+                    execution_order = self.execution_gateway.place_order(
+                        symbol=watcher["symbol"], direction=direction, requested_price=entry_price, fill_price=effective_entry,
+                        stake=risk["stake"], idempotency_key=f"{watcher_id}:{int(now)}:{direction}",
+                        metadata={"watcher_id": watcher_id, "forward_protocol": "V6_GENUINE_FORWARD", "snapshot_hash": frozen["snapshot_hash"]},
+                    )
+                except Exception as exc:
+                    with self._lock:
+                        current=self._watchers.get(watcher_id)
+                        if current:
+                            current["status"]="RISK_BLOCKED"
+                            current["last_reason"]=f"Execution gateway rejected PAPER/DEMO order: {exc}"
+                    return
+
             trade = self.Trade(
-                symbol=watcher["symbol"],
-                direction=direction,
-                confidence=confidence,
-                entry_price=effective_entry,
-                stake=risk["stake"],
-                mode="forward",
+                symbol=watcher["symbol"], direction=direction, confidence=confidence, entry_price=effective_entry, stake=risk["stake"], mode="forward",
             )
             db.add(trade)
             db.commit()
@@ -737,6 +775,7 @@ class TradeWatcherEngine:
                 if watcher:
                     watcher["status"] = "OPEN"
                     watcher["trade_id"] = trade.id
+                    watcher["execution_order_id"] = execution_order.get("order_id") if execution_order else None
                     watcher["entry_price"] = entry_price
                     watcher["entry_price_effective"] = effective_entry
                     watcher["entry_time"] = now
@@ -746,7 +785,7 @@ class TradeWatcherEngine:
                     watcher["entry_snapshot_hash"] = frozen["snapshot_hash"]
                     watcher["settlement_guard_passed"] = None
                     watcher["last_reason"] = (
-                        "V5.7 live entry confirmed. Genuine forward paper trade "
+                        "V6 live entry confirmed. Genuine forward paper trade "
                         "opened with frozen parameters and no future data."
                     )
         finally:
@@ -836,6 +875,11 @@ class TradeWatcherEngine:
             trade.closed = True
             db.commit()
 
+            execution_order_id = watcher.get("execution_order_id")
+            if self.execution_gateway is not None and execution_order_id:
+                self.execution_gateway.close_order(order_id=execution_order_id, requested_exit_price=exit_price, fill_exit_price=effective_exit,
+                    result="WIN" if won else "LOSS", pnl=round(pnl, 2))
+
             with self._lock:
                 watcher = self._watchers.get(watcher_id)
                 if watcher:
@@ -847,7 +891,7 @@ class TradeWatcherEngine:
                     watcher["pnl"] = round(pnl, 2)
                     watcher["settlement_guard_passed"] = True
                     watcher["last_reason"] = (
-                        "V5.7 genuine forward trade resolved only after the "
+                        "V6 genuine forward trade resolved only after the "
                         "pre-committed holding horizon using adverse execution "
                         "assumptions."
                     )
@@ -903,7 +947,7 @@ class TradeWatcherEngine:
             open_trades = self._open_count(db)
 
             return {
-                "forward_protocol": "V5.7_GENUINE_FORWARD",
+                "forward_protocol": "V6_GENUINE_FORWARD",
                 "forward_trades": len(closed),
                 "wins": wins,
                 "losses": losses,
@@ -966,13 +1010,13 @@ class TradeWatcherEngine:
                     "closed": bool(row.closed),
                     "result": row.result,
                     "pnl": row.pnl,
-                    "forward_protocol": "V5.7_GENUINE_FORWARD",
+                    "forward_protocol": "V6_GENUINE_FORWARD",
                     "audit": watcher,
                 })
 
             return {
                 "version": "5.7.0",
-                "forward_protocol": "V5.7_GENUINE_FORWARD",
+                "forward_protocol": "V6_GENUINE_FORWARD",
                 "entries": entries,
                 "count": len(entries),
                 "live_execution": False,
