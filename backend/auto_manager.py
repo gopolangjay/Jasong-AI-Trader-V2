@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class AutomatedTradeManager:
-    """Paper-only automated candidate manager for Jasong AI Trader V5.6.
+    """Paper-only automated candidate manager for Jasong AI Trader V6.1.
 
     Stability changes:
       - only ONE heavy auto-manager cycle can run at a time
@@ -39,10 +39,12 @@ class AutomatedTradeManager:
         scan_candidates_func: Callable[..., List[Dict[str, Any]]],
         validate_candidate_func: Callable[..., Dict[str, Any]],
         watcher_engine: Any,
+        state_store=None,
     ):
         self.scan_candidates_func = scan_candidates_func
         self.validate_candidate_func = validate_candidate_func
         self.watcher_engine = watcher_engine
+        self.state_store = state_store
 
         self._lock = threading.RLock()
         self._run_lock = threading.Lock()
@@ -84,6 +86,42 @@ class AutomatedTradeManager:
             "candidate_cooldowns": {},
             "last_rotated_symbol": None,
         }
+
+        self._restore_state()
+
+    def _restore_state(self) -> None:
+        if self.state_store is None:
+            return
+        saved = self.state_store.load("auto_manager", {})
+        if not isinstance(saved, dict):
+            return
+        state = saved.get("state")
+        if isinstance(state, dict):
+            self._state.update(state)
+            # A process cannot restart with a worker genuinely still running.
+            self._state["run_in_progress"] = False
+            self._state["active_job_id"] = None
+            if self._state.get("enabled"):
+                next_run = self._state.get("next_run_at")
+                if next_run is None or float(next_run) < time.time():
+                    self._state["next_run_at"] = time.time() + 5.0
+        cooldowns = saved.get("candidate_cooldowns")
+        if isinstance(cooldowns, dict):
+            self._candidate_cooldowns = {str(k): float(v) for k, v in cooldowns.items()}
+        statuses = saved.get("candidate_last_status")
+        if isinstance(statuses, dict):
+            self._candidate_last_status = {str(k): str(v) for k, v in statuses.items()}
+
+    def _persist_state(self) -> None:
+        if self.state_store is None:
+            return
+        with self._lock:
+            payload = {
+                "state": dict(self._state),
+                "candidate_cooldowns": dict(self._candidate_cooldowns),
+                "candidate_last_status": dict(self._candidate_last_status),
+            }
+        self.state_store.save("auto_manager", payload)
 
     # --------------------------------------------------------------
     # lifecycle
@@ -174,6 +212,7 @@ class AutomatedTradeManager:
                 "max_deep_validations_per_cycle": 1,
             })
 
+        self._persist_state()
         return self.status()
 
     def disable(self) -> dict:
@@ -186,6 +225,7 @@ class AutomatedTradeManager:
                 "next_run_at"
             ] = None
 
+        self._persist_state()
         return self.status()
 
     def status(self) -> dict:
@@ -1168,6 +1208,8 @@ class AutomatedTradeManager:
                     "next_run_at"
                 ] = None
 
+        self._persist_state()
+
     # --------------------------------------------------------------
     # background scheduler
     # --------------------------------------------------------------
@@ -1242,6 +1284,7 @@ class AutomatedTradeManager:
                         exc
                     )
 
+            self._persist_state()
             self._stop_event.wait(
                 10.0
             )
