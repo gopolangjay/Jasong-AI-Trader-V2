@@ -68,6 +68,8 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? fastScan;
   Map<String, dynamic>? verifiedTrade;
 
+  Map<String, dynamic>? liveEntryAssessment;
+
   List<Map<String, dynamic>>
       validationHistory = [];
 
@@ -875,6 +877,8 @@ class _HomePageState extends State<HomePage> {
 
       verifiedTrade = null;
 
+      liveEntryAssessment = null;
+
       validationHistory = [];
 
       error = null;
@@ -1348,16 +1352,387 @@ class _HomePageState extends State<HomePage> {
     await refreshSignal();
   }
 
+  double _profileMinConfidence() {
+    switch (risk) {
+      case 'Conservative':
+        return 0.72;
+      case 'Aggressive':
+        return 0.62;
+      case 'Balanced':
+      default:
+        return 0.67;
+    }
+  }
+
+  int _intervalMinutes(
+    dynamic interval,
+  ) {
+    final text =
+        interval?.toString().trim().toLowerCase() ?? '';
+
+    if (text.endsWith('m')) {
+      return int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          15;
+    }
+
+    if (text.endsWith('h')) {
+      final hours = int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          1;
+
+      return hours * 60;
+    }
+
+    return 15;
+  }
+
   Future<void>
       analyseVerifiedTrade() async {
-    if (verifiedTrade == null) {
+    if (verifiedTrade == null ||
+        busy) {
       return;
     }
 
-    await analyseMarket(
-      verifiedTrade!,
-    );
+    final selectedSymbol =
+        verifiedTrade!['symbol']
+            ?.toString();
+
+    if (selectedSymbol == null ||
+        selectedSymbol.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+      liveEntryAssessment = null;
+      symbol.text = selectedSymbol;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/signal',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              selectedSymbol,
+          'risk_mode':
+              risk,
+          'balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 120,
+      );
+
+      final verifiedDirection =
+          verifiedTrade!['direction']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final liveDecision =
+          result['decision']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final confidence =
+          ((result['confidence'] ?? 0)
+                  as num)
+              .toDouble();
+
+      final aiUp =
+          ((result[
+                      'combined_up_probability'] ??
+                  0.50)
+              as num)
+              .toDouble();
+
+      final rsi =
+          ((result['rsi'] ?? 50)
+                  as num)
+              .toDouble();
+
+      final price =
+          result['price'];
+
+      final minConfidence =
+          _profileMinConfidence();
+
+      final reasons = <String>[];
+
+      String entryStatus =
+          'WAIT_CONFIRMATION';
+
+      String headline =
+          'WAIT FOR CONFIRMATION';
+
+      // -----------------------------------------------------
+      // 1. Opposite live signal with meaningful confidence
+      // -----------------------------------------------------
+
+      final oppositeSignal =
+          (verifiedDirection == 'BUY' &&
+                  liveDecision == 'SELL') ||
+              (verifiedDirection == 'SELL' &&
+                  liveDecision == 'BUY');
+
+      if (oppositeSignal &&
+          confidence >=
+              minConfidence) {
+        entryStatus =
+            'SETUP_INVALIDATED';
+
+        headline =
+            'SETUP INVALIDATED';
+
+        reasons.add(
+          'The live AI signal now points '
+          'against the verified historical direction.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 2. Overextended RSI: wait for pullback
+      // -----------------------------------------------------
+
+      else if (
+          verifiedDirection == 'BUY' &&
+          rsi >= 70.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'BUY setup is historically verified, '
+          'but RSI is overextended at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      } else if (
+          verifiedDirection == 'SELL' &&
+          rsi <= 30.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'SELL setup is historically verified, '
+          'but RSI is oversold at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 3. Live direction + confidence + AI probability agree
+      // -----------------------------------------------------
+
+      else {
+        final directionMatches =
+            liveDecision ==
+                verifiedDirection;
+
+        final confidencePass =
+            confidence >=
+                minConfidence;
+
+        final probabilityPass =
+            verifiedDirection == 'BUY'
+                ? aiUp >= 0.60
+                : aiUp <= 0.40;
+
+        if (directionMatches &&
+            confidencePass &&
+            probabilityPass) {
+          entryStatus =
+              'ENTER_NOW';
+
+          headline =
+              'ENTRY CONFIRMED';
+
+          reasons.add(
+            'Historical validation and the '
+            'current live AI signal agree.',
+          );
+
+          reasons.add(
+            'Live confidence passed the '
+            '${(minConfidence * 100).toStringAsFixed(0)}% '
+            '$risk threshold.',
+          );
+        } else {
+          entryStatus =
+              'WAIT_CONFIRMATION';
+
+          headline =
+              'WAIT FOR CONFIRMATION';
+
+          if (!directionMatches) {
+            reasons.add(
+              'The live signal is $liveDecision '
+              'while the verified setup is '
+              '$verifiedDirection.',
+            );
+          }
+
+          if (!confidencePass) {
+            reasons.add(
+              'Live confidence '
+              '${(confidence * 100).toStringAsFixed(1)}% '
+              'is below the '
+              '${(minConfidence * 100).toStringAsFixed(0)}% '
+              '$risk threshold.',
+            );
+          }
+
+          if (!probabilityPass) {
+            reasons.add(
+              'The live AI probability has not '
+              'confirmed the verified direction strongly enough.',
+            );
+          }
+        }
+      }
+
+      final intervalMinutes =
+          _intervalMinutes(
+        verifiedTrade!['interval'],
+      );
+
+      final holdingCandles =
+          int.tryParse(
+                '${verifiedTrade!['holding_candles'] ?? 0}',
+              ) ??
+              0;
+
+      final historicalHoldingMinutes =
+          intervalMinutes *
+              holdingCandles;
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        sig = result;
+
+        liveEntryAssessment = {
+          'status':
+              entryStatus,
+
+          'headline':
+              headline,
+
+          'verified_direction':
+              verifiedDirection,
+
+          'live_decision':
+              liveDecision,
+
+          'confidence':
+              confidence,
+
+          'ai_up_probability':
+              aiUp,
+
+          'rsi':
+              rsi,
+
+          'price':
+              price,
+
+          'signal_reason':
+              result['reason'],
+
+          'reasons':
+              reasons,
+
+          'interval_minutes':
+              intervalMinutes,
+
+          'recheck_minutes':
+              intervalMinutes,
+
+          'historical_holding_minutes':
+              historicalHoldingMinutes,
+        };
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Live entry confirmation failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
   }
+
+  Color liveEntryColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Colors.greenAccent;
+
+      case 'WAIT_PULLBACK':
+        return Colors.amberAccent;
+
+      case 'WAIT_CONFIRMATION':
+        return Colors.amberAccent;
+
+      case 'SETUP_INVALIDATED':
+        return Colors.redAccent;
+
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData liveEntryIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Icons.play_circle_fill;
+
+      case 'WAIT_PULLBACK':
+        return Icons.trending_down;
+
+      case 'WAIT_CONFIRMATION':
+        return Icons.hourglass_top;
+
+      case 'SETUP_INVALIDATED':
+        return Icons.block;
+
+      default:
+        return Icons.info_outline;
+    }
+  }
+
 
   // =========================================================
   // PAPER TRADE
@@ -2040,7 +2415,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.0',
+          'Jasong AI Trader V5.1',
         ),
         actions: [
           IconButton(
@@ -2800,7 +3175,7 @@ class _HomePageState extends State<HomePage> {
                         ),
                         label:
                             const Text(
-                          'Check Current Live Signal',
+                          'Check Live Entry',
                         ),
                       ),
 
@@ -2855,6 +3230,294 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ],
+
+            // =================================================
+            // V5.1 LIVE ENTRY CONFIRMATION
+            // =================================================
+
+            if (liveEntryAssessment != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Builder(
+                builder: (context) {
+                  final assessment =
+                      liveEntryAssessment!;
+
+                  final status =
+                      assessment['status']
+                              ?.toString() ??
+                          'WAIT_CONFIRMATION';
+
+                  final reasons =
+                      (assessment['reasons']
+                                  as List?) ??
+                              const [];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            liveEntryIcon(
+                              status,
+                            ),
+                            size: 52,
+                            color:
+                                liveEntryColor(
+                              status,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          const Text(
+                            'LIVE ENTRY CONFIRMATION',
+                            style:
+                                TextStyle(
+                              fontSize: 15,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '${assessment['headline']}',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 28,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  liveEntryColor(
+                                status,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 14,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Verified',
+                                '${assessment['verified_direction']}',
+                              ),
+                              metric(
+                                'Live Signal',
+                                '${assessment['live_decision']}',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Live Confidence',
+                                '${formatPercent(
+                                  assessment[
+                                      'confidence'],
+                                )}%',
+                              ),
+                              metric(
+                                'AI Up',
+                                '${formatPercent(
+                                  assessment[
+                                      'ai_up_probability'],
+                                )}%',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Live Price',
+                                formatPrice(
+                                  assessment[
+                                      'price'],
+                                ),
+                              ),
+                              metric(
+                                'RSI',
+                                formatNumber(
+                                  assessment[
+                                      'rsi'],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          for (final reason
+                              in reasons)
+                            ListTile(
+                              dense: true,
+                              leading:
+                                  Icon(
+                                status ==
+                                        'ENTER_NOW'
+                                    ? Icons
+                                        .check_circle
+                                    : Icons
+                                        .info_outline,
+                                color:
+                                    liveEntryColor(
+                                  status,
+                                ),
+                              ),
+                              title:
+                                  Text(
+                                reason
+                                    .toString(),
+                              ),
+                            ),
+
+                          if (assessment[
+                                  'signal_reason'] !=
+                              null) ...[
+                            const Divider(),
+                            Text(
+                              'Live model: '
+                              '${assessment['signal_reason']}',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                fontSize: 12,
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+                          ],
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          Text(
+                            'Recheck after approximately '
+                            '${assessment['recheck_minutes']} minutes '
+                            'if entry is not confirmed.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+
+                          if ((assessment[
+                                      'historical_holding_minutes'] ??
+                                  0) >
+                              0)
+                            Text(
+                              'Historical validated holding window: '
+                              '≈${assessment['historical_holding_minutes']} minutes.',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+
+                          const SizedBox(
+                            height: 14,
+                          ),
+
+                          FilledButton.icon(
+                            onPressed:
+                                busy
+                                    ? null
+                                    : analyseVerifiedTrade,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Recheck Live Entry',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                busy ||
+                                        status !=
+                                            'ENTER_NOW' ||
+                                        sig == null ||
+                                        ![
+                                          'BUY',
+                                          'SELL',
+                                        ].contains(
+                                          sig![
+                                                  'decision']
+                                              ?.toString(),
+                                        )
+                                    ? null
+                                    : recordPaperTrade,
+                            icon:
+                                const Icon(
+                              Icons.edit_note,
+                            ),
+                            label:
+                                const Text(
+                              'Record Confirmed Paper Trade',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          const Text(
+                            'Live-entry confirmation is an additional '
+                            'filter, not a guarantee of profit. '
+                            'ENTER NOW means the configured live filters '
+                            'currently agree with the historically '
+                            'verified setup.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+
 
             // =================================================
             // NETWORK FAILURE
@@ -3296,8 +3959,8 @@ class _HomePageState extends State<HomePage> {
                   'Safety: Jasong AI Trader is for '
                   'AI-assisted analysis and paper trading. '
                   'Fast Score is a ranking score, not a win probability. '
-                  'A VERIFIED result means historical validation rules '
-                  'passed; it does not guarantee the next trade will win.',
+                  'VERIFIED refers to historical validation; live-entry '
+                  'confirmation is a separate filter and neither guarantees profit.',
                 ),
               ),
             ),
