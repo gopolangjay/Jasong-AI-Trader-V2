@@ -382,7 +382,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // RESILIENT DEEP VALIDATION
+  // V4.8 ASYNC DEEP VALIDATION JOB
   // =========================================================
 
   Future<Map<String, dynamic>>
@@ -394,8 +394,8 @@ class _HomePageState extends State<HomePage> {
                 ?.toString() ??
             'UNKNOWN';
 
-    final uri = Uri.parse(
-      '$apiBase/deep-validate',
+    final createUri = Uri.parse(
+      '$apiBase/deep-validation-job',
     ).replace(
       queryParameters: {
         'risk_mode':
@@ -404,31 +404,34 @@ class _HomePageState extends State<HomePage> {
             balance.text.trim(),
         'payout':
             '0.8',
-        'max_candidates':
-            '1',
       },
     );
 
-    final body = [
-      {
-        'market':
-            candidate['market'],
-        'symbol':
-            candidate['symbol'],
-        'fast_score':
-            candidate['fast_score'] ??
-                candidate['score'] ??
-                0.0,
-        'direction':
-            candidate['direction'] ??
-                'WAIT',
-        'status':
-            candidate['status'] ??
-                'UNKNOWN',
-      }
-    ];
+    // V4.8 job endpoint accepts ONE candidate object,
+    // not the old one-item list used by /deep-validate.
+    final body = {
+      'market':
+          candidate['market'],
+      'symbol':
+          candidate['symbol'],
+      'fast_score':
+          candidate['fast_score'] ??
+              candidate['score'] ??
+              0.0,
+      'direction':
+          candidate['direction'] ??
+              'WAIT',
+      'status':
+          candidate['status'] ??
+              'UNKNOWN',
+    };
 
     Object? lastError;
+    String? jobId;
+
+    // ---------------------------------------------------------
+    // 1. CREATE THE BACKGROUND JOB
+    // ---------------------------------------------------------
 
     for (
       int attempt = 1;
@@ -446,29 +449,45 @@ class _HomePageState extends State<HomePage> {
             attempt;
 
         currentValidationMarket =
-            'Deep validating $market';
+            'Starting deep validation for $market';
 
         networkStatus =
-            'Attempt $attempt/'
-            '$maximumAttempts';
+            'Creating validation job '
+            '(attempt $attempt/$maximumAttempts)...';
       });
 
       try {
-        final result =
+        final created =
             await postJsonOnce(
-          uri,
+          createUri,
           body,
-          timeoutSeconds: 240,
+          timeoutSeconds: 60,
         );
+
+        jobId =
+            created['job_id']
+                ?.toString();
+
+        if (jobId == null ||
+            jobId.isEmpty) {
+          throw const FormatException(
+            'Validation server did not return a job_id',
+          );
+        }
 
         if (mounted) {
           setState(() {
+            currentAttempt = 0;
+            currentValidationMarket =
+                'Deep validating $market';
+
             networkStatus =
-                '$market response received';
+                'Validation job queued. '
+                'Waiting for the server...';
           });
         }
 
-        return result;
+        break;
       } catch (e) {
         lastError = e;
 
@@ -481,33 +500,182 @@ class _HomePageState extends State<HomePage> {
           break;
         }
 
-        final recovered =
-            await waitForBackendRecovery(
+        await waitForBackendRecovery(
           market,
           attempt,
         );
-
-        if (!recovered &&
-            attempt <
-                maximumAttempts) {
-          if (mounted) {
-            setState(() {
-              networkStatus =
-                  'Network still unavailable. '
-                  'Will retry $market.';
-            });
-          }
-        }
       }
     }
+
+    if (jobId == null ||
+        jobId.isEmpty) {
+      throw NetworkValidationException(
+        market: market,
+        message:
+            lastError?.toString() ??
+                'Could not create validation job',
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 2. POLL THE JOB
+    //
+    // Deep validation can take several minutes. Each GET is
+    // short; a temporary network failure does NOT reject the
+    // candidate and does NOT create a second validation job.
+    // ---------------------------------------------------------
+
+    final pollUri = Uri.parse(
+      '$apiBase/deep-validation-job/$jobId',
+    );
+
+    const pollDelay =
+        Duration(seconds: 5);
+
+    const maxPollingTime =
+        Duration(minutes: 12);
+
+    final stopwatch =
+        Stopwatch()..start();
+
+    int consecutiveNetworkErrors = 0;
+
+    while (
+      stopwatch.elapsed <
+          maxPollingTime
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
+        );
+      }
+
+      try {
+        final job =
+            await getJson(
+          pollUri,
+          timeoutSeconds: 45,
+        );
+
+        consecutiveNetworkErrors = 0;
+
+        final status =
+            job['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                'UNKNOWN';
+
+        if (status == 'COMPLETED') {
+          stopwatch.stop();
+
+          final rawResult =
+              job['result'];
+
+          if (rawResult is! Map) {
+            throw const FormatException(
+              'Completed validation job '
+              'did not contain a result',
+            );
+          }
+
+          final result =
+              Map<String, dynamic>.from(
+            rawResult,
+          );
+
+          if (mounted) {
+            setState(() {
+              currentValidationMarket =
+                  '$market validation complete';
+
+              networkStatus =
+                  'Deep validation result received';
+            });
+          }
+
+          return result;
+        }
+
+        if (status == 'FAILED' ||
+            status == 'ERROR') {
+          stopwatch.stop();
+
+          final jobError =
+              job['error']
+                      ?.toString() ??
+                  'Deep validation job failed';
+
+          throw Exception(
+            jobError,
+          );
+        }
+
+        final elapsedSeconds =
+            stopwatch.elapsed.inSeconds;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                '$status • '
+                '${elapsedSeconds}s elapsed • '
+                'checking again in '
+                '${pollDelay.inSeconds}s';
+          });
+        }
+
+        await Future.delayed(
+          pollDelay,
+        );
+      } catch (e) {
+        if (!isNetworkError(e)) {
+          rethrow;
+        }
+
+        consecutiveNetworkErrors++;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                'Connection interrupted while '
+                'checking the job. '
+                'The server job is still running. '
+                'Retrying...';
+          });
+        }
+
+        // Keep the SAME job_id. Never restart the validation
+        // merely because one polling request lost connection.
+        final retryDelay =
+            Duration(
+          seconds:
+              consecutiveNetworkErrors >= 3
+                  ? 15
+                  : 8,
+        );
+
+        await Future.delayed(
+          retryDelay,
+        );
+      }
+    }
+
+    stopwatch.stop();
 
     throw NetworkValidationException(
       market: market,
       message:
-          lastError?.toString() ??
-              'Unknown network failure',
+          'Validation job $jobId did not finish '
+          'within ${maxPollingTime.inMinutes} minutes. '
+          'The job may still be running on the server.',
     );
   }
+
 
   // =========================================================
   // REFRESH LIVE SIGNAL
@@ -1757,7 +1925,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V4.7',
+          'Jasong AI Trader V4.8',
         ),
         actions: [
           IconButton(
@@ -2132,9 +2300,10 @@ class _HomePageState extends State<HomePage> {
                       ),
 
                       const Text(
-                        'The same candidate will be '
-                        'retried if the network drops. '
-                        'A network error will not be '
+                        'Deep validation now runs as a '
+                        'background server job. The app checks '
+                        'the same job until it completes. '
+                        'A temporary network error will not be '
                         'treated as a rejected trade.',
                         textAlign:
                             TextAlign.center,
