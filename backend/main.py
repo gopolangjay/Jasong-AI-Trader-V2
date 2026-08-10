@@ -49,8 +49,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V5.5.2
-# PROGRESSIVE AUTO MANAGER + SINGLE DEEP VALIDATION CYCLE
+# JASONG AI TRADER V5.5.3
+# AUTO DASHBOARD + FORWARD TRADE LIFECYCLE
 # ============================================================
 
 MARKETS = {
@@ -67,8 +67,8 @@ MARKETS = {
 
 
 app = FastAPI(
-    title="Jasong AI Trader V5.5.2 API",
-    version="5.5.2",
+    title="Jasong AI Trader V5.5.3 API",
+    version="5.5.3",
 )
 
 app.add_middleware(
@@ -892,7 +892,7 @@ def root():
 def health():
     return {
         "status": "ok",
-        "version": "5.5.2",
+        "version": "5.5.3",
         "cache_entries":
             len(_DATA_CACHE),
         "yahoo_cooldown_active":
@@ -3051,6 +3051,211 @@ def get_adaptive_ranking(
                 "only after 10 completed forward trades per symbol. "
                 "Deep validation remains mandatory before watching."
             ),
+        "live_execution":
+            False,
+    }
+
+
+
+# ============================================================
+# V5.5.3 AUTO MODE DASHBOARD / TRADE LIFECYCLE
+# ============================================================
+
+@app.get("/auto-dashboard")
+def get_auto_dashboard(
+    starting_balance: float = 10000.0,
+):
+    """One lightweight snapshot for the mobile Auto Mode dashboard."""
+
+    validate_balance(
+        starting_balance
+    )
+
+    manager = (
+        V55_AUTO_MANAGER.status()
+    )
+
+    watchers = (
+        V53_WATCHER_ENGINE.list()
+    )
+
+    forward = (
+        V53_WATCHER_ENGINE.forward_stats(
+            starting_balance=
+                starting_balance
+        )
+    )
+
+    active_statuses = {
+        "WATCHING",
+        "READY",
+        "RISK_BLOCKED",
+        "OPEN",
+    }
+
+    terminal_statuses = {
+        "WIN",
+        "LOSS",
+        "EXPIRED",
+        "INVALIDATED",
+        "SUPERSEDED",
+    }
+
+    active = [
+        item
+        for item in watchers
+        if item.get(
+            "status"
+        )
+        in active_statuses
+    ]
+
+    open_watchers = [
+        item
+        for item in watchers
+        if item.get(
+            "status"
+        )
+        == "OPEN"
+    ]
+
+    watching = [
+        item
+        for item in watchers
+        if item.get(
+            "status"
+        )
+        in {
+            "WATCHING",
+            "READY",
+            "RISK_BLOCKED",
+        }
+    ]
+
+    completed = [
+        item
+        for item in watchers
+        if item.get(
+            "status"
+        )
+        in terminal_statuses
+    ]
+
+    def lifecycle_rank(
+        item: dict,
+    ) -> tuple:
+        status = str(
+            item.get(
+                "status",
+                "",
+            )
+        )
+
+        priority = {
+            "OPEN": 100,
+            "READY": 90,
+            "WATCHING": 80,
+            "RISK_BLOCKED": 70,
+            "WIN": 60,
+            "LOSS": 55,
+            "EXPIRED": 40,
+            "INVALIDATED": 30,
+            "SUPERSEDED": 20,
+        }.get(
+            status,
+            0,
+        )
+
+        timestamp = float(
+            item.get(
+                "created_at",
+                0.0,
+            )
+            or 0.0
+        )
+
+        return (
+            priority,
+            timestamp,
+        )
+
+    lifecycle = sorted(
+        [
+            dict(item)
+            for item in watchers
+        ],
+        key=lifecycle_rank,
+        reverse=True,
+    )
+
+    return {
+        "version":
+            "5.5.3",
+        "auto_mode":
+            bool(
+                manager.get(
+                    "enabled",
+                    False,
+                )
+            ),
+        "manager":
+            manager,
+        "summary": {
+            "active_watchers":
+                len(active),
+            "watching":
+                len(watching),
+            "open_trades":
+                len(open_watchers),
+            "completed_watchers":
+                len(completed),
+            "target_active_watchers":
+                int(
+                    manager.get(
+                        "target_active_watchers",
+                        3,
+                    )
+                    or 3
+                ),
+            "next_scan_at":
+                manager.get(
+                    "next_run_at"
+                ),
+            "last_scan_at":
+                manager.get(
+                    "last_run_at"
+                ),
+            "current_stage":
+                manager.get(
+                    "progress_stage",
+                    "IDLE",
+                ),
+            "current_message":
+                manager.get(
+                    "progress_message",
+                    "Waiting",
+                ),
+            "current_candidate":
+                manager.get(
+                    "progress_candidate"
+                ),
+            "progress_percent":
+                int(
+                    manager.get(
+                        "progress_percent",
+                        0,
+                    )
+                    or 0
+                ),
+        },
+        "forward":
+            forward,
+        "open_positions":
+            open_watchers,
+        "watching_positions":
+            watching,
+        "lifecycle":
+            lifecycle[:20],
         "live_execution":
             False,
     }
