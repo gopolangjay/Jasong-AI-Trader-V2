@@ -1454,7 +1454,7 @@ class _HomePageState extends State<HomePage> {
               '15',
           'target_active_watchers':
               '3',
-          'scan_top_n': '5',
+          'scan_top_n': '9',
         },
       );
 
@@ -1643,21 +1643,29 @@ class _HomePageState extends State<HomePage> {
                 ?.toString() ??
             '-';
 
+    final health =
+        watcher['strategy_health']
+                ?.toString() ??
+            'PROBATION';
+
     if (status == 'OPEN') {
-      return 'Entry ${formatPrice(watcher['entry_price'])} • '
+      return '$health • Entry ${formatPrice(watcher['entry_price'])} • '
           'Exit target ${watcher['target_exit_at_iso'] ?? '-'}';
     }
 
     if (status == 'WIN' ||
         status == 'LOSS') {
-      return 'P&L ${watcher['pnl'] ?? '-'} • '
+      return '$health • P&L ${watcher['pnl'] ?? '-'} • '
           'Entry ${formatPrice(watcher['entry_price'])} → '
           '${formatPrice(watcher['exit_price'])}';
     }
 
-    return watcher['last_reason']
-            ?.toString() ??
-        'Awaiting next lifecycle update';
+    final reason =
+        watcher['last_reason']
+                ?.toString() ??
+            'Awaiting next lifecycle update';
+
+    return '$health • $reason';
   }
 
   // =========================================================
@@ -3154,7 +3162,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V5.5.3',
+          'Jasong AI Trader V5.6',
         ),
         actions: [
           IconButton(
@@ -3533,7 +3541,7 @@ class _HomePageState extends State<HomePage> {
                                     .spaceBetween,
                             children: [
                               const Text(
-                                'V5.5.3 AUTO MODE',
+                                'V5.6 AUTO INTELLIGENCE',
                                 style:
                                     TextStyle(
                                   fontSize: 20,
@@ -3822,7 +3830,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'Auto Mode remains paper-only. VERIFIED setups '
+                            'V5.6 remains paper-only. VERIFIED setups '
                             'still require live confirmation and risk controls '
                             'before an automatic paper entry is opened.',
                             textAlign:
@@ -4403,7 +4411,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.5.3 WATCH PORTFOLIO',
+                            'V5.6 WATCH PORTFOLIO',
                             style:
                                 TextStyle(
                               fontSize: 15,
@@ -4646,7 +4654,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.5.3 keeps multiple VERIFIED candidates under '
+                            'V5.6 keeps multiple VERIFIED candidates under '
                             'observation. A waiting or overextended market does '
                             'not block another candidate from confirming. Paper '
                             'entries still require live confirmation and risk controls.',
