@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class AutomatedTradeManager:
-    """Paper-only automated candidate manager for Jasong AI Trader V5.5.1.
+    """Paper-only automated candidate manager for Jasong AI Trader V5.6.
 
     Stability changes:
       - only ONE heavy auto-manager cycle can run at a time
@@ -52,6 +52,12 @@ class AutomatedTradeManager:
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._job_order: List[str] = []
 
+        # V5.6 rotation memory. A rejected/WATCH candidate receives a
+        # temporary cooldown so the next cycle can move down the ranking
+        # instead of repeatedly deep-validating the same market.
+        self._candidate_cooldowns: Dict[str, float] = {}
+        self._candidate_last_status: Dict[str, str] = {}
+
         self._state = {
             "enabled": False,
             "risk_mode": "Balanced",
@@ -59,7 +65,7 @@ class AutomatedTradeManager:
             "payout": 0.80,
             "scan_interval_minutes": 15,
             "target_active_watchers": 3,
-            "scan_top_n": 5,
+            "scan_top_n": 9,
             "last_run_at": None,
             "next_run_at": None,
             "last_result": None,
@@ -74,6 +80,9 @@ class AutomatedTradeManager:
             "progress_percent": 0,
             "progress_candidate": None,
             "max_deep_validations_per_cycle": 1,
+            "rotation_mode": "V5.6_PROGRESSIVE",
+            "candidate_cooldowns": {},
+            "last_rotated_symbol": None,
         }
 
     # --------------------------------------------------------------
@@ -92,7 +101,7 @@ class AutomatedTradeManager:
 
             self._thread = threading.Thread(
                 target=self._loop,
-                name="jasong-v551-auto-manager-scheduler",
+                name="jasong-v56-auto-manager-scheduler",
                 daemon=True,
             )
 
@@ -105,7 +114,7 @@ class AutomatedTradeManager:
         payout: float,
         scan_interval_minutes: int = 15,
         target_active_watchers: int = 3,
-        scan_top_n: int = 5,
+        scan_top_n: int = 9,
     ) -> dict:
         if scan_interval_minutes < 5:
             raise ValueError(
@@ -532,6 +541,98 @@ class AutomatedTradeManager:
             self._run_lock.release()
 
     # --------------------------------------------------------------
+    # V5.6 progressive candidate rotation
+    # --------------------------------------------------------------
+
+    @staticmethod
+    def _rotation_key(
+        candidate: Dict[str, Any],
+    ) -> str:
+        return (
+            f"{candidate.get('symbol') or ''}:"
+            f"{str(candidate.get('direction') or '').upper()}"
+        )
+
+    def _cooldown_active(
+        self,
+        candidate: Dict[str, Any],
+    ) -> bool:
+        key = self._rotation_key(
+            candidate
+        )
+
+        until = float(
+            self._candidate_cooldowns.get(
+                key,
+                0.0,
+            )
+            or 0.0
+        )
+
+        return time.time() < until
+
+    def _set_candidate_cooldown(
+        self,
+        candidate: Dict[str, Any],
+        status: str,
+    ) -> None:
+        key = self._rotation_key(
+            candidate
+        )
+
+        clean_status = str(
+            status
+            or ""
+        ).upper()
+
+        # Avoid hammering the same expensive deep-validation candidate.
+        # WATCH gets a shorter retry than REJECT/NOT_VERIFIED.
+        if clean_status in {
+            "WATCH",
+            "NEAR_VERIFIED",
+        }:
+            seconds = 30 * 60
+        elif clean_status in {
+            "REJECT",
+            "NOT_VERIFIED",
+            "NO_DATA",
+            "ERROR",
+        }:
+            seconds = 60 * 60
+        else:
+            seconds = 15 * 60
+
+        self._candidate_cooldowns[
+            key
+        ] = (
+            time.time()
+            + seconds
+        )
+
+        self._candidate_last_status[
+            key
+        ] = clean_status
+
+        with self._lock:
+            self._state[
+                "candidate_cooldowns"
+            ] = {
+                item_key: round(
+                    max(
+                        0.0,
+                        until
+                        - time.time(),
+                    )
+                    / 60.0,
+                    1,
+                )
+                for item_key, until
+                in self._candidate_cooldowns.items()
+                if until
+                > time.time()
+            }
+
+    # --------------------------------------------------------------
     # watcher portfolio
     # --------------------------------------------------------------
 
@@ -615,6 +716,10 @@ class AutomatedTradeManager:
             "verified_created":
                 0,
             "skipped_existing":
+                0,
+            "skipped_cooldown":
+                0,
+            "skipped_quarantined":
                 0,
             "candidates":
                 [],
@@ -713,6 +818,25 @@ class AutomatedTradeManager:
                     ] += 1
                     continue
 
+                if bool(
+                    candidate.get(
+                        "strategy_quarantined",
+                        False,
+                    )
+                ):
+                    result[
+                        "skipped_quarantined"
+                    ] += 1
+                    continue
+
+                if self._cooldown_active(
+                    candidate
+                ):
+                    result[
+                        "skipped_cooldown"
+                    ] += 1
+                    continue
+
                 if (
                     candidate.get(
                         "quality_tier"
@@ -796,6 +920,14 @@ class AutomatedTradeManager:
                         candidate.get(
                             "quality_tier"
                         ),
+                    "strategy_health":
+                        candidate.get(
+                            "strategy_health"
+                        ),
+                    "forward_evidence_active":
+                        candidate.get(
+                            "forward_evidence_active"
+                        ),
                     "deep_status":
                         validated.get(
                             "status"
@@ -815,12 +947,26 @@ class AutomatedTradeManager:
                     summary
                 )
 
+                with self._lock:
+                    self._state[
+                        "last_rotated_symbol"
+                    ] = symbol
+
                 if not bool(
                     validated.get(
                         "verified",
                         False,
                     )
                 ):
+                    self._set_candidate_cooldown(
+                        candidate,
+                        str(
+                            validated.get(
+                                "status",
+                                "NOT_VERIFIED",
+                            )
+                        ),
+                    )
                     continue
 
                 validated[
@@ -848,6 +994,25 @@ class AutomatedTradeManager:
                     "forward_symbol_stats"
                 ] = candidate.get(
                     "forward_symbol_stats"
+                )
+
+                validated[
+                    "strategy_health"
+                ] = candidate.get(
+                    "strategy_health"
+                )
+
+                validated[
+                    "strategy_health_reason"
+                ] = candidate.get(
+                    "strategy_health_reason"
+                )
+
+                validated[
+                    "strategy_quarantined"
+                ] = candidate.get(
+                    "strategy_quarantined",
+                    False,
                 )
 
                 self._set_progress(
@@ -907,8 +1072,8 @@ class AutomatedTradeManager:
             self._set_progress(
                 stage="FINALISING",
                 message=(
-                    "Cycle finished. The next scheduled cycle "
-                    "will reconsider the live ranking."
+                    "Cycle finished. V5.6 rotation will continue "
+                    "through the next eligible ranked candidate."
                 ),
                 percent=95,
             )
