@@ -1672,3 +1672,291 @@ def run_deep_validate(
     })
 
     return result
+# ============================================================
+# V4.8 ASYNC DEEP VALIDATION JOBS
+# ============================================================
+
+import uuid
+
+from fastapi import BackgroundTasks
+
+
+_DEEP_VALIDATION_JOBS = {}
+
+_DEEP_JOB_LOCK = threading.Lock()
+
+DEEP_JOB_MAX_AGE_SECONDS = 3600
+
+
+def _clean_old_deep_jobs():
+    now = time.time()
+
+    with _DEEP_JOB_LOCK:
+        old_ids = []
+
+        for job_id, job in _DEEP_VALIDATION_JOBS.items():
+            created_at = job.get(
+                "created_at",
+                now,
+            )
+
+            if (
+                now - created_at
+                > DEEP_JOB_MAX_AGE_SECONDS
+            ):
+                old_ids.append(
+                    job_id
+                )
+
+        for job_id in old_ids:
+            _DEEP_VALIDATION_JOBS.pop(
+                job_id,
+                None,
+            )
+
+
+def _update_deep_job(
+    job_id,
+    **values,
+):
+    with _DEEP_JOB_LOCK:
+        job = _DEEP_VALIDATION_JOBS.get(
+            job_id
+        )
+
+        if job is None:
+            return
+
+        job.update(
+            values
+        )
+
+
+def _run_deep_validation_job(
+    job_id,
+    candidate,
+    risk_mode,
+    starting_balance,
+    payout,
+):
+    """
+    Heavy deep validation runs here AFTER
+    the mobile request has already received
+    the job_id.
+    """
+
+    _update_deep_job(
+        job_id,
+        status="RUNNING",
+        started_at=time.time(),
+    )
+
+    try:
+        result = validate_candidates(
+            candidates=[
+                candidate
+            ],
+
+            optimise_all_timeframes_func=
+                optimise_all_timeframes,
+
+            get_data_func=
+                get_data,
+
+            add_indicators_func=
+                add_indicators,
+
+            train_model_func=
+                train_model,
+
+            enrich_func=
+                enrich,
+
+            profile=
+                PROFILES[
+                    risk_mode
+                ],
+
+            starting_balance=
+                starting_balance,
+
+            payout=
+                payout,
+
+            max_candidates=
+                1,
+        )
+
+        _update_deep_job(
+            job_id,
+            status="COMPLETED",
+            completed_at=time.time(),
+            result=result,
+            error=None,
+        )
+
+    except Exception as exc:
+        _update_deep_job(
+            job_id,
+            status="FAILED",
+            completed_at=time.time(),
+            result=None,
+            error=str(exc),
+        )
+
+
+@app.post("/deep-validation-job")
+def create_deep_validation_job(
+    candidate: dict,
+    background_tasks: BackgroundTasks,
+
+    risk_mode: str =
+        "Balanced",
+
+    starting_balance: float =
+        10000.0,
+
+    payout: float =
+        0.80,
+):
+    validate_risk_mode(
+        risk_mode
+    )
+
+    validate_balance(
+        starting_balance
+    )
+
+    if not candidate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Candidate is required"
+            ),
+        )
+
+    market = candidate.get(
+        "market"
+    )
+
+    symbol = candidate.get(
+        "symbol"
+    )
+
+    if not market or not symbol:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Candidate must contain "
+                "market and symbol"
+            ),
+        )
+
+    _clean_old_deep_jobs()
+
+    job_id = str(
+        uuid.uuid4()
+    )
+
+    with _DEEP_JOB_LOCK:
+        _DEEP_VALIDATION_JOBS[
+            job_id
+        ] = {
+            "job_id":
+                job_id,
+
+            "status":
+                "QUEUED",
+
+            "market":
+                market,
+
+            "symbol":
+                symbol,
+
+            "candidate":
+                candidate,
+
+            "risk_mode":
+                risk_mode,
+
+            "created_at":
+                time.time(),
+
+            "started_at":
+                None,
+
+            "completed_at":
+                None,
+
+            "result":
+                None,
+
+            "error":
+                None,
+        }
+
+    background_tasks.add_task(
+        _run_deep_validation_job,
+        job_id,
+        candidate,
+        risk_mode,
+        starting_balance,
+        payout,
+    )
+
+    return {
+        "job_id":
+            job_id,
+
+        "status":
+            "QUEUED",
+
+        "market":
+            market,
+
+        "symbol":
+            symbol,
+
+        "message":
+            "Deep validation job created",
+
+        "live_execution":
+            False,
+    }
+
+
+@app.get("/deep-validation-job/{job_id}")
+def get_deep_validation_job(
+    job_id: str,
+):
+    with _DEEP_JOB_LOCK:
+        job = _DEEP_VALIDATION_JOBS.get(
+            job_id
+        )
+
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Deep validation job "
+                    "not found"
+                ),
+            )
+
+        response = dict(
+            job
+        )
+
+    # Do not unnecessarily return the
+    # original input object every poll.
+    response.pop(
+        "candidate",
+        None,
+    )
+
+    response[
+        "live_execution"
+    ] = False
+
+    return response
