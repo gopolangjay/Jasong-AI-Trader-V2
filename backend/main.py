@@ -1,5 +1,6 @@
 
 from adaptive_confidence import AdaptiveConfidenceGate
+from v66_intelligence import V66Intelligence
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -2870,6 +2871,100 @@ adaptive_confidence_gate = AdaptiveConfidenceGate(
     absolute_min_confidence=0.35,
 )
 
+
+def _v66_fx_correlation_matrix():
+    """Recent 15-minute FX return correlations for portfolio gating.
+
+    Uses only past/current market data. If a symbol cannot be loaded it is
+    skipped and the portfolio gate falls back to currency-exposure controls.
+    """
+
+    returns = {}
+
+    for market, symbol in MARKETS.items():
+        try:
+            df = get_data(
+                symbol,
+                "5d",
+                "15m",
+            )
+
+            if (
+                df is None
+                or df.empty
+                or "Close" not in df
+            ):
+                continue
+
+            series = (
+                df["Close"]
+                .astype(float)
+                .pct_change()
+                .dropna()
+                .tail(300)
+            )
+
+            if len(series) >= 30:
+                returns[
+                    symbol.upper()
+                ] = series
+
+        except Exception:
+            continue
+
+    symbols = list(
+        returns.keys()
+    )
+
+    matrix = {
+        symbol: {}
+        for symbol in symbols
+    }
+
+    for i, left in enumerate(symbols):
+        for right in symbols[
+            i + 1:
+        ]:
+            aligned = (
+                returns[left]
+                .to_frame("left")
+                .join(
+                    returns[right]
+                    .to_frame("right"),
+                    how="inner",
+                )
+                .dropna()
+            )
+
+            if len(aligned) < 30:
+                continue
+
+            corr = float(
+                aligned["left"]
+                .corr(
+                    aligned["right"]
+                )
+            )
+
+            if corr != corr:
+                continue
+
+            matrix[left][right] = corr
+            matrix[right][left] = corr
+
+    return matrix
+
+
+V66_INTELLIGENCE = V66Intelligence(
+    forward_quarantine_min_trades=8,
+    forward_mature_min_trades=20,
+    forward_min_win_rate=0.56,
+    forward_min_profit_factor=1.00,
+    max_currency_exposure=2,
+    max_highly_correlated_open=1,
+    high_correlation_abs=0.80,
+)
+
 V60_RISK_GATEWAY = RiskGateway(
     max_open_trades=2, max_daily_loss_pct=0.04, max_drawdown_pct=0.10, max_consecutive_losses=3,
     max_assumed_spread_bps=3.0, max_price_age_seconds=180,
@@ -2884,6 +2979,8 @@ V53_WATCHER_ENGINE = TradeWatcherEngine(
     state_store=V61_STATE_STORE,
     adaptive_signal_func=_v63_adaptive_live_signal,
     adaptive_confidence_gate=adaptive_confidence_gate,
+    v66_intelligence=V66_INTELLIGENCE,
+    correlation_func=_v66_fx_correlation_matrix,
 )
 
 V53_WATCHER_ENGINE.start()
@@ -3870,3 +3967,94 @@ def adaptive_confidence_check(payload: dict):
     result["paper_only"] = True
     result["broker_execution_enabled"] = False
     return result
+
+
+# ============================================================
+# V6.6 INTELLIGENT FORWARD ENGINE
+# ============================================================
+
+@app.get("/v66/status")
+def v66_status():
+    return {
+        "engine": V66_INTELLIGENCE.status(),
+        "adaptive_confidence":
+            adaptive_confidence_gate.snapshot(),
+        "live_execution": False,
+    }
+
+
+@app.get("/v66/forward-intelligence")
+def v66_forward_intelligence():
+    watchers = V53_WATCHER_ENGINE.list()
+
+    return V66_INTELLIGENCE.forward_performance(
+        watchers
+    )
+
+
+@app.get("/v66/correlation")
+def v66_correlation():
+    matrix = _v66_fx_correlation_matrix()
+
+    return {
+        "version":
+            "V6.6_FX_CORRELATION",
+        "threshold_abs":
+            V66_INTELLIGENCE.high_correlation_abs,
+        "matrix":
+            matrix,
+        "live_execution":
+            False,
+    }
+
+
+@app.get("/v66/portfolio")
+def v66_portfolio():
+    watchers = V53_WATCHER_ENGINE.list()
+
+    open_watchers = [
+        item
+        for item in watchers
+        if str(
+            item.get("status")
+            or ""
+        ).upper()
+        == "OPEN"
+    ]
+
+    exposure = {}
+
+    for item in open_watchers:
+        signed = (
+            V66_INTELLIGENCE
+            .currency_signed_exposure(
+                item.get("symbol"),
+                item.get("direction"),
+            )
+        )
+
+        for currency, value in signed.items():
+            exposure[
+                currency
+            ] = (
+                exposure.get(
+                    currency,
+                    0,
+                )
+                + value
+            )
+
+    return {
+        "version":
+            "V6.6_PORTFOLIO_INTELLIGENCE",
+        "open_trades":
+            len(open_watchers),
+        "currency_exposure":
+            exposure,
+        "max_currency_exposure":
+            V66_INTELLIGENCE.max_currency_exposure,
+        "high_correlation_abs":
+            V66_INTELLIGENCE.high_correlation_abs,
+        "live_execution":
+            False,
+    }
