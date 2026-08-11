@@ -1,6 +1,7 @@
 
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
+from v68_copilot import COPILOT
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -4211,58 +4212,204 @@ def adaptive_confidence_check(payload: dict):
 # ============================================================
 
 def _v68_copilot_context():
-    watchers = list_watcher_states()
+    """
+    Read-only evidence bundle for the OpenAI copilot.
+    Uses the existing V6.6 watcher engine and adaptive gate.
+    The copilot receives no broker credentials and has no execution tools.
+    """
+
+    # Existing V5.3/V6.x watcher engine is the source of truth.
+    watchers = V53_WATCHER_ENGINE.list()
+
+    # Existing V6.6 forward intelligence summarizes genuine settled trades.
+    v66_forward = (
+        V66_INTELLIGENCE
+        .forward_performance(
+            watchers
+        )
+    )
+
+    # Existing V6.3 adaptive gate persists the currently-qualified buckets.
+    adaptive_confidence_gate.load()
+
     paper_trades = []
+
     for item in watchers:
-        status = str(item.get("status") or "").upper()
-        if item.get("trade_id") or status in {"OPEN", "WIN", "LOSS"}:
-            snapshot = item.get("entry_snapshot") or {}
+        status = str(
+            item.get("status")
+            or ""
+        ).upper()
+
+        if (
+            item.get("trade_id")
+            or status in {
+                "OPEN",
+                "WIN",
+                "LOSS",
+            }
+        ):
+            snapshot = (
+                item.get(
+                    "entry_snapshot"
+                )
+                or {}
+            )
+
             paper_trades.append({
-                "trade_id": item.get("trade_id"),
-                "market": item.get("market"),
-                "direction": item.get("direction"),
-                "status": status,
-                "entry_path": item.get("entry_path"),
-                "entry_confidence": snapshot.get("live_confidence"),
-                "entry_price": item.get("entry_price_effective") or item.get("entry_price"),
-                "exit_price": item.get("exit_price_effective") or item.get("exit_price"),
-                "result": item.get("result"),
-                "pnl": item.get("pnl"),
-                "entry_time_iso": item.get("entry_time_iso"),
-                "closed_at_iso": item.get("closed_at_iso"),
-                "historical_win_rate": item.get("win_rate"),
-                "historical_profit_factor": item.get("profit_factor"),
-                "historical_trades": item.get("trades"),
-                "adaptive_gate": item.get("adaptive_gate"),
+                "trade_id":
+                    item.get("trade_id"),
+                "market":
+                    item.get("market"),
+                "symbol":
+                    item.get("symbol"),
+                "direction":
+                    item.get("direction"),
+                "status":
+                    status,
+                "entry_path":
+                    item.get("entry_path"),
+                "entry_confidence":
+                    snapshot.get(
+                        "live_confidence"
+                    )
+                    or (
+                        item.get(
+                            "last_live_signal"
+                        )
+                        or {}
+                    ).get(
+                        "confidence"
+                    ),
+                "entry_price":
+                    item.get(
+                        "entry_price_effective"
+                    )
+                    or item.get(
+                        "entry_price"
+                    ),
+                "exit_price":
+                    item.get(
+                        "exit_price_effective"
+                    )
+                    or item.get(
+                        "exit_price"
+                    ),
+                "result":
+                    item.get("result"),
+                "pnl":
+                    item.get("pnl"),
+                "entry_time_iso":
+                    item.get(
+                        "entry_time_iso"
+                    ),
+                "closed_at_iso":
+                    item.get(
+                        "closed_at_iso"
+                    ),
+                "historical_win_rate":
+                    item.get(
+                        "win_rate"
+                    ),
+                "historical_profit_factor":
+                    item.get(
+                        "profit_factor"
+                    ),
+                "historical_trades":
+                    item.get(
+                        "trades"
+                    ),
+                "adaptive_gate":
+                    item.get(
+                        "adaptive_gate"
+                    ),
+                "v66_forward_gate":
+                    item.get(
+                        "v66_forward_gate"
+                    ),
+                "v66_portfolio_gate":
+                    item.get(
+                        "v66_portfolio_gate"
+                    ),
             })
+
+    paper_trades.sort(
+        key=lambda row: str(
+            row.get(
+                "entry_time_iso"
+            )
+            or ""
+        ),
+        reverse=True,
+    )
+
+    active_watchers = []
+
+    for item in watchers:
+        status = str(
+            item.get("status")
+            or ""
+        ).upper()
+
+        if status in {
+            "WATCHING",
+            "OPEN",
+            "RISK_BLOCKED",
+        }:
+            active_watchers.append({
+                "market":
+                    item.get("market"),
+                "symbol":
+                    item.get("symbol"),
+                "direction":
+                    item.get("direction"),
+                "status":
+                    status,
+                "entry_path":
+                    item.get("entry_path"),
+                "last_reason":
+                    item.get(
+                        "last_reason"
+                    ),
+                "last_live_signal":
+                    item.get(
+                        "last_live_signal"
+                    ),
+                "adaptive_gate":
+                    item.get(
+                        "adaptive_gate"
+                    ),
+                "v66_timing":
+                    item.get(
+                        "v66_timing"
+                    ),
+            })
+
     return {
         "engine": {
-            "version": "V6.8",
-            "paper_only": True,
-            "broker_execution_enabled": False,
-            "copilot_advisory_only": True,
+            "version":
+                "V6.8.1",
+            "paper_only":
+                True,
+            "broker_execution_enabled":
+                False,
+            "copilot_advisory_only":
+                True,
         },
-        "adaptive_confidence": ADAPTIVE_CONFIDENCE.status(),
-        "forward_summary": summarize_forward_performance(watchers),
-        "v66_forward_intelligence": V66_INTELLIGENCE.forward_performance(watchers),
-        "paper_trades": paper_trades[-50:],
-        "active_watchers": [
-            {
-                "market": item.get("market"),
-                "direction": item.get("direction"),
-                "status": item.get("status"),
-                "last_reason": item.get("last_reason"),
-                "last_live_signal": item.get("last_live_signal"),
-            }
-            for item in watchers
-            if str(item.get("status") or "").upper() in {"WATCHING", "OPEN"}
-        ],
+        "adaptive_confidence":
+            adaptive_confidence_gate.snapshot(),
+        "v66_forward_intelligence":
+            v66_forward,
+        "paper_trades":
+            paper_trades[:50],
+        "active_watchers":
+            active_watchers,
     }
+
 
 @app.get("/v68/status")
 def v68_status():
     return {
-        "version": "V6.8",
+        "version": "V6.8.1",
         "openai_configured": COPILOT.configured(),
         "model": COPILOT.model,
         "copilot_advisory_only": True,
