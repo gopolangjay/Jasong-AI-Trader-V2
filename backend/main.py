@@ -882,7 +882,7 @@ def root():
             "Jasong AI Trader V6.1",
 
         "version":
-            "6.1.0",
+            "6.7.0",
 
         "mode":
             "paper-trading",
@@ -3777,6 +3777,239 @@ def get_auto_dashboard(
         reverse=True,
     )
 
+    # --------------------------------------------------------
+    # V6.7 MOBILE PAPER TRADE JOURNAL
+    # --------------------------------------------------------
+    # Only actual opened/settled PAPER trades are included here.
+    # WATCHING/EXPIRED candidates are intentionally excluded so
+    # the phone clearly separates "candidate" from "trade".
+    now_ts = time.time()
+
+    paper_trade_rows = []
+
+    for item in watchers:
+        status = str(
+            item.get("status")
+            or ""
+        ).upper()
+
+        trade_id = item.get(
+            "trade_id"
+        )
+
+        if (
+            not trade_id
+            and status
+            not in {
+                "OPEN",
+                "WIN",
+                "LOSS",
+            }
+        ):
+            continue
+
+        snapshot = (
+            item.get(
+                "entry_snapshot"
+            )
+            or {}
+        )
+
+        entry_confidence = (
+            snapshot.get(
+                "live_confidence"
+            )
+        )
+
+        if entry_confidence is None:
+            entry_confidence = (
+                (
+                    item.get(
+                        "last_live_signal"
+                    )
+                    or {}
+                ).get(
+                    "confidence"
+                )
+            )
+
+        due_at = (
+            item.get(
+                "settlement_due_at"
+            )
+            or item.get(
+                "target_exit_at"
+            )
+        )
+
+        remaining_minutes = None
+
+        if (
+            status == "OPEN"
+            and due_at is not None
+        ):
+            try:
+                remaining_minutes = max(
+                    0.0,
+                    (
+                        float(
+                            due_at
+                        )
+                        - now_ts
+                    )
+                    / 60.0,
+                )
+            except Exception:
+                remaining_minutes = None
+
+        paper_trade_rows.append({
+            "trade_id":
+                trade_id,
+            "watcher_id":
+                item.get(
+                    "watcher_id"
+                ),
+            "market":
+                item.get(
+                    "market"
+                ),
+            "symbol":
+                item.get(
+                    "symbol"
+                ),
+            "direction":
+                item.get(
+                    "direction"
+                ),
+            "status":
+                status,
+            "entry_path":
+                item.get(
+                    "entry_path"
+                ),
+            "entry_confidence":
+                entry_confidence,
+            "entry_price":
+                (
+                    item.get(
+                        "entry_price_effective"
+                    )
+                    or item.get(
+                        "entry_price"
+                    )
+                ),
+            "entry_time":
+                item.get(
+                    "entry_time"
+                ),
+            "entry_time_iso":
+                item.get(
+                    "entry_time_iso"
+                ),
+            "settlement_due_at":
+                due_at,
+            "target_exit_at_iso":
+                item.get(
+                    "target_exit_at_iso"
+                ),
+            "remaining_minutes":
+                (
+                    round(
+                        remaining_minutes,
+                        1,
+                    )
+                    if remaining_minutes
+                    is not None
+                    else None
+                ),
+            "exit_price":
+                (
+                    item.get(
+                        "exit_price_effective"
+                    )
+                    or item.get(
+                        "exit_price"
+                    )
+                ),
+            "closed_at":
+                item.get(
+                    "closed_at"
+                ),
+            "closed_at_iso":
+                item.get(
+                    "closed_at_iso"
+                ),
+            "result":
+                item.get(
+                    "result"
+                ),
+            "pnl":
+                item.get(
+                    "pnl"
+                ),
+            "stake":
+                snapshot.get(
+                    "stake"
+                ),
+            "payout":
+                item.get(
+                    "payout"
+                ),
+            "historical_win_rate":
+                snapshot.get(
+                    "historical_win_rate"
+                ),
+            "historical_trades":
+                snapshot.get(
+                    "historical_trades"
+                ),
+            "historical_profit_factor":
+                snapshot.get(
+                    "historical_profit_factor"
+                ),
+            "live_ai_up":
+                snapshot.get(
+                    "live_ai_up"
+                ),
+            "live_rsi":
+                snapshot.get(
+                    "live_rsi"
+                ),
+            "adaptive_gate":
+                item.get(
+                    "adaptive_gate"
+                ),
+            "v66_forward_gate":
+                item.get(
+                    "v66_forward_gate"
+                ),
+            "v66_portfolio_gate":
+                item.get(
+                    "v66_portfolio_gate"
+                ),
+            "forward_protocol":
+                item.get(
+                    "forward_protocol"
+                ),
+        })
+
+    paper_trade_rows.sort(
+        key=lambda row: float(
+            row.get(
+                "entry_time"
+            )
+            or 0.0
+        ),
+        reverse=True,
+    )
+
+    v66_forward = (
+        V66_INTELLIGENCE
+        .forward_performance(
+            watchers
+        )
+    )
+
     return {
         "version":
             "6.1.0",
@@ -3839,6 +4072,10 @@ def get_auto_dashboard(
         },
         "forward":
             forward,
+        "paper_trades":
+            paper_trade_rows[:50],
+        "v66_forward_intelligence":
+            v66_forward,
         "strategy_health": [
             {
                 "market": item.get("market"),
