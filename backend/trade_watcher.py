@@ -43,6 +43,8 @@ class TradeWatcherEngine:
         state_store=None,
         adaptive_signal_func=None,
         adaptive_confidence_gate=None,
+        v66_intelligence=None,
+        correlation_func=None,
     ):
         self.session_factory = session_factory
         self.Trade = trade_model
@@ -54,6 +56,8 @@ class TradeWatcherEngine:
         self.state_store = state_store
         self.adaptive_signal_func = adaptive_signal_func
         self.adaptive_confidence_gate = adaptive_confidence_gate
+        self.v66_intelligence = v66_intelligence
+        self.correlation_func = correlation_func
 
         self._watchers: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -528,9 +532,12 @@ class TradeWatcherEngine:
         holding_candles = max(1, int(candidate.get("holding_candles") or 1))
         now = time.time()
 
-        # Keep an unentered verified setup alive for four validation candles.
-        # If it does not confirm by then, it must be revalidated.
-        watch_lifetime_minutes = max(interval_minutes * 4, 30)
+        # V6.6 smarter verified-watcher lifetime:
+        # no unentered setup is kept alive for more than 60 minutes.
+        watch_lifetime_minutes = min(
+            max(interval_minutes * 2, 30),
+            60,
+        )
 
         watcher_id = str(uuid.uuid4())
         watcher = {
@@ -589,7 +596,7 @@ class TradeWatcherEngine:
             "explanation": candidate.get("explanation"),
             # V5.7 genuine forward audit fields. These are populated only
             # when a live-confirmed forward trade actually opens.
-            "forward_protocol": "V6.1_GENUINE_FORWARD",
+            "forward_protocol": "V6.6_INTELLIGENT_FORWARD",
             "entry_snapshot": None,
             "entry_snapshot_hash": None,
             "entry_price_effective": None,
@@ -598,6 +605,10 @@ class TradeWatcherEngine:
             "slippage_bps": DEFAULT_SLIPPAGE_BPS,
             "settlement_guard_passed": None,
             "settlement_due_at": None,
+            "v66_forward_gate": None,
+            "v66_portfolio_gate": None,
+            "v66_timing": None,
+            "v66_protocol": "V6.6_INTELLIGENT_FORWARD",
         }
 
         with self._lock:
@@ -840,11 +851,50 @@ class TradeWatcherEngine:
         )
 
         now = time.time()
-        next_check = (
-            now
-            + watcher["interval_minutes"]
-            * 60
-        )
+
+        if self.v66_intelligence is not None:
+            timing = self.v66_intelligence.watcher_timing(
+                watcher=watcher,
+                confidence=confidence,
+                adaptive_gate=adaptive_gate_result,
+                ai_up=ai_up,
+                rsi=rsi,
+                now=now,
+            )
+
+            next_check = float(
+                timing["next_check_at"]
+            )
+
+            if timing.get("expire_now"):
+                with self._lock:
+                    current = self._watchers.get(
+                        watcher_id
+                    )
+
+                    if current:
+                        current["status"] = "EXPIRED"
+                        current["last_checked_at"] = now
+                        current["v66_timing"] = timing
+                        current["last_reason"] = (
+                            "V6.6 smart expiry: "
+                            + str(
+                                timing.get(
+                                    "reason"
+                                )
+                            )
+                        )
+
+                self._persist_state()
+                return
+
+        else:
+            timing = None
+            next_check = (
+                now
+                + watcher["interval_minutes"]
+                * 60
+            )
 
         if not confirmed:
             reason_bits = []
@@ -891,6 +941,7 @@ class TradeWatcherEngine:
                     watcher["last_checked_at"] = now
                     watcher["next_check_at"] = next_check
                     watcher["adaptive_gate"] = adaptive_gate_result
+                    watcher["v66_timing"] = timing
                     watcher["entry_path"] = None
                     watcher["last_reason"] = (
                         "; ".join(reason_bits)
@@ -902,6 +953,105 @@ class TradeWatcherEngine:
 
         db = self.session_factory()
         try:
+            # ----------------------------------------------------------
+            # V6.6 FORWARD PERFORMANCE TRUST GATE
+            # ----------------------------------------------------------
+            forward_gate = {
+                "allowed": True,
+                "status": "DISABLED",
+                "reason": "V6.6 intelligence not configured.",
+            }
+
+            portfolio_gate = {
+                "allowed": True,
+                "blocks": [],
+            }
+
+            if self.v66_intelligence is not None:
+                with self._lock:
+                    watcher_snapshot = [
+                        dict(item)
+                        for item in self._watchers.values()
+                    ]
+
+                forward_gate = (
+                    self.v66_intelligence.forward_gate(
+                        watchers=watcher_snapshot,
+                        market=market,
+                        direction=direction,
+                        confidence=confidence,
+                        entry_path=entry_path,
+                    )
+                )
+
+                if not forward_gate.get("allowed"):
+                    with self._lock:
+                        current = self._watchers.get(
+                            watcher_id
+                        )
+
+                        if current:
+                            current["status"] = "RISK_BLOCKED"
+                            current["last_checked_at"] = now
+                            current["next_check_at"] = next_check
+                            current["v66_forward_gate"] = forward_gate
+                            current["last_reason"] = (
+                                "V6.6 forward-performance quarantine: "
+                                + str(
+                                    forward_gate.get(
+                                        "reason"
+                                    )
+                                )
+                            )
+
+                    self._persist_state()
+                    return
+
+                correlations = {}
+
+                if self.correlation_func is not None:
+                    try:
+                        correlations = (
+                            self.correlation_func()
+                            or {}
+                        )
+                    except Exception:
+                        correlations = {}
+
+                portfolio_gate = (
+                    self.v66_intelligence.portfolio_gate(
+                        open_watchers=watcher_snapshot,
+                        candidate_symbol=watcher["symbol"],
+                        candidate_direction=direction,
+                        correlations=correlations,
+                    )
+                )
+
+                if not portfolio_gate.get("allowed"):
+                    with self._lock:
+                        current = self._watchers.get(
+                            watcher_id
+                        )
+
+                        if current:
+                            current["status"] = "RISK_BLOCKED"
+                            current["last_checked_at"] = now
+                            current["next_check_at"] = next_check
+                            current["v66_forward_gate"] = forward_gate
+                            current["v66_portfolio_gate"] = portfolio_gate
+                            current["last_reason"] = (
+                                "V6.6 portfolio/correlation block: "
+                                + "; ".join(
+                                    portfolio_gate.get(
+                                        "blocks"
+                                    )
+                                    or []
+                                )
+                            )
+
+                    self._persist_state()
+                    return
+
             risk = self._risk_decision(db, watcher, live)
             with self._lock:
                 watcher = self._watchers.get(watcher_id)
@@ -909,6 +1059,9 @@ class TradeWatcherEngine:
                     watcher["last_live_signal"] = live
                     watcher["last_checked_at"] = now
                     watcher["risk_decision"] = risk
+                    watcher["v66_forward_gate"] = forward_gate
+                    watcher["v66_portfolio_gate"] = portfolio_gate
+                    watcher["v66_timing"] = timing
 
             if not risk["allowed"]:
                 with self._lock:
@@ -949,7 +1102,7 @@ class TradeWatcherEngine:
                         stake=risk["stake"], idempotency_key=f"{watcher_id}:{int(now)}:{direction}",
                         metadata={
                             "watcher_id": watcher_id,
-                            "forward_protocol": "V6.3.1_ADAPTIVE_GENUINE_FORWARD",
+                            "forward_protocol": "V6.6_INTELLIGENT_FORWARD",
                             "snapshot_hash": frozen["snapshot_hash"],
                             "entry_path": entry_path,
                             "adaptive_gate": adaptive_gate_result,
@@ -989,7 +1142,7 @@ class TradeWatcherEngine:
                     watcher["entry_path"] = entry_path
                     watcher["adaptive_gate"] = adaptive_gate_result
                     watcher["last_reason"] = (
-                        "V6.3.1 "
+                        "V6.6 "
                         + (
                             "adaptive-qualified"
                             if entry_path == "ADAPTIVE_QUALIFIED"
@@ -1103,7 +1256,7 @@ class TradeWatcherEngine:
                     watcher["pnl"] = round(pnl, 2)
                     watcher["settlement_guard_passed"] = True
                     watcher["last_reason"] = (
-                        "V6.1 genuine forward trade resolved only after the "
+                        "V6.6 genuine forward trade resolved only after the "
                         "pre-committed holding horizon using adverse execution "
                         "assumptions."
                     )
