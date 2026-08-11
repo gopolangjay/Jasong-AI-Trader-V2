@@ -1,3 +1,4 @@
+
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -883,7 +884,7 @@ def root():
             "Jasong AI Trader V6.1",
 
         "version":
-            "6.7.0",
+            "6.9.0",
 
         "mode":
             "paper-trading",
@@ -4205,6 +4206,661 @@ def adaptive_confidence_check(payload: dict):
     result["paper_only"] = True
     result["broker_execution_enabled"] = False
     return result
+
+
+
+# ============================================================
+# V6.9 SYSTEM HEALTH & OPERATIONS DASHBOARD
+# ============================================================
+
+def _v69_system_overview():
+    """
+    Read-only operational health snapshot.
+
+    This endpoint does not modify trading decisions or execution state.
+    It is designed to answer:
+      - Is Jasong AI alive?
+      - Is Auto Manager running?
+      - How far is the current search?
+      - Is calibration fresh?
+      - Are market data and OpenAI available?
+      - Are there current watchers/trades/errors?
+    """
+
+    now = time.time()
+
+    manager = V55_AUTO_MANAGER.status()
+    watchers = V53_WATCHER_ENGINE.list()
+
+    adaptive_confidence_gate.load()
+    adaptive = adaptive_confidence_gate.snapshot()
+
+    cache = cache_stats()
+
+    active_statuses = {
+        "WATCHING",
+        "READY",
+        "RISK_BLOCKED",
+        "OPEN",
+    }
+
+    active_watchers = [
+        item
+        for item in watchers
+        if str(
+            item.get("status")
+            or ""
+        ).upper()
+        in active_statuses
+    ]
+
+    watching = [
+        item
+        for item in watchers
+        if str(
+            item.get("status")
+            or ""
+        ).upper()
+        in {
+            "WATCHING",
+            "READY",
+            "RISK_BLOCKED",
+        }
+    ]
+
+    open_trades = [
+        item
+        for item in watchers
+        if str(
+            item.get("status")
+            or ""
+        ).upper()
+        == "OPEN"
+    ]
+
+    settled = [
+        item
+        for item in watchers
+        if str(
+            item.get("status")
+            or ""
+        ).upper()
+        in {
+            "WIN",
+            "LOSS",
+        }
+    ]
+
+    wins = sum(
+        1
+        for item in settled
+        if str(
+            item.get("status")
+            or item.get("result")
+            or ""
+        ).upper()
+        == "WIN"
+    )
+
+    losses = len(settled) - wins
+
+    settled_wr = (
+        wins / len(settled)
+        if settled
+        else 0.0
+    )
+
+    total_pnl = sum(
+        float(
+            item.get("pnl")
+            or 0.0
+        )
+        for item in settled
+    )
+
+    manager_enabled = bool(
+        manager.get(
+            "enabled",
+            False,
+        )
+    )
+
+    run_in_progress = bool(
+        manager.get(
+            "run_in_progress",
+            False,
+        )
+    )
+
+    scan_interval_minutes = int(
+        manager.get(
+            "scan_interval_minutes",
+            15,
+        )
+        or 15
+    )
+
+    next_run_at = manager.get(
+        "next_run_at"
+    )
+
+    last_run_at = manager.get(
+        "last_run_at"
+    )
+
+    next_scan_seconds = None
+
+    if next_run_at is not None:
+        try:
+            next_scan_seconds = round(
+                float(next_run_at)
+                - now,
+                1,
+            )
+        except Exception:
+            next_scan_seconds = None
+
+    last_scan_age_seconds = None
+
+    if last_run_at is not None:
+        try:
+            last_scan_age_seconds = max(
+                0.0,
+                round(
+                    now
+                    - float(last_run_at),
+                    1,
+                ),
+            )
+        except Exception:
+            last_scan_age_seconds = None
+
+    scheduler_overdue = False
+
+    if (
+        manager_enabled
+        and not run_in_progress
+        and next_scan_seconds is not None
+        and next_scan_seconds
+        < -300.0
+    ):
+        scheduler_overdue = True
+
+    progress_stage = str(
+        manager.get(
+            "progress_stage",
+            "IDLE",
+        )
+        or "IDLE"
+    ).upper()
+
+    progress_percent = int(
+        manager.get(
+            "progress_percent",
+            0,
+        )
+        or 0
+    )
+
+    progress_candidate = manager.get(
+        "progress_candidate"
+    )
+
+    last_error = (
+        manager.get(
+            "last_error"
+        )
+    )
+
+    yahoo_cooldown = bool(
+        cache.get(
+            "yahoo_cooldown_active",
+            False,
+        )
+    )
+
+    calibration_fresh = not bool(
+        adaptive.get(
+            "stale",
+            True,
+        )
+    )
+
+    copilot_connected = bool(
+        COPILOT.configured()
+    )
+
+    issues = []
+
+    if last_error:
+        issues.append({
+            "severity": "RED",
+            "component": "AUTO_MANAGER",
+            "message": str(last_error),
+        })
+
+    if scheduler_overdue:
+        issues.append({
+            "severity": "RED",
+            "component": "SCHEDULER",
+            "message": (
+                "Auto Manager is enabled but the scheduled cycle is overdue."
+            ),
+        })
+
+    if not calibration_fresh:
+        issues.append({
+            "severity": "AMBER",
+            "component": "CALIBRATION",
+            "message": (
+                "Adaptive confidence calibration is stale or missing."
+            ),
+        })
+
+    if yahoo_cooldown:
+        issues.append({
+            "severity": "AMBER",
+            "component": "MARKET_DATA",
+            "message": (
+                "Yahoo market-data cooldown is active."
+            ),
+        })
+
+    if not copilot_connected:
+        issues.append({
+            "severity": "AMBER",
+            "component": "OPENAI_COPILOT",
+            "message": (
+                "OpenAI copilot is not configured."
+            ),
+        })
+
+    if any(
+        issue["severity"] == "RED"
+        for issue in issues
+    ):
+        overall = "RED"
+        overall_label = "SYSTEM ERROR"
+
+    elif issues:
+        overall = "AMBER"
+        overall_label = "RUNNING - ATTENTION"
+
+    elif manager_enabled:
+        overall = "GREEN"
+        overall_label = "SYSTEM HEALTHY"
+
+    else:
+        overall = "GREY"
+        overall_label = "SYSTEM ONLINE - AUTO MODE IDLE"
+
+    if run_in_progress:
+        activity = (
+            f"{progress_stage}"
+            + (
+                f" • {progress_candidate}"
+                if progress_candidate
+                else ""
+            )
+            + f" • {progress_percent}%"
+        )
+
+    elif manager_enabled:
+        activity = "Waiting for next automatic cycle"
+
+    else:
+        activity = "Auto Manager is disabled"
+
+    return {
+        "version": "V6.9",
+        "generated_at": now,
+        "overall": {
+            "status": overall,
+            "label": overall_label,
+            "issues_count": len(issues),
+        },
+        "backend": {
+            "status": "ONLINE",
+            "healthy": True,
+            "live_execution": False,
+        },
+        "auto_manager": {
+            "enabled": manager_enabled,
+            "status": (
+                "RUNNING"
+                if run_in_progress
+                else (
+                    "ENABLED"
+                    if manager_enabled
+                    else "IDLE"
+                )
+            ),
+            "runs": int(
+                manager.get(
+                    "runs",
+                    0,
+                )
+                or 0
+            ),
+            "scan_interval_minutes": scan_interval_minutes,
+            "last_run_at": last_run_at,
+            "last_scan_age_seconds": last_scan_age_seconds,
+            "next_run_at": next_run_at,
+            "next_scan_seconds": next_scan_seconds,
+            "scheduler_overdue": scheduler_overdue,
+            "last_error": last_error,
+        },
+        "search": {
+            "run_in_progress": run_in_progress,
+            "stage": progress_stage,
+            "message": manager.get(
+                "progress_message",
+                "Waiting for next cycle",
+            ),
+            "percent": progress_percent,
+            "candidate": progress_candidate,
+            "active_job_id": manager.get(
+                "active_job_id"
+            ),
+            "queued_or_running_jobs": int(
+                manager.get(
+                    "queued_or_running_jobs",
+                    0,
+                )
+                or 0
+            ),
+            "activity": activity,
+        },
+        "watchers": {
+            "active": len(active_watchers),
+            "watching": len(watching),
+            "target": int(
+                manager.get(
+                    "target_active_watchers",
+                    3,
+                )
+                or 3
+            ),
+            "open_trades": len(open_trades),
+            "total_records": len(watchers),
+        },
+        "forward_performance": {
+            "settled_trades": len(settled),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(
+                settled_wr,
+                6,
+            ),
+            "win_rate_pct": round(
+                settled_wr * 100.0,
+                2,
+            ),
+            "total_pnl": round(
+                total_pnl,
+                2,
+            ),
+        },
+        "calibration": {
+            "status": (
+                "FRESH"
+                if calibration_fresh
+                else "STALE"
+            ),
+            "fresh": calibration_fresh,
+            "qualified_count": int(
+                adaptive.get(
+                    "qualified_count",
+                    0,
+                )
+                or 0
+            ),
+            "source_job_id": adaptive.get(
+                "source_job_id"
+            ),
+            "updated_at": adaptive.get(
+                "updated_at"
+            ),
+        },
+        "market_data": {
+            "status": (
+                "DEGRADED"
+                if yahoo_cooldown
+                else "HEALTHY"
+            ),
+            "yahoo_cooldown_active": yahoo_cooldown,
+            "yahoo_cooldown_remaining": cache.get(
+                "yahoo_cooldown_remaining",
+                0.0,
+            ),
+            "cache_entries": cache.get(
+                "entries",
+                0,
+            ),
+        },
+        "copilot": {
+            "status": (
+                "CONNECTED"
+                if copilot_connected
+                else "DISCONNECTED"
+            ),
+            "configured": copilot_connected,
+            "model": COPILOT.model,
+            "advisory_only": True,
+        },
+        "issues": issues,
+        "paper_only": True,
+        "broker_execution_enabled": False,
+    }
+
+
+@app.get("/v69/system-overview")
+def v69_system_overview():
+    return _v69_system_overview()
+
+
+@app.get("/v69/diagnostic")
+def v69_system_diagnostic():
+    """
+    Performs a read-only diagnostic including one lightweight market-data probe.
+    No trade is created or modified.
+    """
+
+    checks = []
+
+    overview = _v69_system_overview()
+
+    checks.append({
+        "component": "BACKEND",
+        "passed": True,
+        "message": "Backend endpoint is responding.",
+    })
+
+    checks.append({
+        "component": "AUTO_MANAGER",
+        "passed": not bool(
+            overview[
+                "auto_manager"
+            ][
+                "scheduler_overdue"
+            ]
+        )
+        and not bool(
+            overview[
+                "auto_manager"
+            ][
+                "last_error"
+            ]
+        ),
+        "message": (
+            "Auto Manager scheduler is responsive."
+            if (
+                not overview[
+                    "auto_manager"
+                ][
+                    "scheduler_overdue"
+                ]
+                and not overview[
+                    "auto_manager"
+                ][
+                    "last_error"
+                ]
+            )
+            else "Auto Manager needs attention."
+        ),
+    })
+
+    checks.append({
+        "component": "CALIBRATION",
+        "passed": bool(
+            overview[
+                "calibration"
+            ][
+                "fresh"
+            ]
+        ),
+        "message": (
+            "Adaptive calibration is fresh."
+            if overview[
+                "calibration"
+            ][
+                "fresh"
+            ]
+            else "Adaptive calibration is stale or missing."
+        ),
+    })
+
+    checks.append({
+        "component": "OPENAI_COPILOT",
+        "passed": bool(
+            COPILOT.configured()
+        ),
+        "message": (
+            "OpenAI copilot is configured."
+            if COPILOT.configured()
+            else "OpenAI copilot is not configured."
+        ),
+    })
+
+    market_probe = {
+        "passed": False,
+        "rows": 0,
+        "latest_price": None,
+        "error": None,
+    }
+
+    try:
+        probe = get_data(
+            "EURUSD=X",
+            "5d",
+            "15m",
+        )
+
+        market_probe[
+            "rows"
+        ] = int(
+            len(probe)
+        )
+
+        market_probe[
+            "latest_price"
+        ] = float(
+            probe[
+                "Close"
+            ].iloc[
+                -1
+            ]
+        )
+
+        market_probe[
+            "passed"
+        ] = bool(
+            len(probe) >= 80
+        )
+
+    except Exception as exc:
+        market_probe[
+            "error"
+        ] = str(exc)
+
+    checks.append({
+        "component": "MARKET_DATA",
+        "passed": bool(
+            market_probe[
+                "passed"
+            ]
+        ),
+        "message": (
+            "EURUSD 15m market-data probe passed."
+            if market_probe[
+                "passed"
+            ]
+            else (
+                "Market-data probe failed: "
+                + str(
+                    market_probe[
+                        "error"
+                    ]
+                    or "insufficient rows"
+                )
+            )
+        ),
+        "details": market_probe,
+    })
+
+    failed = [
+        item
+        for item in checks
+        if not bool(
+            item.get(
+                "passed"
+            )
+        )
+    ]
+
+    red_components = {
+        "BACKEND",
+        "AUTO_MANAGER",
+        "MARKET_DATA",
+    }
+
+    critical_failed = any(
+        item[
+            "component"
+        ]
+        in red_components
+        for item in failed
+    )
+
+    if critical_failed:
+        status = "RED"
+        label = "SYSTEM DIAGNOSTIC FAILED"
+
+    elif failed:
+        status = "AMBER"
+        label = "SYSTEM RUNNING WITH WARNINGS"
+
+    else:
+        status = "GREEN"
+        label = "SYSTEM CHECK PASSED"
+
+    return {
+        "version": "V6.9",
+        "status": status,
+        "label": label,
+        "passed_checks": len(
+            checks
+        )
+        - len(
+            failed
+        ),
+        "total_checks": len(
+            checks
+        ),
+        "checks": checks,
+        "paper_only": True,
+        "broker_execution_enabled": False,
+    }
 
 
 # ============================================================
