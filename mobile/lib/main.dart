@@ -77,6 +77,10 @@ class _HomePageState extends State<HomePage> {
 
   List<Map<String, dynamic>> paperTrades = [];
 
+  final TextEditingController copilotController = TextEditingController();
+  bool copilotBusy = false;
+  String copilotAnswer = '';
+
   Map<String, dynamic>? autoDashboard;
   Map<String, dynamic>? autoManagerJob;
 
@@ -1357,6 +1361,56 @@ class _HomePageState extends State<HomePage> {
   // =========================================================
   // V5.5.3 AUTO MANAGER / FORWARD LIFECYCLE
   // =========================================================
+
+  Future<void> askJasongCopilot({
+    String? presetQuestion,
+    String mode = 'GENERAL',
+  }) async {
+    final question = (presetQuestion ?? copilotController.text).trim();
+    if (question.isEmpty) return;
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await postJson('/v68/ask', {
+        'question': question,
+        'mode': mode,
+      });
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
+
+  Future<void> runOvernightReview() async {
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await getJson('/v68/overnight-review');
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No overnight analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
 
   Future<void> loadAutoDashboard() async {
     try {
@@ -4773,6 +4827,120 @@ class _HomePageState extends State<HomePage> {
                 },
               ),
             ],
+
+            // =================================================
+            // V6.8 JASONG AI INTELLIGENCE COPILOT
+            // =================================================
+
+            const SizedBox(height: 18),
+
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.psychology_alt, size: 30),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'V6.8 JASONG AI COPILOT',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Ask about actual PAPER trades, losses, confidence buckets, '
+                      'watchers and forward performance. Advisory only — the copilot '
+                      'cannot execute trades.',
+                      style: TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: copilotController,
+                      minLines: 2,
+                      maxLines: 5,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Ask Jasong AI',
+                        hintText: 'Why did we lose the last trade?',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed: copilotBusy ? null : () => askJasongCopilot(),
+                      icon: const Icon(Icons.send),
+                      label: Text(copilotBusy ? 'Analysing...' : 'Ask Jasong AI'),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: copilotBusy ? null : runOvernightReview,
+                      icon: const Icon(Icons.nights_stay),
+                      label: const Text('Analyse Overnight Trades'),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ActionChip(
+                          label: const Text('Analyse losses'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Analyse our settled PAPER losses. What patterns repeat '
+                                'and what should we test next? Treat small samples cautiously.',
+                            mode: 'LOSS_ANALYSIS',
+                          ),
+                        ),
+                        ActionChip(
+                          label: const Text('Historical vs forward'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Compare historical calibration with genuine forward PAPER '
+                                'performance. Which edges are holding up or deteriorating?',
+                            mode: 'FORWARD_COMPARISON',
+                          ),
+                        ),
+                        ActionChip(
+                          label: const Text('Why no trade?'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Explain why current active watchers have or have not '
+                                'opened PAPER trades.',
+                            mode: 'WATCHER_EXPLANATION',
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (copilotBusy) ...[
+                      const SizedBox(height: 14),
+                      const LinearProgressIndicator(),
+                    ],
+                    if (copilotAnswer.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: Colors.white10,
+                        ),
+                        child: SelectableText(
+                          copilotAnswer,
+                          style: const TextStyle(height: 1.45),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
 
             // =================================================
             // V6.7 LIVE PAPER TRADE LAB
