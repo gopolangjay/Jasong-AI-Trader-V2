@@ -1,4 +1,3 @@
-
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -12,6 +11,7 @@ import yfinance as yf
 
 from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from deep_validator import validate_candidates
@@ -4406,6 +4406,11 @@ def _v68_copilot_context():
     }
 
 
+class V68CopilotRequest(BaseModel):
+    question: str
+    mode: str = "GENERAL"
+
+
 @app.get("/v68/status")
 def v68_status():
     return {
@@ -4425,32 +4430,65 @@ def v68_status():
         ],
     }
 
+
 @app.post("/v68/ask")
 def v68_ask(request: V68CopilotRequest):
     question = (request.question or "").strip()
+
     if not question:
-        raise HTTPException(status_code=400, detail="question is required")
+        raise HTTPException(
+            status_code=400,
+            detail="question is required",
+        )
+
     if not COPILOT.configured():
-        raise HTTPException(status_code=503, detail="OpenAI is not configured on the backend.")
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI is not configured on the backend.",
+        )
+
     try:
-        return COPILOT.analyze(question, _v68_copilot_context(), request.mode)
+        return COPILOT.analyze(
+            question=question,
+            context=_v68_copilot_context(),
+            mode=request.mode,
+        )
+
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
 
 @app.get("/v68/overnight-review")
 def v68_overnight_review():
     if not COPILOT.configured():
-        raise HTTPException(status_code=503, detail="OpenAI is not configured on the backend.")
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI is not configured on the backend.",
+        )
+
     question = (
-        "Review the genuine PAPER trading performance in this evidence for the most recent "
-        "overnight session. Separate settled trades from open/watch-only setups. Include wins, "
-        "losses, WR, PF and P&L where supported. Identify repeated loss patterns and say whether "
-        "the sample is large enough to justify changing the strategy."
+        "Review the genuine PAPER trading performance in this evidence "
+        "for the most recent overnight session. Separate settled trades "
+        "from open/watch-only setups. Include wins, losses, WR, PF and "
+        "P&L where supported. Identify repeated loss patterns and say "
+        "whether the sample is large enough to justify changing the strategy."
     )
+
     try:
-        return COPILOT.analyze(question, _v68_copilot_context(), "OVERNIGHT_REVIEW")
+        return COPILOT.analyze(
+            question=question,
+            context=_v68_copilot_context(),
+            mode="OVERNIGHT_REVIEW",
+        )
+
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
 
 
 # ============================================================
