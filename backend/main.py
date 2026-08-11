@@ -1,3 +1,5 @@
+
+from adaptive_confidence import AdaptiveConfidenceGate
 import threading
 import time
 from dataclasses import dataclass
@@ -3730,3 +3732,79 @@ def persistent_state_status():
         "meta": snapshot.get("_meta", {}),
         "live_execution": False,
     }
+
+# -----------------------------------------------------------------------------
+# V6.3 ADAPTIVE CONFIDENCE GATE -- PAPER ONLY
+# -----------------------------------------------------------------------------
+adaptive_confidence_gate = AdaptiveConfidenceGate(
+    target_win_rate=0.65,
+    min_profit_factor=1.50,
+    min_trades=20,
+    max_age_hours=24.0,
+    absolute_min_confidence=0.35,
+)
+
+
+
+# -----------------------------------------------------------------------------
+# V6.3 ADAPTIVE CONFIDENCE API -- PAPER ONLY
+# -----------------------------------------------------------------------------
+
+@app.get("/adaptive-confidence/status")
+def adaptive_confidence_status():
+    """Show currently qualified market/direction/confidence buckets."""
+    return adaptive_confidence_gate.snapshot()
+
+
+@app.post("/adaptive-confidence/load")
+def adaptive_confidence_load(payload: dict):
+    """
+    Load a COMPLETED V6.2.2 calibration result into the V6.3 adaptive gate.
+
+    Send the full JSON returned by GET /confidence-wr/{job_id}.
+    This changes PAPER eligibility only. It never enables broker execution.
+    """
+    snapshot = adaptive_confidence_gate.update_from_calibration_job(payload)
+    return {
+        "status": "LOADED",
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "adaptive": snapshot,
+    }
+
+
+@app.post("/adaptive-confidence/check")
+def adaptive_confidence_check(payload: dict):
+    """
+    Diagnostic check for one prospective signal.
+
+    Example:
+      {
+        "market": "GBPJPY",
+        "direction": "BUY",
+        "confidence": 0.37,
+        "normal_min_confidence": 0.67
+      }
+    """
+    market = str(payload.get("market") or "").upper()
+    direction = str(payload.get("direction") or "").upper()
+    confidence = float(payload.get("confidence") or 0.0)
+    normal_floor = float(payload.get("normal_min_confidence") or 0.67)
+
+    if direction not in {"BUY", "SELL"}:
+        return {
+            "allowed_by_confidence": False,
+            "path": "REJECT",
+            "reason": "Direction must be BUY or SELL.",
+            "paper_only": True,
+        }
+
+    result = adaptive_confidence_gate.evaluate(
+        market=market,
+        direction=direction,
+        confidence=confidence,
+        normal_min_confidence=normal_floor,
+    )
+    result["paper_only"] = True
+    result["broker_execution_enabled"] = False
+    return result
