@@ -4207,6 +4207,106 @@ def adaptive_confidence_check(payload: dict):
 
 
 # ============================================================
+# V6.8 INTELLIGENCE COPILOT
+# ============================================================
+
+def _v68_copilot_context():
+    watchers = list_watcher_states()
+    paper_trades = []
+    for item in watchers:
+        status = str(item.get("status") or "").upper()
+        if item.get("trade_id") or status in {"OPEN", "WIN", "LOSS"}:
+            snapshot = item.get("entry_snapshot") or {}
+            paper_trades.append({
+                "trade_id": item.get("trade_id"),
+                "market": item.get("market"),
+                "direction": item.get("direction"),
+                "status": status,
+                "entry_path": item.get("entry_path"),
+                "entry_confidence": snapshot.get("live_confidence"),
+                "entry_price": item.get("entry_price_effective") or item.get("entry_price"),
+                "exit_price": item.get("exit_price_effective") or item.get("exit_price"),
+                "result": item.get("result"),
+                "pnl": item.get("pnl"),
+                "entry_time_iso": item.get("entry_time_iso"),
+                "closed_at_iso": item.get("closed_at_iso"),
+                "historical_win_rate": item.get("win_rate"),
+                "historical_profit_factor": item.get("profit_factor"),
+                "historical_trades": item.get("trades"),
+                "adaptive_gate": item.get("adaptive_gate"),
+            })
+    return {
+        "engine": {
+            "version": "V6.8",
+            "paper_only": True,
+            "broker_execution_enabled": False,
+            "copilot_advisory_only": True,
+        },
+        "adaptive_confidence": ADAPTIVE_CONFIDENCE.status(),
+        "forward_summary": summarize_forward_performance(watchers),
+        "v66_forward_intelligence": V66_INTELLIGENCE.forward_performance(watchers),
+        "paper_trades": paper_trades[-50:],
+        "active_watchers": [
+            {
+                "market": item.get("market"),
+                "direction": item.get("direction"),
+                "status": item.get("status"),
+                "last_reason": item.get("last_reason"),
+                "last_live_signal": item.get("last_live_signal"),
+            }
+            for item in watchers
+            if str(item.get("status") or "").upper() in {"WATCHING", "OPEN"}
+        ],
+    }
+
+@app.get("/v68/status")
+def v68_status():
+    return {
+        "version": "V6.8",
+        "openai_configured": COPILOT.configured(),
+        "model": COPILOT.model,
+        "copilot_advisory_only": True,
+        "can_execute_trades": False,
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "features": [
+            "ASK_JASONG_AI",
+            "OVERNIGHT_TRADE_REVIEW",
+            "LOSS_PATTERN_ANALYSIS",
+            "FORWARD_VS_HISTORICAL_REVIEW",
+            "TRADE_EXPLANATION",
+        ],
+    }
+
+@app.post("/v68/ask")
+def v68_ask(request: V68CopilotRequest):
+    question = (request.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+    if not COPILOT.configured():
+        raise HTTPException(status_code=503, detail="OpenAI is not configured on the backend.")
+    try:
+        return COPILOT.analyze(question, _v68_copilot_context(), request.mode)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@app.get("/v68/overnight-review")
+def v68_overnight_review():
+    if not COPILOT.configured():
+        raise HTTPException(status_code=503, detail="OpenAI is not configured on the backend.")
+    question = (
+        "Review the genuine PAPER trading performance in this evidence for the most recent "
+        "overnight session. Separate settled trades from open/watch-only setups. Include wins, "
+        "losses, WR, PF and P&L where supported. Identify repeated loss patterns and say whether "
+        "the sample is large enough to justify changing the strategy."
+    )
+    try:
+        return COPILOT.analyze(question, _v68_copilot_context(), "OVERNIGHT_REVIEW")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ============================================================
 # V6.6 INTELLIGENT FORWARD ENGINE
 # ============================================================
 
