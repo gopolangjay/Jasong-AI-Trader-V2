@@ -50,41 +50,20 @@ class AdaptiveConfidenceGate:
         absolute_min_confidence: float = 0.35,
     ) -> None:
         self.state_path = Path(
-            os.getenv(
-                "ADAPTIVE_CONFIDENCE_STATE_PATH",
-                "/tmp/adaptive_confidence_state.json",
-            )
+            os.getenv("ADAPTIVE_CONFIDENCE_STATE_PATH", "/tmp/adaptive_confidence_state.json")
         )
-
-        self.target_win_rate = float(
-            target_win_rate
-        )
-
-        self.min_profit_factor = float(
-            min_profit_factor
-        )
-
-        self.min_trades = int(
-            min_trades
-        )
-
-        self.max_age_hours = float(
-            max_age_hours
-        )
-
-        self.absolute_min_confidence = float(
-            absolute_min_confidence
-        )
-
+        self.target_win_rate = float(target_win_rate)
+        self.min_profit_factor = float(min_profit_factor)
+        self.min_trades = int(min_trades)
+        self.max_age_hours = float(max_age_hours)
+        self.absolute_min_confidence = float(absolute_min_confidence)
         self._lock = threading.RLock()
-
-        self._state = {
+        self._state: Dict[str, Any] = {
             "updated_at": None,
             "source_job_id": None,
             "source_analyzer": None,
             "qualified": {},
         }
-
         self.load()
 
     @staticmethod
