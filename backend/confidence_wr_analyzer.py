@@ -4,16 +4,17 @@ import math
 import threading
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 
 
 class ConfidenceWinRateAnalyzer:
-    """V6.2.1 fast out-of-sample confidence vs win-rate analyzer.
+    """V6.2.2 raw-confidence calibration analyzer.
 
-    FAST METHOD
-    -----------
+    RAW-CALIBRATION METHOD
+    ----------------------
     1. Load one month of candles for a market.
     2. Split the history into:
        - TRAIN: everything before the requested test window.
@@ -22,15 +23,21 @@ class ConfidenceWinRateAnalyzer:
     4. Freeze that model.
     5. Calculate indicators/predictions over the combined history using the
        frozen model.
-    6. Replay the TEST period chronologically by calling decision() on slices
-       ending at each historical timestamp.
-    7. Future candles are used ONLY to settle the already-generated BUY/SELL
-       outcome after the configured holding horizon.
+    6. Replay the TEST period chronologically.
+    7. For calibration only, lower decision()'s confidence gate to zero so the
+       original 67% live-entry threshold cannot censor lower-confidence data.
+    8. Record the model's raw confidence on every eligible candle >= 35%.
+    9. If decision() still returns WAIT because of a non-confidence trading
+       filter, infer raw BUY/SELL from combined_up_probability:
+           >= 50% -> BUY
+           <  50% -> SELL
+    10. Future candles are used ONLY to settle that pre-existing direction
+        after the configured holding horizon.
 
-    This removes the extremely expensive "retrain at every 15-minute candle"
-    behaviour from V6.2 while preserving a genuine out-of-sample test window.
+    This measures whether confidence itself is calibrated to realised WR.
+    It is NOT a simulation of all live V6 risk/RSI/entry filters.
 
-    This analyzer never places a trade.
+    This analyzer never places a trade and never changes the live threshold.
     """
 
     BUCKETS = (
@@ -417,7 +424,7 @@ class ConfidenceWinRateAnalyzer:
             "job_id":
                 job_id,
             "analyzer_version":
-                "V6.2.1_FAST_OOS",
+                "V6.2.2_RAW_CALIBRATION",
             "status":
                 "QUEUED",
             "created_at":
@@ -595,6 +602,16 @@ class ConfidenceWinRateAnalyzer:
             profile = self.profiles[
                 risk_mode
             ]
+
+            # Analysis-only profile: remove the 67% live confidence gate.
+            # The real V6.1/V6.2 live profile is NOT modified.
+            try:
+                calibration_profile = replace(
+                    profile,
+                    min_confidence=0.0,
+                )
+            except Exception:
+                calibration_profile = profile
 
             global_buckets = {
                 name:
@@ -897,7 +914,7 @@ class ConfidenceWinRateAnalyzer:
                         live = (
                             self.decision_func(
                                 historical_view,
-                                profile,
+                                calibration_profile,
                             )
                         )
 
@@ -928,18 +945,36 @@ class ConfidenceWinRateAnalyzer:
                     ):
                         continue
 
-                    decision = str(
+                    live_decision = str(
                         live.get(
                             "decision"
                         )
                         or "WAIT"
                     ).upper()
 
-                    if decision not in {
+                    ai_up = self._safe_float(
+                        live.get(
+                            "combined_up_probability"
+                        ),
+                        0.50,
+                    )
+
+                    # RAW calibration direction:
+                    # preserve explicit BUY/SELL when available; otherwise
+                    # infer direction from the uncensored model probability.
+                    if live_decision in {
                         "BUY",
                         "SELL",
                     }:
-                        continue
+                        decision = live_decision
+                        direction_source = "DECISION"
+                    else:
+                        decision = (
+                            "BUY"
+                            if ai_up >= 0.50
+                            else "SELL"
+                        )
+                        direction_source = "RAW_AI_PROBABILITY"
 
                     signals_35_plus += 1
 
@@ -1052,6 +1087,20 @@ class ConfidenceWinRateAnalyzer:
                                 ),
                             "direction":
                                 decision,
+                            "live_decision":
+                                live_decision,
+                            "direction_source":
+                                direction_source,
+                            "ai_up":
+                                round(
+                                    ai_up,
+                                    6,
+                                ),
+                            "ai_up_pct":
+                                round(
+                                    ai_up * 100.0,
+                                    2,
+                                ),
                             "confidence":
                                 round(
                                     confidence,
@@ -1415,13 +1464,13 @@ class ConfidenceWinRateAnalyzer:
 
             result = {
                 "analyzer":
-                    "V6.2.1_FAST_CONFIDENCE_VS_WIN_RATE",
+                    "V6.2.2_RAW_CONFIDENCE_CALIBRATION",
                 "method":
                     (
-                        "Train once per market on data before the "
-                        "7-day test window, freeze model, replay test "
-                        "window chronologically; future candles only "
-                        "resolve outcomes."
+                        "Train once per market before the test window, freeze model, "
+                        "remove the confidence gate for analysis only, infer raw "
+                        "direction from AI probability when normal decision is WAIT, "
+                        "then use future candles only to resolve outcomes."
                     ),
                 "risk_mode":
                     risk_mode,
