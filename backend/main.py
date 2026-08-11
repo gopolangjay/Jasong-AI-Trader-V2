@@ -2,7 +2,7 @@
 from adaptive_confidence import AdaptiveConfidenceGate
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -2317,6 +2317,61 @@ def _v53_live_signal(
     return result
 
 
+
+def _v63_adaptive_live_signal(
+    symbol: str,
+    risk_mode: str,
+    balance: float,
+):
+    """V6.3 analysis-only live callback for adaptive PAPER entries.
+
+    It uses the same engine/indicators/model as the normal live signal.
+    Only the profile confidence floor is temporarily set to zero so
+    lower-confidence BUY/SELL decisions can be evaluated by the rolling
+    historical qualification gate. The real PROFILES object is untouched.
+    """
+
+    base_profile = PROFILES[
+        risk_mode
+    ]
+
+    adaptive_profile = replace(
+        base_profile,
+        min_confidence=0.0,
+    )
+
+    signal_data = build(
+        symbol,
+        "1mo",
+        "15m",
+    )
+
+    result = decision(
+        signal_data,
+        adaptive_profile,
+    )
+
+    result.update({
+        "symbol":
+            symbol,
+        "risk_mode":
+            risk_mode,
+        "suggested_paper_stake":
+            stake_for_balance(
+                balance,
+                base_profile.risk_per_trade,
+            ),
+        "observed_at":
+            time.time(),
+        "adaptive_analysis_only":
+            True,
+        "live_execution":
+            False,
+    })
+
+    return result
+
+
 def _v53_latest_price(
     symbol: str,
 ) -> float:
@@ -2803,6 +2858,18 @@ V62_CONFIDENCE_WR_ANALYZER = ConfidenceWinRateAnalyzer(
     profiles=PROFILES,
 )
 
+# -----------------------------------------------------------------------------
+# V6.3.1 ADAPTIVE CONFIDENCE GATE -- PAPER ONLY
+# -----------------------------------------------------------------------------
+adaptive_confidence_gate = AdaptiveConfidenceGate(
+    state_path="/tmp/adaptive_confidence_state.json",
+    target_win_rate=0.65,
+    min_profit_factor=1.50,
+    min_trades=20,
+    max_age_hours=24.0,
+    absolute_min_confidence=0.35,
+)
+
 V60_RISK_GATEWAY = RiskGateway(
     max_open_trades=2, max_daily_loss_pct=0.04, max_drawdown_pct=0.10, max_consecutive_losses=3,
     max_assumed_spread_bps=3.0, max_price_age_seconds=180,
@@ -2812,8 +2879,11 @@ V61_STATE_STORE = PersistentStateStore("data/jasong_v61_state.json")
 
 V53_WATCHER_ENGINE = TradeWatcherEngine(
     session_factory=SessionLocal, trade_model=Trade, signal_func=_v53_live_signal, price_func=_v53_latest_price, profiles=PROFILES,
-    risk_gateway=V60_RISK_GATEWAY, execution_gateway=V60_EXECUTION_GATEWAY,
+    risk_gateway=V60_RISK_GATEWAY,
+    execution_gateway=V60_EXECUTION_GATEWAY,
     state_store=V61_STATE_STORE,
+    adaptive_signal_func=_v63_adaptive_live_signal,
+    adaptive_confidence_gate=adaptive_confidence_gate,
 )
 
 V53_WATCHER_ENGINE.start()
@@ -3733,18 +3803,6 @@ def persistent_state_status():
         "live_execution": False,
     }
 
-# -----------------------------------------------------------------------------
-# V6.3 ADAPTIVE CONFIDENCE GATE -- PAPER ONLY
-# -----------------------------------------------------------------------------
-adaptive_confidence_gate = AdaptiveConfidenceGate(
-    state_path="/tmp/adaptive_confidence_state.json",
-    target_win_rate=0.65,
-    min_profit_factor=1.50,
-    min_trades=20,
-    max_age_hours=24.0,
-    absolute_min_confidence=0.35,
-)
-
 
 
 # -----------------------------------------------------------------------------
@@ -3753,116 +3811,62 @@ adaptive_confidence_gate = AdaptiveConfidenceGate(
 
 @app.get("/adaptive-confidence/status")
 def adaptive_confidence_status():
+    """Show currently qualified market/direction/confidence buckets."""
     adaptive_confidence_gate.load()
-
-    return (
-        adaptive_confidence_gate
-        .snapshot()
-    )
+    return adaptive_confidence_gate.snapshot()
 
 
 @app.post("/adaptive-confidence/load")
-def adaptive_confidence_load(
-    payload: dict,
-):
-    snapshot = (
-        adaptive_confidence_gate
-        .update_from_calibration_job(
-            payload
-        )
-    )
+def adaptive_confidence_load(payload: dict):
+    """
+    Load a COMPLETED V6.2.2 calibration result into the V6.3 adaptive gate.
 
+    Send the full JSON returned by GET /confidence-wr/{job_id}.
+    This changes PAPER eligibility only. It never enables broker execution.
+    """
+    snapshot = adaptive_confidence_gate.update_from_calibration_job(payload)
     adaptive_confidence_gate.load()
-
     return {
-        "status":
-            "LOADED",
-
-        "paper_only":
-            True,
-
-        "broker_execution_enabled":
-            False,
-
-        "adaptive":
-            snapshot,
+        "status": "LOADED",
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "adaptive": snapshot,
     }
 
 
 @app.post("/adaptive-confidence/check")
-def adaptive_confidence_check(
-    payload: dict,
-):
-    # Reload latest persisted calibration
-    # before every request.
+def adaptive_confidence_check(payload: dict):
     adaptive_confidence_gate.load()
+    """
+    Diagnostic check for one prospective signal.
 
-    market = str(
-        payload.get(
-            "market"
-        )
-        or ""
-    ).upper()
+    Example:
+      {
+        "market": "GBPJPY",
+        "direction": "BUY",
+        "confidence": 0.37,
+        "normal_min_confidence": 0.67
+      }
+    """
+    market = str(payload.get("market") or "").upper()
+    direction = str(payload.get("direction") or "").upper()
+    confidence = float(payload.get("confidence") or 0.0)
+    normal_floor = float(payload.get("normal_min_confidence") or 0.67)
 
-    direction = str(
-        payload.get(
-            "direction"
-        )
-        or ""
-    ).upper()
-
-    confidence = float(
-        payload.get(
-            "confidence"
-        )
-        or 0.0
-    )
-
-    normal_floor = float(
-        payload.get(
-            "normal_min_confidence"
-        )
-        or 0.67
-    )
-
-    if direction not in {
-        "BUY",
-        "SELL",
-    }:
+    if direction not in {"BUY", "SELL"}:
         return {
-            "allowed_by_confidence":
-                False,
-
-            "path":
-                "REJECT",
-
-            "reason":
-                "Direction must be BUY or SELL.",
-
-            "paper_only":
-                True,
-
-            "broker_execution_enabled":
-                False,
+            "allowed_by_confidence": False,
+            "path": "REJECT",
+            "reason": "Direction must be BUY or SELL.",
+            "paper_only": True,
         }
 
-    result = (
-        adaptive_confidence_gate
-        .evaluate(
-            market=market,
-            direction=direction,
-            confidence=confidence,
-            normal_min_confidence=
-                normal_floor,
-        )
+    result = adaptive_confidence_gate.evaluate(
+        market=market,
+        direction=direction,
+        confidence=confidence,
+        normal_min_confidence=normal_floor,
     )
-
-    result[
-        "paper_only"
-    ] = True
-
-    result[
-        "broker_execution_enabled"
-    ] = False
-
+    result["paper_only"] = True
+    result["broker_execution_enabled"] = False
     return result
