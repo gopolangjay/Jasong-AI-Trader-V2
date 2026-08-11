@@ -81,6 +81,10 @@ class _HomePageState extends State<HomePage> {
   bool copilotBusy = false;
   String copilotAnswer = '';
 
+  Map<String, dynamic>? systemOverview;
+  Map<String, dynamic>? systemDiagnostic;
+  bool systemDiagnosticBusy = false;
+
   Map<String, dynamic>? autoDashboard;
   Map<String, dynamic>? autoManagerJob;
 
@@ -1373,10 +1377,14 @@ class _HomePageState extends State<HomePage> {
       copilotAnswer = '';
     });
     try {
-      final response = await postJsonOnce(Uri.parse('$apiBase/v68/ask'), {
-        'question': question,
-        'mode': mode,
-      });
+      final response = await postJsonOnce(
+        Uri.parse('$apiBase/v68/ask'),
+        {
+          'question': question,
+          'mode': mode,
+        },
+        timeoutSeconds: 90,
+      );
       if (!mounted) return;
       setState(() {
         copilotAnswer = response['answer']?.toString() ?? 'No analysis returned.';
@@ -1397,7 +1405,10 @@ class _HomePageState extends State<HomePage> {
       copilotAnswer = '';
     });
     try {
-      final response = await getJson(Uri.parse('$apiBase/v68/overnight-review'));
+      final response = await getJson(
+        Uri.parse('$apiBase/v68/overnight-review'),
+        timeoutSeconds: 90,
+      );
       if (!mounted) return;
       setState(() {
         copilotAnswer = response['answer']?.toString() ?? 'No overnight analysis returned.';
@@ -1410,6 +1421,139 @@ class _HomePageState extends State<HomePage> {
     } finally {
       if (mounted) setState(() => copilotBusy = false);
     }
+  }
+
+  Future<void> loadSystemOverview() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/system-overview',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemOverview = response;
+      });
+    } catch (_) {
+      // Keep the previous snapshot visible if a single poll fails.
+    }
+  }
+
+  Future<void> runSystemDiagnostic() async {
+    if (systemDiagnosticBusy) {
+      return;
+    }
+
+    setState(() {
+      systemDiagnosticBusy = true;
+      systemDiagnostic = null;
+    });
+
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/diagnostic',
+        ),
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = response;
+      });
+
+      await loadSystemOverview();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = {
+          'status': 'RED',
+          'label': 'DIAGNOSTIC REQUEST FAILED',
+          'checks': [
+            {
+              'component': 'MOBILE_TO_BACKEND',
+              'passed': false,
+              'message': e.toString(),
+            }
+          ],
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          systemDiagnosticBusy = false;
+        });
+      }
+    }
+  }
+
+  Color systemStatusColor(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Colors.greenAccent;
+      case 'AMBER':
+        return Colors.amberAccent;
+      case 'RED':
+        return Colors.redAccent;
+      case 'GREY':
+      default:
+        return Colors.white54;
+    }
+  }
+
+  IconData systemStatusIcon(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Icons.check_circle;
+      case 'AMBER':
+        return Icons.warning_amber_rounded;
+      case 'RED':
+        return Icons.error;
+      case 'GREY':
+      default:
+        return Icons.pause_circle;
+    }
+  }
+
+  String formatCountdownSeconds(
+    dynamic value,
+  ) {
+    final seconds = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (seconds == null) {
+      return '-';
+    }
+
+    if (seconds <= 0) {
+      return 'Due now';
+    }
+
+    final total = seconds.round();
+    final minutes = total ~/ 60;
+    final remainder = total % 60;
+
+    if (minutes > 0) {
+      return '${minutes}m ${remainder}s';
+    }
+
+    return '${remainder}s';
   }
 
   Future<void> loadAutoDashboard() async {
@@ -1507,11 +1651,16 @@ class _HomePageState extends State<HomePage> {
       ),
       (_) {
         loadAutoDashboard();
+        loadSystemOverview();
       },
     );
 
     Future.microtask(
       loadAutoDashboard,
+    );
+
+    Future.microtask(
+      loadSystemOverview,
     );
   }
 
@@ -4827,6 +4976,485 @@ class _HomePageState extends State<HomePage> {
                 },
               ),
             ],
+
+            // =================================================
+            // V6.9 SYSTEM HEALTH & OPERATIONS
+            // =================================================
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(
+                  18,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          systemStatusIcon(
+                            systemOverview?[
+                                        'overall']
+                                    ?['status']
+                                ?.toString() ??
+                                'GREY',
+                          ),
+                          size: 30,
+                          color:
+                              systemStatusColor(
+                            systemOverview?[
+                                        'overall']
+                                    ?['status']
+                                ?.toString() ??
+                                'GREY',
+                          ),
+                        ),
+                        const SizedBox(
+                          width: 10,
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'V6.9 SYSTEM HEALTH',
+                                style:
+                                    TextStyle(
+                                  fontSize: 18,
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                systemOverview?[
+                                            'overall']
+                                        ?['label']
+                                    ?.toString() ??
+                                    'Loading system status...',
+                                style:
+                                    TextStyle(
+                                  fontSize: 12,
+                                  fontWeight:
+                                      FontWeight.w700,
+                                  color:
+                                      systemStatusColor(
+                                    systemOverview?[
+                                                'overall']
+                                            ?['status']
+                                        ?.toString() ??
+                                        'GREY',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(
+                      height: 14,
+                    ),
+
+                    if (systemOverview == null)
+                      const LinearProgressIndicator()
+                    else ...[
+                      Row(
+                        children: [
+                          metric(
+                            'Backend',
+                            systemOverview![
+                                        'backend']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Auto Manager',
+                            systemOverview![
+                                        'auto_manager']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Search Stage',
+                            systemOverview![
+                                        'search']
+                                    ?['stage']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Progress',
+                            '${systemOverview!['search']?['percent'] ?? 0}%',
+                          ),
+                        ],
+                      ),
+
+                      if (systemOverview![
+                                  'search']
+                              ?['candidate'] !=
+                          null)
+                        Row(
+                          children: [
+                            metric(
+                              'Current Market',
+                              systemOverview![
+                                          'search']
+                                      ?['candidate']
+                                  ?.toString() ??
+                                  '-',
+                            ),
+                            metric(
+                              'Jobs',
+                              '${systemOverview!['search']?['queued_or_running_jobs'] ?? 0}',
+                            ),
+                          ],
+                        ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Next Scan',
+                            formatCountdownSeconds(
+                              systemOverview![
+                                          'auto_manager']
+                                      ?['next_scan_seconds'],
+                            ),
+                          ),
+                          metric(
+                            'Runs',
+                            '${systemOverview!['auto_manager']?['runs'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Watchers',
+                            '${systemOverview!['watchers']?['active'] ?? 0}'
+                            ' / '
+                            '${systemOverview!['watchers']?['target'] ?? 0}',
+                          ),
+                          metric(
+                            'Open Trades',
+                            '${systemOverview!['watchers']?['open_trades'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Settled Trades',
+                            '${systemOverview!['forward_performance']?['settled_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward WR',
+                            '${formatPercent(
+                              systemOverview![
+                                          'forward_performance']
+                                      ?['win_rate'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Calibration',
+                            systemOverview![
+                                        'calibration']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Qualified',
+                            '${systemOverview!['calibration']?['qualified_count'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Market Data',
+                            systemOverview![
+                                        'market_data']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Copilot',
+                            systemOverview![
+                                        'copilot']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          12,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            10,
+                          ),
+                          color:
+                              Colors.white10,
+                        ),
+                        child: Text(
+                          systemOverview![
+                                      'search']
+                                  ?['activity']
+                              ?.toString() ??
+                              'Waiting for system activity.',
+                          style:
+                              const TextStyle(
+                            fontSize: 12,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                      ),
+
+                      if ((systemOverview![
+                                      'issues']
+                                  as List?)
+                              ?.isNotEmpty ==
+                          true) ...[
+                        const SizedBox(
+                          height: 10,
+                        ),
+                        for (final rawIssue
+                            in (systemOverview![
+                                    'issues']
+                                as List))
+                          if (rawIssue
+                              is Map)
+                            Container(
+                              margin:
+                                  const EdgeInsets.only(
+                                bottom: 6,
+                              ),
+                              padding:
+                                  const EdgeInsets.all(
+                                10,
+                              ),
+                              decoration:
+                                  BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(
+                                  8,
+                                ),
+                                color:
+                                    systemStatusColor(
+                                  rawIssue[
+                                              'severity']
+                                          ?.toString() ??
+                                      'AMBER',
+                                ).withValues(
+                                  alpha:
+                                      0.08,
+                                ),
+                                border:
+                                    Border.all(
+                                  color:
+                                      systemStatusColor(
+                                    rawIssue[
+                                                'severity']
+                                            ?.toString() ??
+                                        'AMBER',
+                                  ).withValues(
+                                    alpha:
+                                        0.35,
+                                  ),
+                                ),
+                              ),
+                              child:
+                                  Text(
+                                '${rawIssue['component'] ?? 'SYSTEM'}: '
+                                '${rawIssue['message'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                      ],
+                    ],
+
+                    const SizedBox(
+                      height: 12,
+                    ),
+
+                    FilledButton.icon(
+                      onPressed:
+                          systemDiagnosticBusy
+                              ? null
+                              : runSystemDiagnostic,
+                      icon:
+                          const Icon(
+                        Icons.health_and_safety,
+                      ),
+                      label:
+                          Text(
+                        systemDiagnosticBusy
+                            ? 'Running Diagnostic...'
+                            : 'Run System Diagnostic',
+                      ),
+                    ),
+
+                    if (systemDiagnosticBusy) ...[
+                      const SizedBox(
+                        height: 10,
+                      ),
+                      const LinearProgressIndicator(),
+                    ],
+
+                    if (systemDiagnostic !=
+                        null) ...[
+                      const SizedBox(
+                        height: 12,
+                      ),
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          12,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            10,
+                          ),
+                          color:
+                              systemStatusColor(
+                            systemDiagnostic![
+                                        'status']
+                                    ?.toString() ??
+                                'GREY',
+                          ).withValues(
+                            alpha:
+                                0.08,
+                          ),
+                          border:
+                              Border.all(
+                            color:
+                                systemStatusColor(
+                              systemDiagnostic![
+                                          'status']
+                                      ?.toString() ??
+                                  'GREY',
+                            ).withValues(
+                              alpha:
+                                  0.35,
+                            ),
+                          ),
+                        ),
+                        child:
+                            Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              systemDiagnostic![
+                                          'label']
+                                      ?.toString() ??
+                                  'Diagnostic',
+                              style:
+                                  const TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(
+                              height: 8,
+                            ),
+                            for (final rawCheck
+                                in (systemDiagnostic![
+                                            'checks']
+                                        as List? ??
+                                    []))
+                              if (rawCheck
+                                  is Map)
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.only(
+                                    bottom: 5,
+                                  ),
+                                  child:
+                                      Text(
+                                    '${rawCheck['passed'] == true ? '✓' : '✕'} '
+                                    '${rawCheck['component'] ?? ''}: '
+                                    '${rawCheck['message'] ?? ''}',
+                                    style:
+                                        TextStyle(
+                                      fontSize:
+                                          11,
+                                      color:
+                                          rawCheck[
+                                                      'passed'] ==
+                                                  true
+                                              ? Colors
+                                                  .greenAccent
+                                              : Colors
+                                                  .amberAccent,
+                                    ),
+                                  ),
+                                ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height: 8,
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed:
+                          loadSystemOverview,
+                      icon:
+                          const Icon(
+                        Icons.refresh,
+                      ),
+                      label:
+                          const Text(
+                        'Refresh System Overview',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
 
             // =================================================
             // V6.8 JASONG AI INTELLIGENCE COPILOT
