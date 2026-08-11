@@ -3737,6 +3737,7 @@ def persistent_state_status():
 # V6.3 ADAPTIVE CONFIDENCE GATE -- PAPER ONLY
 # -----------------------------------------------------------------------------
 adaptive_confidence_gate = AdaptiveConfidenceGate(
+    state_path="/tmp/adaptive_confidence_state.json",
     target_win_rate=0.65,
     min_profit_factor=1.50,
     min_trades=20,
@@ -3752,59 +3753,116 @@ adaptive_confidence_gate = AdaptiveConfidenceGate(
 
 @app.get("/adaptive-confidence/status")
 def adaptive_confidence_status():
-    """Show currently qualified market/direction/confidence buckets."""
-    return adaptive_confidence_gate.snapshot()
+    adaptive_confidence_gate.load()
+
+    return (
+        adaptive_confidence_gate
+        .snapshot()
+    )
 
 
 @app.post("/adaptive-confidence/load")
-def adaptive_confidence_load(payload: dict):
-    """
-    Load a COMPLETED V6.2.2 calibration result into the V6.3 adaptive gate.
+def adaptive_confidence_load(
+    payload: dict,
+):
+    snapshot = (
+        adaptive_confidence_gate
+        .update_from_calibration_job(
+            payload
+        )
+    )
 
-    Send the full JSON returned by GET /confidence-wr/{job_id}.
-    This changes PAPER eligibility only. It never enables broker execution.
-    """
-    snapshot = adaptive_confidence_gate.update_from_calibration_job(payload)
+    adaptive_confidence_gate.load()
+
     return {
-        "status": "LOADED",
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "adaptive": snapshot,
+        "status":
+            "LOADED",
+
+        "paper_only":
+            True,
+
+        "broker_execution_enabled":
+            False,
+
+        "adaptive":
+            snapshot,
     }
 
 
 @app.post("/adaptive-confidence/check")
-def adaptive_confidence_check(payload: dict):
-    """
-    Diagnostic check for one prospective signal.
+def adaptive_confidence_check(
+    payload: dict,
+):
+    # Reload latest persisted calibration
+    # before every request.
+    adaptive_confidence_gate.load()
 
-    Example:
-      {
-        "market": "GBPJPY",
-        "direction": "BUY",
-        "confidence": 0.37,
-        "normal_min_confidence": 0.67
-      }
-    """
-    market = str(payload.get("market") or "").upper()
-    direction = str(payload.get("direction") or "").upper()
-    confidence = float(payload.get("confidence") or 0.0)
-    normal_floor = float(payload.get("normal_min_confidence") or 0.67)
+    market = str(
+        payload.get(
+            "market"
+        )
+        or ""
+    ).upper()
 
-    if direction not in {"BUY", "SELL"}:
+    direction = str(
+        payload.get(
+            "direction"
+        )
+        or ""
+    ).upper()
+
+    confidence = float(
+        payload.get(
+            "confidence"
+        )
+        or 0.0
+    )
+
+    normal_floor = float(
+        payload.get(
+            "normal_min_confidence"
+        )
+        or 0.67
+    )
+
+    if direction not in {
+        "BUY",
+        "SELL",
+    }:
         return {
-            "allowed_by_confidence": False,
-            "path": "REJECT",
-            "reason": "Direction must be BUY or SELL.",
-            "paper_only": True,
+            "allowed_by_confidence":
+                False,
+
+            "path":
+                "REJECT",
+
+            "reason":
+                "Direction must be BUY or SELL.",
+
+            "paper_only":
+                True,
+
+            "broker_execution_enabled":
+                False,
         }
 
-    result = adaptive_confidence_gate.evaluate(
-        market=market,
-        direction=direction,
-        confidence=confidence,
-        normal_min_confidence=normal_floor,
+    result = (
+        adaptive_confidence_gate
+        .evaluate(
+            market=market,
+            direction=direction,
+            confidence=confidence,
+            normal_min_confidence=
+                normal_floor,
+        )
     )
-    result["paper_only"] = True
-    result["broker_execution_enabled"] = False
+
+    result[
+        "paper_only"
+    ] = True
+
+    result[
+        "broker_execution_enabled"
+    ] = False
+
     return result
