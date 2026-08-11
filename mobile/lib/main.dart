@@ -1373,7 +1373,7 @@ class _HomePageState extends State<HomePage> {
       copilotAnswer = '';
     });
     try {
-      final response = await postJson('/v68/ask', {
+      final response = await postJsonOnce(Uri.parse('$apiBase/v68/ask'), {
         'question': question,
         'mode': mode,
       });
@@ -1397,7 +1397,7 @@ class _HomePageState extends State<HomePage> {
       copilotAnswer = '';
     });
     try {
-      final response = await getJson('/v68/overnight-review');
+      final response = await getJson(Uri.parse('$apiBase/v68/overnight-review'));
       if (!mounted) return;
       setState(() {
         copilotAnswer = response['answer']?.toString() ?? 'No overnight analysis returned.';
