@@ -3256,7 +3256,7 @@ def get_adaptive_ranking(
 
 
 # ============================================================
-# V6.2 CONFIDENCE VS WIN-RATE ANALYZER
+# V6.2.1 FAST OUT-OF-SAMPLE CONFIDENCE VS WIN-RATE ANALYZER
 # ============================================================
 
 @app.post("/confidence-wr/start")
@@ -3272,10 +3272,7 @@ def start_confidence_wr_analysis(
     min_trades_promising: int = 10,
     minimum_trade_confidence: float = 0.35,
 ):
-    """Analyze realised WR for confidence buckets from 35% upward.
-
-    This endpoint is diagnostic only and never opens a trade.
-    """
+    """Fast OOS WR analysis for confidence buckets from 35% upward.\n\n    One frozen pre-test model is used per market. Diagnostic only.\n    This endpoint never opens a trade.\n    """
     validate_risk_mode(risk_mode)
 
     try:
