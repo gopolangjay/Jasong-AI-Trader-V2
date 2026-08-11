@@ -73,6 +73,9 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? serverWatcher;
   List<Map<String, dynamic>> serverWatchers = [];
   Map<String, dynamic>? forwardStats;
+  Map<String, dynamic>? v66ForwardIntelligence;
+
+  List<Map<String, dynamic>> paperTrades = [];
 
   Map<String, dynamic>? autoDashboard;
   Map<String, dynamic>? autoManagerJob;
@@ -1407,6 +1410,33 @@ class _HomePageState extends State<HomePage> {
             rawForward,
           );
         }
+
+        final rawPaperTrades =
+            response['paper_trades'];
+
+        if (rawPaperTrades is List) {
+          paperTrades =
+              rawPaperTrades
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
+        final rawV66Forward =
+            response[
+                'v66_forward_intelligence'];
+
+        if (rawV66Forward is Map) {
+          v66ForwardIntelligence =
+              Map<String, dynamic>.from(
+            rawV66Forward,
+          );
+        }
       });
     } catch (_) {
       // Auto dashboard is supplemental.
@@ -2038,6 +2068,75 @@ class _HomePageState extends State<HomePage> {
       default:
         return Icons.sync;
     }
+  }
+
+
+  Color paperTradeColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'LOSS':
+        return Colors.redAccent;
+      case 'OPEN':
+        return Colors.lightBlueAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData paperTradeIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Icons.trending_up;
+      case 'LOSS':
+        return Icons.trending_down;
+      case 'OPEN':
+        return Icons.hourglass_top;
+      default:
+        return Icons.receipt_long;
+    }
+  }
+
+  String paperTradeHeadline(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return 'WIN';
+      case 'LOSS':
+        return 'LOSS';
+      case 'OPEN':
+        return 'LIVE PAPER TRADE';
+      default:
+        return status;
+    }
+  }
+
+  String formatMoney(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final number =
+        value is num
+            ? value.toDouble()
+            : double.tryParse(
+                  value.toString(),
+                ) ??
+                0.0;
+
+    final sign =
+        number > 0
+            ? '+'
+            : '';
+
+    return '$sign${number.toStringAsFixed(2)}';
   }
 
 
@@ -4411,7 +4510,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.7 FORWARD WATCH PORTFOLIO',
+                            'V6.7 FORWARD WATCH PORTFOLIO',
                             style:
                                 TextStyle(
                               fontSize: 15,
@@ -4654,7 +4753,7 @@ class _HomePageState extends State<HomePage> {
                           ),
 
                           const Text(
-                            'V5.7 keeps multiple VERIFIED candidates under '
+                            'V6.7 keeps multiple VERIFIED candidates under '
                             'observation. A waiting or overextended market does '
                             'not block another candidate from confirming. Paper '
                             'entries still require live confirmation and risk controls.',
@@ -4676,7 +4775,417 @@ class _HomePageState extends State<HomePage> {
             ],
 
             // =================================================
-            // V5.3 FORWARD PERFORMANCE
+            // V6.7 LIVE PAPER TRADE LAB
+            // =================================================
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(
+                  18,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(
+                          Icons.science,
+                          size: 28,
+                        ),
+                        SizedBox(
+                          width: 10,
+                        ),
+                        Expanded(
+                          child: Text(
+                            'V6.7 LIVE PAPER TRADE LAB',
+                            style:
+                                TextStyle(
+                              fontSize: 18,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(
+                      height: 6,
+                    ),
+
+                    const Text(
+                      'These are actual forward PAPER entries opened by '
+                      'the autonomous engine — including losses. '
+                      'WATCHING candidates are not counted as trades.',
+                      style:
+                          TextStyle(
+                        fontSize: 11,
+                        color:
+                            Colors.white70,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height: 14,
+                    ),
+
+                    if (v66ForwardIntelligence != null) ...[
+                      Row(
+                        children: [
+                          metric(
+                            'Settled Trades',
+                            '${v66ForwardIntelligence!['forward_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Actual WR',
+                            '${formatPercent(
+                              v66ForwardIntelligence![
+                                  'win_rate'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${v66ForwardIntelligence!['wins'] ?? 0} / '
+                            '${v66ForwardIntelligence!['losses'] ?? 0}',
+                          ),
+                          metric(
+                            'Actual PF',
+                            formatNumber(
+                              v66ForwardIntelligence![
+                                  'profit_factor'],
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Actual P&L',
+                            formatMoney(
+                              v66ForwardIntelligence![
+                                  'total_pnl'],
+                            ),
+                          ),
+                          metric(
+                            'Trades on Screen',
+                            '${paperTrades.length}',
+                          ),
+                        ],
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height: 10,
+                    ),
+
+                    if (paperTrades.isEmpty)
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          16,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            12,
+                          ),
+                          color:
+                              Colors.white10,
+                        ),
+                        child:
+                            const Column(
+                          children: [
+                            Icon(
+                              Icons.hourglass_empty,
+                              size: 36,
+                              color:
+                                  Colors.white54,
+                            ),
+                            SizedBox(
+                              height: 8,
+                            ),
+                            Text(
+                              'No PAPER trades opened yet.',
+                              style:
+                                  TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            SizedBox(
+                              height: 4,
+                            ),
+                            Text(
+                              'V6.6 will add a trade here only after '
+                              'a verified setup passes live confirmation, '
+                              'adaptive/normal confidence, forward trust, '
+                              'portfolio controls and the risk gateway.',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  TextStyle(
+                                fontSize: 11,
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      for (final trade
+                          in paperTrades.take(12)) ...[
+                        Builder(
+                          builder:
+                              (context) {
+                            final status =
+                                trade['status']
+                                        ?.toString()
+                                        .toUpperCase() ??
+                                    'OPEN';
+
+                            final confidence =
+                                trade[
+                                    'entry_confidence'];
+
+                            final entryPath =
+                                trade[
+                                            'entry_path']
+                                        ?.toString() ??
+                                    '-';
+
+                            final remaining =
+                                trade[
+                                    'remaining_minutes'];
+
+                            final pnl =
+                                trade['pnl'];
+
+                            return Container(
+                              margin:
+                                  const EdgeInsets.only(
+                                bottom: 10,
+                              ),
+                              padding:
+                                  const EdgeInsets.all(
+                                14,
+                              ),
+                              decoration:
+                                  BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(
+                                  14,
+                                ),
+                                border:
+                                    Border.all(
+                                  color:
+                                      paperTradeColor(
+                                    status,
+                                  ).withValues(
+                                    alpha:
+                                        0.45,
+                                  ),
+                                ),
+                                color:
+                                    paperTradeColor(
+                                  status,
+                                ).withValues(
+                                  alpha:
+                                      0.08,
+                                ),
+                              ),
+                              child:
+                                  Column(
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        paperTradeIcon(
+                                          status,
+                                        ),
+                                        color:
+                                            paperTradeColor(
+                                          status,
+                                        ),
+                                      ),
+                                      const SizedBox(
+                                        width: 8,
+                                      ),
+                                      Expanded(
+                                        child:
+                                            Text(
+                                          '${trade['market'] ?? '-'} '
+                                          '${trade['direction'] ?? '-'}',
+                                          style:
+                                              const TextStyle(
+                                            fontSize:
+                                                17,
+                                            fontWeight:
+                                                FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                      Text(
+                                        paperTradeHeadline(
+                                          status,
+                                        ),
+                                        style:
+                                            TextStyle(
+                                          fontWeight:
+                                              FontWeight.w900,
+                                          color:
+                                              paperTradeColor(
+                                            status,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  const SizedBox(
+                                    height: 10,
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Entry Confidence',
+                                        confidence == null
+                                            ? '-'
+                                            : '${formatPercent(confidence)}%',
+                                      ),
+                                      metric(
+                                        'Entry Path',
+                                        entryPath
+                                            .replaceAll(
+                                          '_',
+                                          ' ',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Entry',
+                                        formatPrice(
+                                          trade[
+                                              'entry_price'],
+                                        ),
+                                      ),
+                                      metric(
+                                        status ==
+                                                'OPEN'
+                                            ? 'Time Left'
+                                            : 'Exit',
+                                        status ==
+                                                'OPEN'
+                                            ? (
+                                                remaining ==
+                                                        null
+                                                    ? '-'
+                                                    : '${formatNumber(remaining)} min'
+                                              )
+                                            : formatPrice(
+                                                trade[
+                                                    'exit_price'],
+                                              ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Stake',
+                                        trade[
+                                                    'stake'] ==
+                                                null
+                                            ? '-'
+                                            : '${trade['stake']}',
+                                      ),
+                                      metric(
+                                        'P&L',
+                                        pnl ==
+                                                null
+                                            ? (
+                                                status ==
+                                                        'OPEN'
+                                                    ? 'Pending'
+                                                    : '-'
+                                              )
+                                            : formatMoney(
+                                                pnl,
+                                              ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  if (trade[
+                                          'historical_win_rate'] !=
+                                      null)
+                                    Row(
+                                      children: [
+                                        metric(
+                                          'Historical WR',
+                                          '${formatPercent(
+                                            trade[
+                                                'historical_win_rate'],
+                                          )}%',
+                                        ),
+                                        metric(
+                                          'Historical PF',
+                                          formatNumber(
+                                            trade[
+                                                'historical_profit_factor'],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+
+                    const SizedBox(
+                      height: 4,
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed:
+                          loadAutoDashboard,
+                      icon:
+                          const Icon(
+                        Icons.refresh,
+                      ),
+                      label:
+                          const Text(
+                        'Refresh PAPER Trades',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // =================================================
+            // V6.7 FORWARD PERFORMANCE
             // =================================================
 
             if (forwardStats != null) ...[
