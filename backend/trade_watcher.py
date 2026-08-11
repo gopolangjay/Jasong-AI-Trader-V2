@@ -41,6 +41,8 @@ class TradeWatcherEngine:
         risk_gateway=None,
         execution_gateway=None,
         state_store=None,
+        adaptive_signal_func=None,
+        adaptive_confidence_gate=None,
     ):
         self.session_factory = session_factory
         self.Trade = trade_model
@@ -50,6 +52,8 @@ class TradeWatcherEngine:
         self.risk_gateway = risk_gateway
         self.execution_gateway = execution_gateway
         self.state_store = state_store
+        self.adaptive_signal_func = adaptive_signal_func
+        self.adaptive_confidence_gate = adaptive_confidence_gate
 
         self._watchers: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
@@ -554,6 +558,8 @@ class TradeWatcherEngine:
             "pnl": None,
             "last_live_signal": None,
             "risk_decision": None,
+            "adaptive_gate": None,
+            "entry_path": None,
             "last_reason": "Verified candidate added to live watch.",
             "interval": candidate.get("interval"),
             "period": candidate.get("period"),
@@ -666,9 +672,14 @@ class TradeWatcherEngine:
             return
 
         direction = str(watcher.get("direction") or "WAIT").upper()
+        market = str(watcher.get("market") or "").upper()
+
         live_decision = str(live.get("decision") or "WAIT").upper()
         confidence = self._safe_float(live.get("confidence", 0.0))
-        ai_up = self._safe_float(live.get("combined_up_probability", 0.50), 0.50)
+        ai_up = self._safe_float(
+            live.get("combined_up_probability", 0.50),
+            0.50,
+        )
         rsi = self._safe_float(live.get("rsi", 50.0), 50.0)
         profile = self.profiles[risk_mode]
 
@@ -677,6 +688,7 @@ class TradeWatcherEngine:
             or (direction == "SELL" and live_decision == "BUY")
         )
 
+        # A strong normal live reversal still invalidates the verified setup.
         if opposite and confidence >= profile.min_confidence:
             with self._lock:
                 watcher = self._watchers.get(watcher_id)
@@ -685,8 +697,10 @@ class TradeWatcherEngine:
                     watcher["last_live_signal"] = live
                     watcher["last_checked_at"] = time.time()
                     watcher["last_reason"] = (
-                        "Strong live signal flipped against the verified direction."
+                        "Strong normal live signal flipped against the "
+                        "verified direction."
                     )
+            self._persist_state()
             return
 
         overextended = (
@@ -695,40 +709,195 @@ class TradeWatcherEngine:
             direction == "SELL" and rsi <= 30.0
         )
 
-        probability_ok = ai_up >= 0.60 if direction == "BUY" else ai_up <= 0.40
-        confirmed = (
+        probability_ok = (
+            ai_up >= 0.60
+            if direction == "BUY"
+            else ai_up <= 0.40
+        )
+
+        normal_confirmed = (
             live_decision == direction
             and confidence >= profile.min_confidence
             and probability_ok
             and not overextended
         )
 
+        entry_path = "NORMAL_CONFIDENCE"
+        adaptive_gate_result = None
+        selected_live = live
+
+        # --------------------------------------------------------------
+        # V6.3.1 ADAPTIVE CONFIDENCE PATH
+        # --------------------------------------------------------------
+        # Only attempt this if the normal V6 entry did not confirm.
+        # The adaptive callback uses the SAME decision engine but with the
+        # confidence floor removed for analysis. RSI/direction/probability
+        # conditions still have to pass. Historical qualification then
+        # decides whether that lower-confidence setup is permitted.
+        adaptive_confirmed = False
+
+        if (
+            not normal_confirmed
+            and self.adaptive_signal_func is not None
+            and self.adaptive_confidence_gate is not None
+        ):
+            try:
+                # Reload persisted rolling calibration before each decision.
+                try:
+                    self.adaptive_confidence_gate.load()
+                except Exception:
+                    pass
+
+                adaptive_live = self.adaptive_signal_func(
+                    symbol,
+                    risk_mode,
+                    balance,
+                )
+
+                adaptive_decision = str(
+                    adaptive_live.get("decision")
+                    or "WAIT"
+                ).upper()
+
+                adaptive_confidence = self._safe_float(
+                    adaptive_live.get("confidence", 0.0)
+                )
+
+                adaptive_ai_up = self._safe_float(
+                    adaptive_live.get(
+                        "combined_up_probability",
+                        0.50,
+                    ),
+                    0.50,
+                )
+
+                adaptive_rsi = self._safe_float(
+                    adaptive_live.get("rsi", 50.0),
+                    50.0,
+                )
+
+                adaptive_probability_ok = (
+                    adaptive_ai_up >= 0.60
+                    if direction == "BUY"
+                    else adaptive_ai_up <= 0.40
+                )
+
+                adaptive_overextended = (
+                    direction == "BUY"
+                    and adaptive_rsi >= 70.0
+                ) or (
+                    direction == "SELL"
+                    and adaptive_rsi <= 30.0
+                )
+
+                adaptive_gate_result = (
+                    self.adaptive_confidence_gate.evaluate(
+                        market=market,
+                        direction=direction,
+                        confidence=adaptive_confidence,
+                        normal_min_confidence=
+                            profile.min_confidence,
+                    )
+                )
+
+                adaptive_confirmed = (
+                    adaptive_decision == direction
+                    and adaptive_probability_ok
+                    and not adaptive_overextended
+                    and bool(
+                        adaptive_gate_result.get(
+                            "allowed_by_confidence"
+                        )
+                    )
+                    and adaptive_gate_result.get("path")
+                    == "ADAPTIVE_QUALIFIED"
+                )
+
+                if adaptive_confirmed:
+                    selected_live = adaptive_live
+                    live = adaptive_live
+                    live_decision = adaptive_decision
+                    confidence = adaptive_confidence
+                    ai_up = adaptive_ai_up
+                    rsi = adaptive_rsi
+                    probability_ok = adaptive_probability_ok
+                    overextended = adaptive_overextended
+                    entry_path = "ADAPTIVE_QUALIFIED"
+
+            except Exception as exc:
+                adaptive_gate_result = {
+                    "allowed_by_confidence": False,
+                    "path": "REJECT",
+                    "reason": (
+                        "Adaptive live evaluation failed: "
+                        f"{exc}"
+                    ),
+                }
+
+        confirmed = (
+            normal_confirmed
+            or adaptive_confirmed
+        )
+
         now = time.time()
-        next_check = now + watcher["interval_minutes"] * 60
+        next_check = (
+            now
+            + watcher["interval_minutes"]
+            * 60
+        )
 
         if not confirmed:
             reason_bits = []
+
             if overextended:
-                reason_bits.append(f"RSI overextended at {rsi:.1f}")
+                reason_bits.append(
+                    f"RSI overextended at {rsi:.1f}"
+                )
+
             if live_decision != direction:
                 reason_bits.append(
-                    f"live signal {live_decision} does not match {direction}"
+                    f"normal live signal {live_decision} "
+                    f"does not match {direction}"
                 )
+
             if confidence < profile.min_confidence:
                 reason_bits.append(
-                    f"confidence {confidence:.1%} below {profile.min_confidence:.0%}"
+                    f"normal confidence {confidence:.1%} "
+                    f"below {profile.min_confidence:.0%}"
                 )
+
             if not probability_ok:
-                reason_bits.append("AI directional probability not strong enough")
+                reason_bits.append(
+                    "AI directional probability not strong enough"
+                )
+
+            if adaptive_gate_result is not None:
+                adaptive_reason = str(
+                    adaptive_gate_result.get(
+                        "reason"
+                    )
+                    or "Adaptive gate rejected."
+                )
+                reason_bits.append(
+                    f"adaptive: {adaptive_reason}"
+                )
 
             with self._lock:
                 watcher = self._watchers.get(watcher_id)
+
                 if watcher:
                     watcher["status"] = "WATCHING"
-                    watcher["last_live_signal"] = live
+                    watcher["last_live_signal"] = selected_live
                     watcher["last_checked_at"] = now
                     watcher["next_check_at"] = next_check
-                    watcher["last_reason"] = "; ".join(reason_bits) or "Waiting."
+                    watcher["adaptive_gate"] = adaptive_gate_result
+                    watcher["entry_path"] = None
+                    watcher["last_reason"] = (
+                        "; ".join(reason_bits)
+                        or "Waiting."
+                    )
+
+            self._persist_state()
             return
 
         db = self.session_factory()
@@ -778,7 +947,13 @@ class TradeWatcherEngine:
                     execution_order = self.execution_gateway.place_order(
                         symbol=watcher["symbol"], direction=direction, requested_price=entry_price, fill_price=effective_entry,
                         stake=risk["stake"], idempotency_key=f"{watcher_id}:{int(now)}:{direction}",
-                        metadata={"watcher_id": watcher_id, "forward_protocol": "V6.1_GENUINE_FORWARD", "snapshot_hash": frozen["snapshot_hash"]},
+                        metadata={
+                            "watcher_id": watcher_id,
+                            "forward_protocol": "V6.3.1_ADAPTIVE_GENUINE_FORWARD",
+                            "snapshot_hash": frozen["snapshot_hash"],
+                            "entry_path": entry_path,
+                            "adaptive_gate": adaptive_gate_result,
+                        },
                     )
                 except Exception as exc:
                     with self._lock:
@@ -811,8 +986,16 @@ class TradeWatcherEngine:
                     watcher["entry_snapshot"] = frozen["snapshot"]
                     watcher["entry_snapshot_hash"] = frozen["snapshot_hash"]
                     watcher["settlement_guard_passed"] = None
+                    watcher["entry_path"] = entry_path
+                    watcher["adaptive_gate"] = adaptive_gate_result
                     watcher["last_reason"] = (
-                        "V6.1 live entry confirmed. Genuine forward paper trade "
+                        "V6.3.1 "
+                        + (
+                            "adaptive-qualified"
+                            if entry_path == "ADAPTIVE_QUALIFIED"
+                            else "normal-confidence"
+                        )
+                        + " live entry confirmed. Genuine forward PAPER trade "
                         "opened with frozen parameters and no future data."
                     )
             self._persist_state()
