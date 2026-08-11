@@ -42,6 +42,8 @@ from auto_manager import AutomatedTradeManager
 from risk_gateway import RiskGateway
 from execution_gateway import ExecutionGateway
 from autonomous_controller import AutonomousController
+from confidence_replay import ConfidenceReplayEngine
+from confidence_wr_analyzer import ConfidenceWinRateAnalyzer
 from persistent_state import PersistentStateStore
 
 from database import (
@@ -2779,6 +2781,26 @@ def _v55_rank_candidates(
     return ranked
 
 
+V61_CONFIDENCE_REPLAY = ConfidenceReplayEngine(
+    markets=MARKETS,
+    get_data_func=get_data,
+    add_indicators_func=add_indicators,
+    train_model_func=train_model,
+    enrich_func=enrich,
+    decision_func=decision,
+    profiles=PROFILES,
+)
+
+V62_CONFIDENCE_WR_ANALYZER = ConfidenceWinRateAnalyzer(
+    markets=MARKETS,
+    get_data_func=get_data,
+    add_indicators_func=add_indicators,
+    train_model_func=train_model,
+    enrich_func=enrich,
+    decision_func=decision,
+    profiles=PROFILES,
+)
+
 V60_RISK_GATEWAY = RiskGateway(
     max_open_trades=2, max_daily_loss_pct=0.04, max_drawdown_pct=0.10, max_consecutive_losses=3,
     max_assumed_spread_bps=3.0, max_price_age_seconds=180,
@@ -3229,6 +3251,121 @@ def get_adaptive_ranking(
             False,
     }
 
+
+
+
+
+# ============================================================
+# V6.2 CONFIDENCE VS WIN-RATE ANALYZER
+# ============================================================
+
+@app.post("/confidence-wr/start")
+def start_confidence_wr_analysis(
+    risk_mode: str = "Balanced",
+    days: int = 7,
+    interval: str = "15m",
+    holding_candles: int = 4,
+    stride_candles: int = 1,
+    target_win_rate: float = 0.65,
+    min_profit_factor: float = 1.50,
+    min_trades_qualified: int = 20,
+    min_trades_promising: int = 10,
+    minimum_trade_confidence: float = 0.35,
+):
+    """Analyze realised WR for confidence buckets from 35% upward.
+
+    This endpoint is diagnostic only and never opens a trade.
+    """
+    validate_risk_mode(risk_mode)
+
+    try:
+        return V62_CONFIDENCE_WR_ANALYZER.create_job(
+            risk_mode=risk_mode,
+            days=days,
+            interval=interval,
+            holding_candles=holding_candles,
+            stride_candles=stride_candles,
+            target_win_rate=target_win_rate,
+            min_profit_factor=min_profit_factor,
+            min_trades_qualified=min_trades_qualified,
+            min_trades_promising=min_trades_promising,
+            minimum_trade_confidence=minimum_trade_confidence,
+            markets=list(MARKETS.keys()),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+
+@app.get("/confidence-wr/{job_id}")
+def get_confidence_wr_analysis(
+    job_id: str,
+):
+    job = V62_CONFIDENCE_WR_ANALYZER.get_job(
+        job_id
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Confidence/WR job not found",
+        )
+
+    return job
+
+
+# ============================================================
+# V6.1 SEVEN-DAY LIVE CONFIDENCE REPLAY
+# ============================================================
+
+@app.post("/confidence-replay/start")
+def start_confidence_replay(
+    risk_mode: str = "Balanced",
+    days: int = 7,
+    interval: str = "15m",
+    threshold: float | None = None,
+    stride_candles: int = 1,
+):
+    """Start an asynchronous no-future-data confidence replay.
+
+    stride_candles=1 checks every 15m candle and is the thorough test.
+    It is CPU intensive because the model is rebuilt at every replay point.
+    """
+    validate_risk_mode(risk_mode)
+
+    try:
+        return V61_CONFIDENCE_REPLAY.create_job(
+            risk_mode=risk_mode,
+            days=days,
+            interval=interval,
+            threshold=threshold,
+            stride_candles=stride_candles,
+            markets=list(MARKETS.keys()),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+
+@app.get("/confidence-replay/{job_id}")
+def get_confidence_replay(
+    job_id: str,
+):
+    job = V61_CONFIDENCE_REPLAY.get_job(
+        job_id
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Confidence replay job not found",
+        )
+
+    return job
 
 
 # ============================================================
