@@ -36,6 +36,15 @@ CACHE_TTL_SECONDS = 300
 STALE_CACHE_SECONDS = 21600
 UNIVERSE_TTL_SECONDS = 86400
 
+# V6.4: rotate a curated liquid/learnable FX universe quickly.
+LEARNING_UNIVERSE_SIZE = 80
+LEARNING_CURRENCIES = [
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+    "NOK", "SEK", "DKK", "SGD", "HKD", "ZAR", "MXN", "PLN",
+    "TRY", "CNH", "CZK", "HUF",
+]
+MAJOR_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD"}
+
 # Protect a Twelve Data Basic account. This leaves spare headroom below the
 # public Basic allowances instead of spending every available credit.
 TWELVE_MAX_CALLS_PER_MINUTE = 7
@@ -821,6 +830,82 @@ def get_forex_universe(
 # ============================================================
 # HEALTH / TELEMETRY
 # ============================================================
+
+
+def get_learning_universe(
+    limit: int = LEARNING_UNIVERSE_SIZE,
+) -> List[dict]:
+    """Return a curated fiat-FX universe for fast PAPER learning.
+
+    The full provider universe remains available via get_forex_universe().
+    This shortlist intentionally excludes metals/commodities such as XAU/XAG
+    and prioritises pairs that contain major currencies.
+    """
+    universe = get_forex_universe()
+    allowed = set(LEARNING_CURRENCIES)
+    rows = []
+    for item in universe:
+        symbol = str(item.get("symbol") or "").upper()
+        if "/" not in symbol:
+            continue
+        base, quote = symbol.split("/", 1)
+        if base not in allowed or quote not in allowed or base == quote:
+            continue
+        major_count = int(base in MAJOR_CURRENCIES) + int(quote in MAJOR_CURRENCIES)
+        usd_bonus = 1 if "USD" in {base, quote} else 0
+        item = dict(item)
+        item["learning_priority"] = major_count * 10 + usd_bonus * 3
+        rows.append(item)
+
+    # Dedupe by displayed pair and prefer high-priority, provider-return order.
+    unique = {}
+    for item in rows:
+        unique.setdefault(item["symbol"], item)
+    rows = list(unique.values())
+    rows.sort(key=lambda x: (x.get("learning_priority", 0), x.get("symbol", "")), reverse=True)
+    return rows[: max(1, min(int(limit), LEARNING_UNIVERSE_SIZE))]
+
+
+def get_discovery_market_data(
+    symbol: str,
+    period: str = "5d",
+    interval: str = "15m",
+) -> pd.DataFrame:
+    """Cheap discovery route: cache -> Yahoo -> Twelve Data -> stale cache.
+
+    Twelve Data is conserved for quality confirmation/deep validation while
+    broad discovery leans on Yahoo/cached data. A Yahoo failure does not stop
+    the cycle because Twelve Data and stale cache remain fallbacks.
+    """
+    cached = _cache_get(symbol, period, interval)
+    if cached is not None and len(cached) >= 80:
+        return cached
+
+    errors = []
+    try:
+        data = download_yahoo(symbol, period, interval)
+        _cache_put(symbol, period, interval, data, "YAHOO_DISCOVERY")
+        return data
+    except Exception as exc:
+        _provider_failure("YAHOO", exc)
+        errors.append(f"Yahoo: {exc}")
+
+    if TWELVE_DATA_API_KEY:
+        try:
+            data = download_twelve_data(symbol, period, interval)
+            _cache_put(symbol, period, interval, data, "TWELVE_DATA_DISCOVERY_FALLBACK")
+            return data
+        except Exception as exc:
+            _provider_failure("TWELVE_DATA", exc)
+            errors.append(f"Twelve Data: {exc}")
+
+    stale = _cache_get(symbol, period, interval, stale=True)
+    if stale is not None and len(stale) >= 80:
+        return stale
+    raise RuntimeError(
+        "All V6.4 discovery routes failed for "
+        f"{symbol} {period} {interval}. " + " | ".join(errors)
+    )
 
 def market_data_health() -> dict:
     healthy = [
