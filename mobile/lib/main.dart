@@ -2372,12 +2372,12 @@ class _HomePageState extends State<HomePage> {
   double _profileMinConfidence() {
     switch (risk) {
       case 'Conservative':
-        return 0.72;
+        return 0.30;
       case 'Aggressive':
-        return 0.62;
+        return 0.30;
       case 'Balanced':
       default:
-        return 0.67;
+        return 0.30;
     }
   }
 
@@ -3464,7 +3464,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title:
             const Text(
-          'Jasong AI Trader V6.5.1',
+          'Jasong AI Trader V6.5.2',
         ),
         actions: [
           IconButton(
