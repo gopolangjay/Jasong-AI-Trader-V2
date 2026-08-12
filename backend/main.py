@@ -69,7 +69,7 @@ from database import (
 
 
 # ============================================================
-# V6.5.2 UNIFIED ADAPTIVE THRESHOLD POLICY
+# V6.6 UNIFIED ADAPTIVE THRESHOLD POLICY
 # ============================================================
 PAPER_NORMAL_MIN_CONFIDENCE = 0.30
 PAPER_AI_MIN_CONFIDENCE = 0.40
@@ -111,8 +111,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.5.2 API",
-    version="6.5.2",
+    title="Jasong AI Trader V6.6 API",
+    version="6.6.0",
 )
 
 app.add_middleware(
@@ -897,10 +897,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.5.2",
+            "Jasong AI Trader V6.6",
 
         "version":
-            "6.5.2",
+            "6.6.0",
 
         "mode":
             "paper-trading",
@@ -926,8 +926,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.5.2",
-        "engine": "JASONG_AI_V6.5.2",
+        "version": "6.6.0",
+        "engine": "JASONG_AI_V6.6",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -1001,7 +1001,7 @@ def fx_universe(
     selected = universe[offset: offset + limit]
 
     return {
-        "version": "6.5.2",
+        "version": "6.6.0",
         "total_fx_instruments": len(universe),
         "offset": offset,
         "returned": len(selected),
@@ -1013,7 +1013,7 @@ def fx_universe(
 @app.get("/market-data-health")
 def get_market_data_health():
     return {
-        "version": "6.5.2",
+        "version": "6.6.0",
         **market_data_health(),
         "live_execution": False,
     }
@@ -1046,7 +1046,7 @@ def market_data_probe(
 
 
 # ============================================================
-# V6.5.2 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
+# V6.6 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
 # ============================================================
 
 def _v651_confidence01(value) -> float:
@@ -1122,7 +1122,7 @@ def _v651_signal_bridge(
     eligible = directional and (normal_pass or ai_pass)
 
     diagnostic = {
-        "version": "6.5.2",
+        "version": "6.6.0",
         "paper_only": True,
         "live_execution": False,
         "direction": direction,
@@ -1205,7 +1205,7 @@ def signal(
     interval: str = "15m",
     balance: float = 10000.0,
 ):
-    """V6.5.2 app signal plus autonomous PAPER bridge diagnostics."""
+    """V6.6 app signal plus autonomous PAPER bridge diagnostics."""
     validate_risk_mode(risk_mode)
     validate_balance(balance, "balance")
 
@@ -3436,7 +3436,7 @@ V64_LEARNING_ENGINE = V64LearningTradeEngine(
     state_store=V61_STATE_STORE,
     max_watchers=6,
     max_open_trades=3,
-    watcher_refresh_seconds=60,
+    watcher_refresh_seconds=30,
     starting_balance=10000.0,
     payout=0.80,
     default_stake_pct=0.01,
@@ -3463,10 +3463,10 @@ V55_AUTO_MANAGER.start_thread()
 # ============================================================
 
 def _v62_ensure_auto_manager() -> None:
-    """Migrate persisted Auto Manager state to the V6.5 learning cadence.
+    """Migrate persisted Auto Manager state to the V6.6 learning cadence.
 
     Risk mode, balance and payout are preserved where available, while the
-    sourcing cadence/watch capacity is upgraded to the V6.5 defaults.
+    sourcing cadence/watch capacity is upgraded to the V6.6 defaults.
     """
 
     try:
@@ -3475,7 +3475,7 @@ def _v62_ensure_auto_manager() -> None:
             risk_mode=str(state.get("risk_mode", "Balanced")),
             starting_balance=float(state.get("starting_balance", 10000.0) or 10000.0),
             payout=float(state.get("payout", 0.80) or 0.80),
-            scan_interval_minutes=3,
+            scan_interval_minutes=2,
             target_active_watchers=6,
             scan_top_n=20,
         )
@@ -3483,7 +3483,7 @@ def _v62_ensure_auto_manager() -> None:
 
     except Exception as exc:
         print(
-            "[V6.5 AUTO START ERROR]",
+            "[V6.6 AUTO START ERROR]",
             exc,
         )
 
@@ -4025,7 +4025,7 @@ def get_strategy_health(
 
     return {
         "version":
-            "6.1.0",
+            "6.6.0",
         "minimum_forward_trades":
             V56_FORWARD_MIN_TRADES,
         "quarantine_minimum_trades":
@@ -4061,6 +4061,12 @@ def get_auto_dashboard(
                 starting_balance
         )
     )
+
+    learning_status = V64_LEARNING_ENGINE.status()
+    learning_watchers_payload = V64_LEARNING_ENGINE.watchers()
+    learning_watchers = learning_watchers_payload.get("watchers", [])
+    learning_trades_payload = V64_LEARNING_ENGINE.trades(limit=100)
+    learning_trades = learning_trades_payload.get("trades", [])
 
     active_statuses = {
         "WATCHING",
@@ -4380,6 +4386,34 @@ def get_auto_dashboard(
                 ),
         })
 
+    # V6.6 learning-engine PAPER trades are genuine forward PAPER entries too.
+    for trade in learning_trades:
+        status = str(trade.get("status") or "").upper()
+        if status not in {"OPEN", "CLOSED"}:
+            continue
+        paper_trade_rows.append({
+            "source": "V66_LEARNING_ENGINE",
+            "trade_id": trade.get("trade_id"),
+            "watcher_id": None,
+            "market": trade.get("market"),
+            "symbol": trade.get("symbol"),
+            "direction": trade.get("direction"),
+            "status": "OPEN" if status == "OPEN" else str(trade.get("result") or "CLOSED"),
+            "entry_path": trade.get("entry_class"),
+            "historical_grade": trade.get("historical_grade"),
+            "entry_confidence": trade.get("quant_confidence"),
+            "model_ai_confidence": trade.get("model_ai_confidence"),
+            "entry_price": trade.get("entry_price"),
+            "entry_time": trade.get("opened_at"),
+            "settlement_due_at": trade.get("scheduled_close_at"),
+            "exit_price": trade.get("exit_price"),
+            "closed_at": trade.get("closed_at"),
+            "result": trade.get("result"),
+            "pnl": trade.get("pnl"),
+            "stake": trade.get("stake"),
+            "paper_only": True,
+        })
+
     paper_trade_rows.sort(
         key=lambda row: float(
             row.get(
@@ -4411,11 +4445,11 @@ def get_auto_dashboard(
             manager,
         "summary": {
             "active_watchers":
-                len(active),
+                max(len(active), int(learning_status.get("active_watchers", 0) or 0)),
             "watching":
                 len(watching),
             "open_trades":
-                len(open_watchers),
+                len(open_watchers) + int(learning_status.get("open_trades", 0) or 0),
             "completed_watchers":
                 len(completed),
             "target_active_watchers":
@@ -4459,6 +4493,8 @@ def get_auto_dashboard(
         },
         "forward":
             forward,
+        "learning": learning_status,
+        "learning_watchers": learning_watchers[:20],
         "paper_trades":
             paper_trade_rows[:50],
         "v66_forward_intelligence":
@@ -4520,7 +4556,7 @@ def get_forward_stats(
 @app.get("/v65/threshold-policy")
 def v65_threshold_policy():
     return {
-        "version": "6.5.2",
+        "version": "6.6.0",
         "normal_min_confidence": PAPER_NORMAL_MIN_CONFIDENCE,
         "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
         "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
@@ -4575,7 +4611,7 @@ def v64_learning_pause():
 def v64_learning_universe(limit: int = 80):
     rows = get_learning_universe(limit=limit)
     return {
-        "version": "6.5.2",
+        "version": "6.6.0",
         "target_full_rotation_minutes": 12,
         "batch_size": FX_DISCOVERY_BATCH_SIZE,
         "scan_interval_minutes": 3,
@@ -4590,7 +4626,7 @@ def persistent_state_status():
     snapshot = V61_STATE_STORE.snapshot()
     return {
         "status": "ok",
-        "version": "6.5.2",
+        "version": "6.6.0",
         "path": str(V61_STATE_STORE.path),
         "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
         "meta": snapshot.get("_meta", {}),
