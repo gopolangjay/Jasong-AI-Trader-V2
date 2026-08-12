@@ -1,5 +1,9 @@
 plugins {
-    id "com.android.application"
-    id "kotlin-android"
+    id "com.android.application" apply false
+    id "kotlin-android" apply false
     id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    compileSdk 35
 }
