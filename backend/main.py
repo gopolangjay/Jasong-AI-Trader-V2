@@ -69,7 +69,7 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V6.4
+# JASONG AI TRADER V6.5
 # HIGH-THROUGHPUT AUTONOMOUS PAPER LEARNING ENGINE
 # ============================================================
 
@@ -97,8 +97,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.4 API",
-    version="6.4.0",
+    title="Jasong AI Trader V6.5 API",
+    version="6.5.0",
 )
 
 app.add_middleware(
@@ -883,10 +883,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.4",
+            "Jasong AI Trader V6.5",
 
         "version":
-            "6.4.0",
+            "6.5.0",
 
         "mode":
             "paper-trading",
@@ -912,8 +912,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.4.0",
-        "engine": "JASONG_AI_V6.4",
+        "version": "6.5.0",
+        "engine": "JASONG_AI_V6.5",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -930,11 +930,19 @@ def health():
         "fx_universe_size": provider.get(
             "universe_size", 0
         ),
-        "v64_learning": (
+        "v65_learning": (
             V64_LEARNING_ENGINE.status()
             if "V64_LEARNING_ENGINE" in globals()
             else None
         ),
+        "threshold_policy": {
+            "normal_min_confidence": 0.30,
+            "normal_min_confidence_pct": 30.0,
+            "ai_min_confidence": 0.40,
+            "ai_min_confidence_pct": 40.0,
+            "legacy_67_gate_active": False,
+            "paper_only": True,
+        },
         "live_execution": False,
     }
 
@@ -980,7 +988,7 @@ def fx_universe(
     selected = universe[offset: offset + limit]
 
     return {
-        "version": "6.4.0",
+        "version": "6.5.0",
         "total_fx_instruments": len(universe),
         "offset": offset,
         "returned": len(selected),
@@ -992,7 +1000,7 @@ def fx_universe(
 @app.get("/market-data-health")
 def get_market_data_health():
     return {
-        "version": "6.4.0",
+        "version": "6.5.0",
         **market_data_health(),
         "live_execution": False,
     }
@@ -1045,9 +1053,16 @@ def signal(
         "balance",
     )
 
-    profile = PROFILES[
+    base_profile = PROFILES[
         risk_mode
     ]
+
+    profile = replace(
+        base_profile,
+        min_confidence=(
+            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
+        ),
+    )
 
     signal_data = build(
         symbol,
@@ -1066,7 +1081,7 @@ def signal(
         "suggested_paper_stake":
             stake_for_balance(
                 balance,
-                profile.risk_per_trade,
+                base_profile.risk_per_trade,
             ),
         "live_execution":
             False,
@@ -2378,9 +2393,16 @@ def _v53_live_signal(
 ):
     """Internal live signal callback used by the watcher engine."""
 
-    profile = PROFILES[
+    base_profile = PROFILES[
         risk_mode
     ]
+
+    profile = replace(
+        base_profile,
+        min_confidence=(
+            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
+        ),
+    )
 
     signal_data = build(
         symbol,
@@ -2399,7 +2421,7 @@ def _v53_live_signal(
         "suggested_paper_stake":
             stake_for_balance(
                 balance,
-                profile.risk_per_trade,
+                base_profile.risk_per_trade,
             ),
         "observed_at": time.time(),
         "live_execution": False,
@@ -2958,7 +2980,7 @@ adaptive_confidence_gate = AdaptiveConfidenceGate(
     min_profit_factor=1.50,
     min_trades=20,
     max_age_hours=24.0,
-    absolute_min_confidence=0.35,
+    absolute_min_confidence=0.30,
 )
 
 
@@ -3282,10 +3304,10 @@ V55_AUTO_MANAGER.start_thread()
 # ============================================================
 
 def _v62_ensure_auto_manager() -> None:
-    """Migrate persisted Auto Manager state to the V6.4 learning cadence.
+    """Migrate persisted Auto Manager state to the V6.5 learning cadence.
 
     Risk mode, balance and payout are preserved where available, while the
-    sourcing cadence/watch capacity is upgraded to the V6.4 defaults.
+    sourcing cadence/watch capacity is upgraded to the V6.5 defaults.
     """
 
     try:
@@ -3302,7 +3324,7 @@ def _v62_ensure_auto_manager() -> None:
 
     except Exception as exc:
         print(
-            "[V6.4 AUTO START ERROR]",
+            "[V6.5 AUTO START ERROR]",
             exc,
         )
 
@@ -3645,9 +3667,9 @@ def start_confidence_wr_analysis(
     min_profit_factor: float = 1.50,
     min_trades_qualified: int = 20,
     min_trades_promising: int = 10,
-    minimum_trade_confidence: float = 0.35,
+    minimum_trade_confidence: float = 0.30,
 ):
-    """Raw confidence calibration from 35% upward against realised win rate.\n\n    One frozen pre-test model is used per market; the live 67% gate is removed only inside this diagnostic.\n    This endpoint never opens a trade.\n    """
+    """Raw confidence calibration from 30% upward against realised win rate.\n\n    One frozen pre-test model is used per market; the legacy 67% gate is not used by V6.5 PAPER learning.\n    This endpoint never opens a trade.\n    """
     validate_risk_mode(risk_mode)
 
     try:
@@ -4333,6 +4355,31 @@ def get_forward_stats(
 
 
 # ============================================================
+# V6.5 PAPER LEARNING THRESHOLD POLICY
+# ============================================================
+
+@app.get("/v65/threshold-policy")
+def v65_threshold_policy():
+    return {
+        "version": "6.5.0",
+        "normal_min_confidence": 0.30,
+        "normal_min_confidence_pct": 30.0,
+        "ai_min_confidence": 0.40,
+        "ai_min_confidence_pct": 40.0,
+        "legacy_67_gate_active": False,
+        "entry_rule": (
+            "VERIFIED setup may enter PAPER through normal confidence >=30% "
+            "with live direction agreement OR AI confidence >=40% with "
+            "AI approval and direction agreement."
+        ),
+        "shadow_learning": True,
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "live_execution": False,
+    }
+
+
+# ============================================================
 # V6.4 HIGH-THROUGHPUT PAPER LEARNING API
 # ============================================================
 
@@ -4370,7 +4417,7 @@ def v64_learning_pause():
 def v64_learning_universe(limit: int = 80):
     rows = get_learning_universe(limit=limit)
     return {
-        "version": "6.4.0",
+        "version": "6.5.0",
         "target_full_rotation_minutes": 12,
         "batch_size": FX_DISCOVERY_BATCH_SIZE,
         "scan_interval_minutes": 3,
@@ -4385,7 +4432,7 @@ def persistent_state_status():
     snapshot = V61_STATE_STORE.snapshot()
     return {
         "status": "ok",
-        "version": "6.4.0",
+        "version": "6.5.0",
         "path": str(V61_STATE_STORE.path),
         "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
         "meta": snapshot.get("_meta", {}),
@@ -4434,13 +4481,13 @@ def adaptive_confidence_check(payload: dict):
         "market": "GBPJPY",
         "direction": "BUY",
         "confidence": 0.37,
-        "normal_min_confidence": 0.67
+        "normal_min_confidence": 0.30
       }
     """
     market = str(payload.get("market") or "").upper()
     direction = str(payload.get("direction") or "").upper()
     confidence = float(payload.get("confidence") or 0.0)
-    normal_floor = float(payload.get("normal_min_confidence") or 0.67)
+    normal_floor = float(payload.get("normal_min_confidence") or 0.30)
 
     if direction not in {"BUY", "SELL"}:
         return {
