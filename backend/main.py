@@ -10,6 +10,13 @@ from typing import Dict, Optional, Tuple
 import pandas as pd
 import yfinance as yf
 
+from market_data_router import (
+    canonical_fx_symbol,
+    get_forex_universe,
+    get_market_data,
+    market_data_health,
+)
+
 from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -59,26 +66,36 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V6.0
-# CONTROLLED AUTONOMOUS PAPER/DEMO TRADING ENGINE
+# JASONG AI TRADER V6.2
+# MULTI-SOURCE AUTONOMOUS PAPER/DEMO TRADING ENGINE
 # ============================================================
 
-MARKETS = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "AUDUSD": "AUDUSD=X",
-    "NZDUSD": "NZDUSD=X",
-    "USDCAD": "CAD=X",
-    "USDCHF": "CHF=X",
-    "EURJPY": "EURJPY=X",
-    "GBPJPY": "GBPJPY=X",
+CORE_MARKETS = {
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
+    "AUDUSD": "AUD/USD",
+    "NZDUSD": "NZD/USD",
+    "USDCAD": "USD/CAD",
+    "USDCHF": "USD/CHF",
+    "EURJPY": "EUR/JPY",
+    "GBPJPY": "GBP/JPY",
 }
+
+# Backward compatibility for manual endpoints.
+MARKETS = dict(CORE_MARKETS)
+
+# Twelve Data Basic is intentionally protected from credit exhaustion.
+# The full provider universe is available, but Auto Manager rotates a small
+# discovery batch through it rather than downloading 1,300+ histories at once.
+FX_DISCOVERY_BATCH_SIZE = 6
+_FX_DISCOVERY_OFFSET = 0
+_FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.1 API",
-    version="6.1.0",
+    title="Jasong AI Trader V6.2 API",
+    version="6.2.0",
 )
 
 app.add_middleware(
@@ -783,17 +800,15 @@ def get_data(
     period: str = "1mo",
     interval: str = "15m",
 ):
-    symbol = str(
-        symbol
-    ).strip()
+    """Unified V6.2 market-data entry point.
 
-    period = str(
-        period or "1mo"
-    ).lower().strip()
+    Provider routing is handled by market_data_router.py. Downstream strategy,
+    backtest, validator and watcher code continue using this same function.
+    """
 
-    interval = str(
-        interval or "15m"
-    ).lower().strip()
+    symbol = str(symbol or "").strip()
+    period = str(period or "1mo").lower().strip()
+    interval = str(interval or "15m").lower().strip()
 
     if not symbol:
         raise HTTPException(
@@ -801,47 +816,31 @@ def get_data(
             detail="Market symbol required",
         )
 
-    # --------------------------------------------------------
-    # EXACT CACHE
-    # --------------------------------------------------------
+    try:
+        data = get_market_data(
+            symbol=symbol,
+            period=period,
+            interval=interval,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "V6.2 market data unavailable: "
+                f"{symbol} {period} {interval}: {exc}"
+            ),
+        )
 
-    cached = _cache_get(
-        symbol,
-        period,
-        interval,
-    )
+    if data is None or data.empty or len(data) < 80:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "V6.2 insufficient market data: "
+                f"{symbol} {period} {interval}"
+            ),
+        )
 
-    if (
-        cached is not None
-        and len(cached) >= 80
-    ):
-        return cached
-
-    # --------------------------------------------------------
-    # TRY LOCAL DERIVATION FIRST
-    # --------------------------------------------------------
-
-    derived = _derived_data(
-        symbol,
-        period,
-        interval,
-    )
-
-    if (
-        derived is not None
-        and len(derived) >= 80
-    ):
-        return derived
-
-    # --------------------------------------------------------
-    # OTHERWISE USE NATIVE YAHOO
-    # --------------------------------------------------------
-
-    return _download_native(
-        symbol,
-        period,
-        interval,
-    )
+    return data
 
 
 # ============================================================
@@ -881,10 +880,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.1",
+            "Jasong AI Trader V6.2",
 
         "version":
-            "6.9.0",
+            "6.2.0",
 
         "mode":
             "paper-trading",
@@ -900,17 +899,35 @@ def root():
 
 @app.get("/health")
 def health():
+    provider = market_data_health()
+
+    manager = (
+        V55_AUTO_MANAGER.status()
+        if "V55_AUTO_MANAGER" in globals()
+        else {}
+    )
+
     return {
         "status": "ok",
-        "version": "6.1.0",
-        "cache_entries":
-            len(_DATA_CACHE),
-        "yahoo_cooldown_active":
-            yahoo_cooldown_active(),
-        "yahoo_cooldown_remaining":
-            yahoo_cooldown_remaining(),
-        "live_execution":
-            False,
+        "version": "6.2.0",
+        "engine": "JASONG_AI_V6.2",
+        "auto_manager_enabled": bool(
+            manager.get("enabled", False)
+        ),
+        "auto_manager_runs": int(
+            manager.get("runs", 0) or 0
+        ),
+        "market_data_status": provider.get("status"),
+        "configured_providers": provider.get(
+            "configured_providers", []
+        ),
+        "healthy_providers": provider.get(
+            "healthy_providers", []
+        ),
+        "fx_universe_size": provider.get(
+            "universe_size", 0
+        ),
+        "live_execution": False,
     }
 
 
@@ -933,6 +950,69 @@ def clear_data_cache():
     return {
         "status": "cleared",
         "entries_removed": removed,
+    }
+
+
+# ============================================================
+# V6.2 FOREX UNIVERSE / DATA PROVIDERS
+# ============================================================
+
+@app.get("/fx-universe")
+def fx_universe(
+    limit: int = 100,
+    offset: int = 0,
+    refresh: bool = False,
+):
+    limit = max(1, min(int(limit), 5000))
+    offset = max(0, int(offset))
+
+    universe = get_forex_universe(
+        force_refresh=refresh
+    )
+    selected = universe[offset: offset + limit]
+
+    return {
+        "version": "6.2.0",
+        "total_fx_instruments": len(universe),
+        "offset": offset,
+        "returned": len(selected),
+        "markets": selected,
+        "live_execution": False,
+    }
+
+
+@app.get("/market-data-health")
+def get_market_data_health():
+    return {
+        "version": "6.2.0",
+        **market_data_health(),
+        "live_execution": False,
+    }
+
+
+@app.get("/market-data-probe")
+def market_data_probe(
+    symbol: str = "EUR/USD",
+    period: str = "5d",
+    interval: str = "15m",
+):
+    data = get_data(
+        symbol=symbol,
+        period=period,
+        interval=interval,
+    )
+
+    return {
+        "status": "ok",
+        "symbol": canonical_fx_symbol(symbol),
+        "period": period,
+        "interval": interval,
+        "rows": len(data),
+        "latest_price": float(
+            data["Close"].iloc[-1]
+        ),
+        "market_data": market_data_health(),
+        "live_execution": False,
     }
 
 
@@ -2992,43 +3072,110 @@ V53_WATCHER_ENGINE.start()
 # V5.5 AUTOMATED TRADE MANAGER
 # ============================================================
 
+def _v62_next_fx_batch(
+    batch_size: int = FX_DISCOVERY_BATCH_SIZE,
+) -> dict[str, str]:
+    """Return the next rotating slice of the discovered FX universe."""
+
+    global _FX_DISCOVERY_OFFSET
+
+    with _FX_DISCOVERY_LOCK:
+        universe = get_forex_universe()
+
+        if not universe:
+            return dict(CORE_MARKETS)
+
+        total = len(universe)
+        batch_size = max(
+            1, min(int(batch_size), total)
+        )
+
+        if _FX_DISCOVERY_OFFSET >= total:
+            _FX_DISCOVERY_OFFSET = 0
+
+        selected = [
+            universe[
+                (_FX_DISCOVERY_OFFSET + index) % total
+            ]
+            for index in range(batch_size)
+        ]
+
+        _FX_DISCOVERY_OFFSET = (
+            _FX_DISCOVERY_OFFSET + batch_size
+        ) % total
+
+        return {
+            item["market"]: item["symbol"]
+            for item in selected
+        }
+
+
 def _v55_scan_candidates(
     top_n: int = 9,
     payout: float = 0.80,
 ) -> list[dict]:
-    raw = run_fast_scan(
-        period="5d",
-        interval="15m",
-        top_n=max(
-            1,
-            min(
-                int(top_n),
-                len(MARKETS),
-            ),
+    """V6.2 rotating multi-source FX discovery scan."""
+
+    scan_markets = _v62_next_fx_batch(
+        batch_size=FX_DISCOVERY_BATCH_SIZE
+    )
+
+    if not scan_markets:
+        scan_markets = dict(CORE_MARKETS)
+
+    effective_top_n = max(
+        1,
+        min(
+            int(top_n),
+            len(scan_markets),
         ),
     )
 
+    raw_result = fast_scan_markets(
+        markets=scan_markets,
+        get_data_func=get_data,
+        add_indicators_func=add_indicators,
+        period="5d",
+        interval="15m",
+        top_n=effective_top_n,
+    )
+
+    raw = _v54_rescore_fast_scan(
+        result=raw_result,
+        top_n=effective_top_n,
+    )
+
     candidates = (
-        raw.get(
-            "ranking"
-        )
-        or raw.get(
-            "top_candidates"
-        )
+        raw.get("ranking")
+        or raw.get("top_candidates")
         or []
     )
 
-    return _v55_rank_candidates(
+    ranked = _v55_rank_candidates(
         candidates=[
             dict(item)
             for item in candidates
-            if isinstance(
-                item,
-                dict,
-            )
+            if isinstance(item, dict)
         ],
         payout=payout,
     )
+
+    universe_size = len(
+        get_forex_universe()
+    )
+
+    for candidate in ranked:
+        candidate["discovery_version"] = (
+            "V6.2_DYNAMIC_FX"
+        )
+        candidate["discovery_universe_size"] = (
+            universe_size
+        )
+        candidate["discovery_batch_size"] = len(
+            scan_markets
+        )
+
+    return ranked
 
 
 def _v55_validate_candidate(
@@ -3105,6 +3252,43 @@ V55_AUTO_MANAGER = AutomatedTradeManager(
 )
 
 V55_AUTO_MANAGER.start_thread()
+
+
+# ============================================================
+# V6.2 ALWAYS-ON AUTO MANAGER
+# ============================================================
+
+def _v62_ensure_auto_manager() -> None:
+    """Ensure autonomous PAPER mode is enabled after every backend start.
+
+    Existing persisted settings are retained whenever Auto Manager is already
+    enabled. If persisted state is disabled or absent, safe defaults are used.
+    """
+
+    try:
+        state = V55_AUTO_MANAGER.status()
+
+        if not bool(state.get("enabled", False)):
+            V55_AUTO_MANAGER.enable(
+                risk_mode="Balanced",
+                starting_balance=10000.0,
+                payout=0.80,
+                scan_interval_minutes=15,
+                target_active_watchers=3,
+                scan_top_n=6,
+            )
+
+        V55_AUTO_MANAGER.start_thread()
+
+    except Exception as exc:
+        print(
+            "[V6.2 AUTO START ERROR]",
+            exc,
+        )
+
+
+_v62_ensure_auto_manager()
+
 
 V60_CONTROLLER = AutonomousController(
     auto_manager=V55_AUTO_MANAGER, watcher_engine=V53_WATCHER_ENGINE, risk_gateway=V60_RISK_GATEWAY,
@@ -4132,7 +4316,7 @@ def persistent_state_status():
     snapshot = V61_STATE_STORE.snapshot()
     return {
         "status": "ok",
-        "version": "6.1.0",
+        "version": "6.2.0",
         "path": str(V61_STATE_STORE.path),
         "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
         "meta": snapshot.get("_meta", {}),
