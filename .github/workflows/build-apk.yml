@@ -3,29 +3,35 @@ name: Build Jasong AI Trader APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
-      - 'mobile/**'
-      - '.github/workflows/build-apk.yml'
+      - "mobile/**"
+      - ".github/workflows/build-apk.yml"
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: mobile
-
     steps:
-      - name: Checkout project
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. JAVA
+      # ============================================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
+      # ============================================================
+      # 3. FLUTTER
+      # ============================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -35,24 +41,191 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
-      - name: Get packages
+      # ============================================================
+      # 4. VERIFY PROJECT
+      # ============================================================
+      - name: Verify Flutter project files
+        run: |
+          echo "Checking Flutter project..."
+
+          test -f mobile/pubspec.yaml || {
+            echo "ERROR: mobile/pubspec.yaml not found"
+            exit 1
+          }
+
+          test -f mobile/lib/main.dart || {
+            echo "ERROR: mobile/lib/main.dart not found"
+            exit 1
+          }
+
+          test -d mobile/android || {
+            echo "ERROR: mobile/android folder not found"
+            exit 1
+          }
+
+          test -f mobile/android/settings.gradle || {
+            echo "ERROR: mobile/android/settings.gradle not found"
+            exit 1
+          }
+
+          test -f mobile/android/build.gradle || {
+            echo "ERROR: mobile/android/build.gradle not found"
+            exit 1
+          }
+
+          test -f mobile/android/app/build.gradle || {
+            echo "ERROR: mobile/android/app/build.gradle not found"
+            exit 1
+          }
+
+          echo "Flutter project structure looks OK."
+
+      # ============================================================
+      # 5. FLUTTER DEPENDENCIES
+      # ============================================================
+      - name: Get Flutter packages
+        working-directory: mobile
         run: flutter pub get
 
-      - name: Verify branding asset exists
+      # ============================================================
+      # 6. VERIFY BRANDING ASSET
+      # ============================================================
+      - name: Verify Jasong branding
         run: |
-          test -f assets/images/jasong_logo.png
-          echo "Branding asset found."
+          if [ -f mobile/assets/images/jasong_logo.png ]; then
+            echo "Jasong logo found."
+          else
+            echo "WARNING: Jasong logo not found."
+          fi
 
-      - name: Analyse Dart
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      # ============================================================
+      # 7. GENERATE GRADLE WRAPPER
+      # ============================================================
+      - name: Generate Android Gradle wrapper
+        working-directory: mobile/android
+        run: |
+          echo "Checking Android Gradle wrapper..."
 
+          if [ ! -f gradlew ] || \
+             [ ! -f gradlew.bat ] || \
+             [ ! -f gradle/wrapper/gradle-wrapper.jar ] || \
+             [ ! -f gradle/wrapper/gradle-wrapper.properties ]; then
+
+            echo "Gradle wrapper incomplete or missing."
+            echo "Generating Gradle 8.10.2 wrapper..."
+
+            gradle wrapper \
+              --gradle-version 8.10.2 \
+              --distribution-type bin
+
+          else
+            echo "Gradle wrapper already present."
+          fi
+
+          chmod +x gradlew
+
+          echo "Gradle wrapper files:"
+          ls -la
+          ls -la gradle/wrapper || true
+
+          echo "Wrapper version:"
+          ./gradlew --version
+
+      # ============================================================
+      # 8. CHECK FOR DELETED FLUTTER V1 EMBEDDING
+      # ============================================================
+      - name: Check Android embedding
+        run: |
+          echo "Searching for deleted Flutter v1 embedding references..."
+
+          if grep -R \
+            --exclude-dir=build \
+            --exclude-dir=.gradle \
+            -E \
+            "io\.flutter\.app\.|FlutterApplication|FlutterMain|PluginRegistry\.Registrar" \
+            mobile/android; then
+
+            echo ""
+            echo "ERROR: Old Flutter Android v1 embedding reference found."
+            exit 1
+
+          else
+            echo "No deleted Flutter v1 embedding references found."
+          fi
+
+          echo ""
+          echo "Checking MainActivity..."
+
+          if [ -f mobile/android/app/src/main/kotlin/com/jasong/ai/trader/MainActivity.kt ]; then
+            cat mobile/android/app/src/main/kotlin/com/jasong/ai/trader/MainActivity.kt
+          else
+            echo "ERROR: MainActivity.kt not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "Checking flutterEmbedding metadata..."
+
+          grep -n \
+            -A2 \
+            -B2 \
+            "flutterEmbedding" \
+            mobile/android/app/src/main/AndroidManifest.xml || {
+              echo "ERROR: flutterEmbedding metadata missing."
+              exit 1
+            }
+
+      # ============================================================
+      # 9. DART ANALYSIS
+      # ============================================================
+      - name: Analyse Flutter code
+        working-directory: mobile
+        run: |
+          flutter analyze \
+            --no-fatal-infos \
+            --no-fatal-warnings
+
+      # ============================================================
+      # 10. CLEAN OLD BUILD
+      # ============================================================
+      - name: Clean Flutter build
+        working-directory: mobile
+        run: |
+          flutter clean
+          flutter pub get
+
+      # ============================================================
+      # 11. BUILD RELEASE APK
+      # ============================================================
       - name: Build release APK
-        run: flutter build apk --release --verbose
+        working-directory: mobile
+        run: |
+          flutter build apk \
+            --release \
+            --verbose
 
+      # ============================================================
+      # 12. VERIFY APK
+      # ============================================================
+      - name: Verify APK output
+        run: |
+          APK="mobile/build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not produced."
+            exit 1
+          fi
+
+          echo "APK successfully created:"
+          ls -lh "$APK"
+
+      # ============================================================
+      # 13. UPLOAD APK
+      # ============================================================
       - name: Upload Jasong AI Trader APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Jasong-AI-Trader-V6.5.1-APK
+          name: Jasong-AI-Trader-V6.5.2-APK
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+          retention-days: 30
