@@ -1,4 +1,3 @@
-
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -97,8 +96,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.5 API",
-    version="6.5.0",
+    title="Jasong AI Trader V6.5.1 API",
+    version="6.5.1",
 )
 
 app.add_middleware(
@@ -1033,6 +1032,154 @@ def market_data_probe(
 
 
 # ============================================================
+# V6.5.1 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
+# ============================================================
+
+def _v651_confidence01(value) -> float:
+    """Normalize 0..1 or 0..100 confidence values to 0..1."""
+    try:
+        number = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number:
+        return 0.0
+    if number > 1.0:
+        number /= 100.0
+    return max(0.0, min(1.0, number))
+
+
+def _v651_directional_model_ai(result: dict, direction: str) -> float:
+    """Convert displayed AI-up probability into confidence for BUY/SELL."""
+    raw_up = None
+    for key in (
+        "combined_up_probability",
+        "ai_up_probability",
+        "ai_up",
+        "up_probability",
+        "prob_up",
+        "probability_up",
+    ):
+        if result.get(key) is not None:
+            raw_up = result.get(key)
+            break
+    if raw_up is None:
+        return 0.0
+    up = _v651_confidence01(raw_up)
+    return up if direction == "BUY" else (1.0 - up)
+
+
+def _v651_norm_symbol(value: str) -> str:
+    """Make EUR/USD, EURUSD=X and EURUSD comparable for watcher matching."""
+    text = str(value or "").upper()
+    for token in ("/", "=", "-", "_", " ", ":"):
+        text = text.replace(token, "")
+    if text.endswith("X") and len(text) > 6:
+        text = text[:-1]
+    return text
+
+
+def _v651_signal_bridge(
+    *,
+    symbol: str,
+    risk_mode: str,
+    balance: float,
+    signal_result: dict,
+) -> dict:
+    """
+    Connect Refresh AI Signal to the autonomous PAPER workflow.
+
+    Safety rule: this bridge NEVER creates fake VERIFIED status. If a matching
+    VERIFIED learning watcher exists, it forces an immediate learning tick.
+    Otherwise it queues Auto Manager so normal discovery + deep validation
+    decides whether the setup deserves a verified watcher.
+    """
+    direction = str(
+        signal_result.get("direction")
+        or signal_result.get("signal")
+        or signal_result.get("decision")
+        or "WAIT"
+    ).upper()
+
+    quant = _v651_confidence01(signal_result.get("confidence"))
+    model_ai = _v651_directional_model_ai(signal_result, direction)
+    normal_pass = quant >= V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
+    ai_pass = model_ai >= V64LearningTradeEngine.AI_MIN_CONFIDENCE
+    directional = direction in {"BUY", "SELL"}
+    eligible = directional and (normal_pass or ai_pass)
+
+    diagnostic = {
+        "version": "6.5.1",
+        "paper_only": True,
+        "live_execution": False,
+        "direction": direction,
+        "normal_confidence_pct": round(quant * 100.0, 2),
+        "normal_threshold_pct": round(
+            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE * 100.0, 2
+        ),
+        "model_ai_directional_confidence_pct": round(model_ai * 100.0, 2),
+        "model_ai_threshold_pct": round(
+            V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0, 2
+        ),
+        "normal_pass": normal_pass,
+        "ai_pass": ai_pass,
+        "eligible_for_verified_watcher_check": eligible,
+        "verified_watcher_found": False,
+        "action": "NO_ACTION",
+        "reason": None,
+    }
+
+    if not eligible:
+        diagnostic["reason"] = "Signal is WAIT or below both PAPER-learning thresholds."
+        return diagnostic
+
+    engine = globals().get("V64_LEARNING_ENGINE")
+    manager = globals().get("V55_AUTO_MANAGER")
+    if engine is None:
+        diagnostic["reason"] = "Learning engine is not initialized."
+        return diagnostic
+
+    wanted_symbol = _v651_norm_symbol(symbol)
+
+    try:
+        watchers = engine.watchers().get("watchers", [])
+        matching = [
+            w for w in watchers
+            if bool(w.get("verified"))
+            and _v651_norm_symbol(w.get("symbol")) == wanted_symbol
+            and str(w.get("direction") or "").upper() == direction
+        ]
+
+        if matching:
+            diagnostic["verified_watcher_found"] = True
+            engine.tick()
+            diagnostic["action"] = "VERIFIED_WATCHER_RECHECKED"
+            diagnostic["reason"] = (
+                "Matching VERIFIED watcher found; learning engine rechecked immediately."
+            )
+            return diagnostic
+
+        if manager is not None:
+            queued = manager.queue_run(source="signal_bridge")
+            diagnostic["action"] = (
+                "AUTO_MANAGER_QUEUED"
+                if queued.get("accepted")
+                else "AUTO_MANAGER_ALREADY_RUNNING"
+            )
+            diagnostic["auto_manager_job_id"] = queued.get("job_id")
+            diagnostic["reason"] = (
+                "Thresholds passed but no matching VERIFIED watcher exists. "
+                "Auto Manager was queued for discovery/deep validation."
+            )
+        else:
+            diagnostic["reason"] = "Thresholds passed but Auto Manager is not initialized."
+    except Exception as exc:
+        diagnostic["action"] = "BRIDGE_ERROR"
+        diagnostic["reason"] = str(exc)
+
+    return diagnostic
+
+
+# ============================================================
 # SIGNAL
 # ============================================================
 
@@ -1044,48 +1191,47 @@ def signal(
     interval: str = "15m",
     balance: float = 10000.0,
 ):
-    validate_risk_mode(
-        risk_mode
-    )
+    """V6.5.1 app signal plus autonomous PAPER bridge diagnostics."""
+    validate_risk_mode(risk_mode)
+    validate_balance(balance, "balance")
 
-    validate_balance(
-        balance,
-        "balance",
-    )
-
-    base_profile = PROFILES[
-        risk_mode
-    ]
-
+    base_profile = PROFILES[risk_mode]
     profile = replace(
         base_profile,
-        min_confidence=(
-            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
-        ),
+        min_confidence=V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE,
     )
 
-    signal_data = build(
-        symbol,
-        period,
-        interval,
-    )
-
-    result = decision(
-        signal_data,
-        profile,
-    )
+    signal_data = build(symbol, period, interval)
+    result = decision(signal_data, profile)
 
     result.update({
         "symbol": symbol,
         "risk_mode": risk_mode,
-        "suggested_paper_stake":
-            stake_for_balance(
-                balance,
-                base_profile.risk_per_trade,
-            ),
-        "live_execution":
-            False,
+        "suggested_paper_stake": stake_for_balance(
+            balance,
+            base_profile.risk_per_trade,
+        ),
+        "threshold_policy": {
+            "normal_min_confidence": V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE,
+            "normal_min_confidence_pct":
+                V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE * 100.0,
+            "ai_min_confidence": V64LearningTradeEngine.AI_MIN_CONFIDENCE,
+            "ai_min_confidence_pct":
+                V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0,
+            "legacy_67_gate_active": False,
+            "paper_only": True,
+        },
+        "live_execution": False,
     })
+
+    # A manual refresh now participates in the autonomous PAPER workflow.
+    # It can trigger verification/recheck, but never bypass deep validation.
+    result["autonomous_bridge"] = _v651_signal_bridge(
+        symbol=symbol,
+        risk_mode=risk_mode,
+        balance=balance,
+        signal_result=result,
+    )
 
     return result
 
