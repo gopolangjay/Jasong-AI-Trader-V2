@@ -20,20 +20,21 @@ class V64LearningTradeEngine:
     watcher engine so exploratory PAPER trades do not contaminate the strict
     baseline. It supports:
 
-    N30  - normal PAPER path: quantitative confidence >= 30% with direction agreement
-    AI40 - AI PAPER path: OpenAI directional confidence >= 40%, approval, and
-           agreement with the historically validated direction
-    DUAL - both N30 and AI40 pass at the same observation
-    S    - shadow observation: rejected/watch-only setup recorded without balance impact
+    D - BOTH path: normal confidence >= 30% and model-AI >= 40%
+    N - NORMAL path: normal confidence >= 30%
+    M - MODEL_AI path: directional model-AI confidence >= 40%
+    S - shadow trade: rejected/watch-only setup recorded without balance impact
 
     No broker credentials are accepted and no live order is sent.
     """
 
-    VERSION = "6.5.0"
+    VERSION = "6.5.1"
     NAMESPACE = "v64_learning_engine"
+
+    # V6.5.1 PAPER-learning entry thresholds.
+    # Experimental only: broker execution remains disabled.
     NORMAL_MIN_CONFIDENCE = 0.30
     AI_MIN_CONFIDENCE = 0.40
-    # The old 67% gate is intentionally removed from V6.5 PAPER learning.
 
     def __init__(
         self,
@@ -326,259 +327,140 @@ class V64LearningTradeEngine:
         self._ai_cache[key] = {"timestamp": time.time(), "result": dict(result)}
         return result
 
+    @classmethod
+    def _directional_model_ai_confidence(
+        cls,
+        live: Dict[str, Any],
+        wanted: str,
+    ) -> float:
+        """Return the model probability for the wanted BUY/SELL direction."""
+        raw_up = None
+        for key in (
+            "combined_up_probability",
+            "ai_up_probability",
+            "ai_up",
+            "up_probability",
+            "prob_up",
+            "probability_up",
+        ):
+            if key in live and live.get(key) is not None:
+                raw_up = live.get(key)
+                break
+
+        if raw_up is None:
+            return 0.0
+
+        up = cls._confidence01(raw_up)
+        return up if wanted == "BUY" else (1.0 - up)
+
     def _entry_class(
         self,
         watcher: Dict[str, Any],
         live: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Classify one V6.5 PAPER learning opportunity.
-
-        The old 67% confidence gate is not used.
-
-        Actual PAPER eligibility requires a VERIFIED historical setup and can
-        pass through either:
-          - NORMAL_30: live quantitative direction matches and confidence >=30%
-          - AI_40: AI direction agrees, confidence >=40%, and approve is true
-
-        Both paths passing at once are labelled DUAL. Everything else becomes a
-        shadow observation so we can later measure rejected risk and opportunity
-        cost without changing the PAPER balance.
         """
+        V6.5.1 PAPER-only entry policy.
 
-        wanted = str(
-            watcher.get("direction")
-            or ""
-        ).upper()
+        A VERIFIED watcher may enter when live direction matches and either:
+        - normal quantitative confidence >= 30%, or
+        - directional model-AI confidence >= 40%.
 
+        The former 67% gate is not used by this learning path.
+        """
+        wanted = str(watcher.get("direction") or "").upper()
         live_direction = str(
             live.get("direction")
             or live.get("signal")
+            or live.get("decision")
             or "WAIT"
         ).upper()
 
-        quant = self._confidence01(
-            live.get("confidence")
-        )
+        quant = self._confidence01(live.get("confidence"))
+        model_ai = self._directional_model_ai_confidence(live, wanted)
 
-        verified = bool(
-            watcher.get("verified")
-        )
+        verified = bool(watcher.get("verified"))
+        direction_match = live_direction == wanted
+        normal_pass = quant >= self.NORMAL_MIN_CONFIDENCE
+        ai_pass = model_ai >= self.AI_MIN_CONFIDENCE
 
-        normal_pass = (
-            verified
-            and live_direction == wanted
-            and quant >= self.NORMAL_MIN_CONFIDENCE
-        )
-
-        ai = (
-            self._ai_assess(
-                watcher,
-                live,
-                quant,
-            )
-            if verified
-            else {
-                "available": False,
-                "direction": None,
-                "confidence": 0.0,
-                "approve": False,
-                "reason": "Historical setup not VERIFIED",
+        if not verified:
+            return {
+                "class": "S",
+                "enter": False,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": normal_pass,
+                "ai_pass": ai_pass,
+                "direction_match": direction_match,
+                "reason": "Shadow only: setup has not passed deep verification",
             }
-        )
 
-        ai_confidence = self._confidence01(
-            ai.get("confidence")
-        )
-
-        ai_pass = (
-            verified
-            and bool(ai.get("available"))
-            and str(
-                ai.get("direction")
-                or ""
-            ).upper()
-            == wanted
-            and ai_confidence
-            >= self.AI_MIN_CONFIDENCE
-            and bool(ai.get("approve"))
-        )
+        if not direction_match:
+            return {
+                "class": "S",
+                "enter": False,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": normal_pass,
+                "ai_pass": ai_pass,
+                "direction_match": False,
+                "reason": (
+                    f"Live direction {live_direction} does not match "
+                    f"verified direction {wanted}"
+                ),
+            }
 
         if normal_pass and ai_pass:
             return {
-                "class": "DUAL",
-                "entry_path": "NORMAL_30_PLUS_AI_40",
+                "class": "D",
                 "enter": True,
                 "quant": quant,
-                "ai": ai,
+                "model_ai_confidence": model_ai,
+                "ai": None,
                 "normal_pass": True,
                 "ai_pass": True,
-                "reason": (
-                    "Both V6.5 PAPER gates passed: normal >=30% with "
-                    "direction agreement and AI >=40% with approval."
-                ),
+                "direction_match": True,
+                "reason": "V6.5.1 BOTH path: normal >=30% and model-AI >=40%",
             }
 
         if normal_pass:
             return {
-                "class": "N30",
-                "entry_path": "NORMAL_30",
+                "class": "N",
                 "enter": True,
                 "quant": quant,
-                "ai": ai,
+                "model_ai_confidence": model_ai,
+                "ai": None,
                 "normal_pass": True,
                 "ai_pass": False,
-                "reason": (
-                    "V6.5 normal PAPER gate passed: confidence >=30% "
-                    "and live direction matches the verified setup."
-                ),
+                "direction_match": True,
+                "reason": "V6.5.1 NORMAL path: quantitative confidence >=30%",
             }
 
         if ai_pass:
             return {
-                "class": "AI40",
-                "entry_path": "AI_40",
+                "class": "M",
                 "enter": True,
                 "quant": quant,
-                "ai": ai,
+                "model_ai_confidence": model_ai,
+                "ai": None,
                 "normal_pass": False,
                 "ai_pass": True,
-                "reason": (
-                    "V6.5 AI PAPER gate passed: AI confidence >=40%, "
-                    "AI approved, and AI direction matches the verified setup."
-                ),
+                "direction_match": True,
+                "reason": "V6.5.1 MODEL_AI path: directional model-AI >=40%",
             }
-
-        reasons = []
-
-        if not verified:
-            reasons.append(
-                "historical setup not VERIFIED"
-            )
-
-        if live_direction != wanted:
-            reasons.append(
-                f"live direction {live_direction} does not match {wanted}"
-            )
-
-        if quant < self.NORMAL_MIN_CONFIDENCE:
-            reasons.append(
-                f"quant confidence {quant * 100:.1f}% below 30%"
-            )
-
-        if not bool(ai.get("available")):
-            reasons.append(
-                "AI assessment unavailable"
-            )
-        else:
-            if str(
-                ai.get("direction")
-                or ""
-            ).upper() != wanted:
-                reasons.append(
-                    "AI direction does not match verified setup"
-                )
-
-            if ai_confidence < self.AI_MIN_CONFIDENCE:
-                reasons.append(
-                    f"AI confidence {ai_confidence * 100:.1f}% below 40%"
-                )
-
-            if not bool(ai.get("approve")):
-                reasons.append(
-                    "AI did not approve"
-                )
 
         return {
             "class": "S",
-            "entry_path": "SHADOW_REJECT",
             "enter": False,
             "quant": quant,
-            "ai": ai,
+            "model_ai_confidence": model_ai,
+            "ai": None,
             "normal_pass": False,
             "ai_pass": False,
-            "reason": (
-                "; ".join(reasons)
-                if reasons
-                else "Shadow-only risk observation"
-            ),
-        }
-
-    def _risk_snapshot(
-        self,
-        watcher: Dict[str, Any],
-        live: Dict[str, Any],
-        decision: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Freeze observable risk factors at the entry/rejection timestamp."""
-
-        candidate = watcher.get("candidate") or {}
-        validated = watcher.get("validated") or {}
-        ai = decision.get("ai") or {}
-
-        return {
-            "captured_at": time.time(),
-            "verified": bool(watcher.get("verified")),
-            "deep_status": watcher.get("deep_status"),
-            "wanted_direction": watcher.get("direction"),
-            "live_direction": (
-                live.get("direction")
-                or live.get("signal")
-                or "WAIT"
-            ),
-            "quant_confidence": decision.get("quant"),
-            "quant_confidence_pct": round(
-                self._confidence01(
-                    decision.get("quant")
-                ) * 100.0,
-                2,
-            ),
-            "normal_threshold": self.NORMAL_MIN_CONFIDENCE,
-            "normal_pass": bool(
-                decision.get("normal_pass", False)
-            ),
-            "ai_available": bool(ai.get("available")),
-            "ai_direction": ai.get("direction"),
-            "ai_confidence": self._confidence01(
-                ai.get("confidence")
-            ),
-            "ai_confidence_pct": round(
-                self._confidence01(
-                    ai.get("confidence")
-                ) * 100.0,
-                2,
-            ),
-            "ai_threshold": self.AI_MIN_CONFIDENCE,
-            "ai_approve": bool(ai.get("approve")),
-            "ai_pass": bool(
-                decision.get("ai_pass", False)
-            ),
-            "ai_reason": ai.get("reason"),
-            "entry_path": decision.get("entry_path"),
-            "rsi": (
-                live.get("rsi")
-                or candidate.get("rsi")
-            ),
-            "price": live.get("price"),
-            "fast_score": candidate.get("fast_score"),
-            "smart_fast_score": candidate.get(
-                "smart_fast_score"
-            ),
-            "adaptive_rank_score": candidate.get(
-                "adaptive_rank_score"
-            ),
-            "quality_tier": candidate.get("quality_tier"),
-            "historical_win_rate": validated.get("win_rate"),
-            "historical_profit_factor": validated.get(
-                "profit_factor"
-            ),
-            "historical_drawdown": validated.get(
-                "max_drawdown"
-            ),
-            "historical_trades": validated.get("trades"),
-            "historical_interval": validated.get("interval"),
-            "historical_holding_candles": validated.get(
-                "holding_candles"
-            ),
+            "direction_match": True,
+            "reason": "Below V6.5.1 PAPER thresholds: normal <30% and model-AI <40%",
         }
 
     def _open_trade(
@@ -606,11 +488,13 @@ class V64LearningTradeEngine:
         trade = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": decision["class"],
-            "entry_path": decision.get("entry_path"),
             "symbol": symbol,
             "market": watcher.get("market"),
             "direction": direction,
             "quant_confidence": decision.get("quant"),
+            "model_ai_confidence": decision.get("model_ai_confidence"),
+            "entry_normal_pass": decision.get("normal_pass"),
+            "entry_ai_pass": decision.get("ai_pass"),
             "ai": decision.get("ai"),
             "entry_price": price,
             "stake": self._stake(),
@@ -623,11 +507,6 @@ class V64LearningTradeEngine:
             "exit_price": None,
             "closed_at": None,
             "reason": decision.get("reason"),
-            "risk_snapshot": self._risk_snapshot(
-                watcher,
-                live,
-                decision,
-            ),
         }
         with self._lock:
             self._state["open_trades"].append(trade)
@@ -659,15 +538,13 @@ class V64LearningTradeEngine:
         shadow = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": "S",
-            "entry_path": decision.get(
-                "entry_path",
-                "SHADOW_REJECT",
-            ),
             "symbol": symbol,
             "market": watcher.get("market"),
             "direction": direction,
             "quant_confidence": decision.get("quant"),
-            "ai": decision.get("ai"),
+            "model_ai_confidence": decision.get("model_ai_confidence"),
+            "entry_normal_pass": decision.get("normal_pass"),
+            "entry_ai_pass": decision.get("ai_pass"),
             "entry_price": price,
             "stake": 0.0,
             "opened_at": now,
@@ -677,11 +554,6 @@ class V64LearningTradeEngine:
             "result": None,
             "pnl": 0.0,
             "reason": decision.get("reason"),
-            "risk_snapshot": self._risk_snapshot(
-                watcher,
-                live,
-                decision,
-            ),
         }
         with self._lock:
             self._state["shadow_open"].append(shadow)
@@ -708,35 +580,15 @@ class V64LearningTradeEngine:
             won = exit_price > entry if direction == "BUY" else exit_price < entry
             stake = self._safe_float(trade.get("stake"), 0.0)
             payout = self._safe_float(self._state.get("payout"), 0.80)
-            raw_pnl = (
-                stake * payout
-                if won
-                else -stake
-            )
-
-            if affect_balance:
-                pnl = raw_pnl
-                hypothetical_pnl = raw_pnl
-            else:
-                # Shadow observations do not change the PAPER balance, but we
-                # retain a one-unit counterfactual payoff for risk analysis.
-                hypothetical_pnl = (
-                    payout
-                    if won
-                    else -1.0
-                )
+            pnl = (stake * payout) if won else (-stake)
+            if not affect_balance:
                 pnl = 0.0
-
             trade.update({
                 "status": "CLOSED",
                 "result": "WIN" if won else "LOSS",
                 "exit_price": exit_price,
                 "closed_at": now,
                 "pnl": round(pnl, 2),
-                "hypothetical_pnl": round(
-                    hypothetical_pnl,
-                    4,
-                ),
             })
             settled_now.append(trade)
             self._journal("LEARNING_TRADE_SETTLED" if affect_balance else "SHADOW_TRADE_SETTLED", trade)
@@ -836,7 +688,7 @@ class V64LearningTradeEngine:
             watchers = list(state.get("watchers", []))
 
         classes = {}
-        for cls in ["N30", "AI40", "DUAL"]:
+        for cls in ["A", "B", "C"]:
             classes[cls] = self._stats_for([t for t in actual if t.get("entry_class") == cls])
 
         # Shadow P&L is deliberately zero, so calculate only outcome frequency.
@@ -851,141 +703,22 @@ class V64LearningTradeEngine:
 
         buckets = {}
         bucket_defs = [
-            ("0-29", 0.0, 0.30),
-            ("30-34", 0.30, 0.35),
+            ("0-34", 0.0, 0.35),
             ("35-39", 0.35, 0.40),
             ("40-49", 0.40, 0.50),
             ("50-59", 0.50, 0.60),
-            ("60+", 0.60, 1.01),
+            ("60-66", 0.60, 0.67),
+            ("67+", 0.67, 1.01),
         ]
         all_outcomes = actual + shadow
         for name, low, high in bucket_defs:
-            rows = [
-                t
-                for t in all_outcomes
-                if (
-                    low
-                    <= self._confidence01(
-                        t.get("quant_confidence")
-                    )
-                    < high
-                    and t.get("result")
-                    in {"WIN", "LOSS"}
-                )
-            ]
-
-            wins = sum(
-                1
-                for t in rows
-                if t.get("result") == "WIN"
-            )
-
-            hypothetical_values = [
-                self._safe_float(
-                    t.get(
-                        "hypothetical_pnl",
-                        t.get("pnl"),
-                    ),
-                    0.0,
-                )
-                for t in rows
-            ]
-
-            gross_hyp_profit = sum(
-                max(v, 0.0)
-                for v in hypothetical_values
-            )
-
-            gross_hyp_loss = abs(
-                sum(
-                    min(v, 0.0)
-                    for v in hypothetical_values
-                )
-            )
-
-            hypothetical_pf = (
-                gross_hyp_profit / gross_hyp_loss
-                if gross_hyp_loss > 0
-                else (
-                    99.0
-                    if gross_hyp_profit > 0
-                    else 0.0
-                )
-            )
-
+            rows = [t for t in all_outcomes if low <= self._confidence01(t.get("quant_confidence")) < high and t.get("result") in {"WIN", "LOSS"}]
+            wins = sum(1 for t in rows if t.get("result") == "WIN")
             buckets[name] = {
                 "trades": len(rows),
-                "actual_trades": sum(
-                    1
-                    for t in rows
-                    if t in actual
-                ),
-                "shadow_observations": sum(
-                    1
-                    for t in rows
-                    if t in shadow
-                ),
                 "wins": wins,
                 "losses": len(rows) - wins,
-                "win_rate_pct": (
-                    round(
-                        wins / len(rows) * 100.0,
-                        2,
-                    )
-                    if rows
-                    else 0.0
-                ),
-                "hypothetical_profit_factor": round(
-                    hypothetical_pf,
-                    4,
-                ),
-            }
-
-        ai_bucket_defs = [
-            ("0-39", 0.0, 0.40),
-            ("40-49", 0.40, 0.50),
-            ("50-59", 0.50, 0.60),
-            ("60-69", 0.60, 0.70),
-            ("70+", 0.70, 1.01),
-        ]
-
-        ai_buckets = {}
-
-        for name, low, high in ai_bucket_defs:
-            rows = []
-
-            for trade in all_outcomes:
-                ai = trade.get("ai") or {}
-                ai_conf = self._confidence01(
-                    ai.get("confidence")
-                )
-
-                if (
-                    low <= ai_conf < high
-                    and trade.get("result")
-                    in {"WIN", "LOSS"}
-                ):
-                    rows.append(trade)
-
-            wins = sum(
-                1
-                for trade in rows
-                if trade.get("result")
-                == "WIN"
-            )
-
-            ai_buckets[name] = {
-                "observations": len(rows),
-                "wins": wins,
-                "losses": len(rows) - wins,
-                "win_rate_pct": (
-                    round(
-                        wins / len(rows) * 100.0,
-                        2,
-                    )
-                    if rows
-                    else 0.0
-                ),
+                "win_rate_pct": round((wins / len(rows)) * 100.0, 2) if rows else 0.0,
             }
 
         return {
@@ -993,17 +726,6 @@ class V64LearningTradeEngine:
             "enabled": bool(state.get("enabled", True)),
             "paper_only": True,
             "live_execution": False,
-            "threshold_policy": {
-                "normal_min_confidence": self.NORMAL_MIN_CONFIDENCE,
-                "normal_min_confidence_pct": 30.0,
-                "ai_min_confidence": self.AI_MIN_CONFIDENCE,
-                "ai_min_confidence_pct": 40.0,
-                "legacy_67_gate_active": False,
-                "entry_rule": (
-                    "VERIFIED setup: NORMAL>=30% with direction match "
-                    "OR AI>=40% with approval and direction agreement"
-                ),
-            },
             "max_watchers": self.max_watchers,
             "active_watchers": len(watchers),
             "watcher_refresh_seconds": self.watcher_refresh_seconds,
@@ -1018,7 +740,6 @@ class V64LearningTradeEngine:
             "by_entry_class": classes,
             "shadow": shadow_stats,
             "confidence_buckets": buckets,
-            "ai_confidence_buckets": ai_buckets,
         }
 
     def journal(self, limit: int = 200) -> Dict[str, Any]:
