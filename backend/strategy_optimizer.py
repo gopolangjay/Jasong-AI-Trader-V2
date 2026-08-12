@@ -10,15 +10,16 @@ from paper import backtest
 # ============================================================
 
 
+# V6.5.2 adaptive-learning grid. The old high-confidence legacy gate is removed.
 DEFAULT_THRESHOLDS = [
+    0.25,
+    0.30,
+    0.35,
+    0.40,
     0.45,
     0.50,
     0.55,
     0.60,
-    0.62,
-    0.65,
-    0.67,
-    0.70,
 ]
 
 DEFAULT_HOLDING_CANDLES = [
