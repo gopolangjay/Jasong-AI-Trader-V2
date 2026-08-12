@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -764,15 +763,17 @@ class _HomePageState extends State<HomePage> {
   // REFRESH LIVE SIGNAL
   // =========================================================
 
-  Future<void> refreshSignal() async {
-    if (busy) {
+  Future<void> refreshSignal({bool silent = false}) async {
+    if (busy && !silent) {
       return;
     }
 
-    setState(() {
-      busy = true;
-      error = null;
-    });
+    if (!silent) {
+      setState(() {
+        busy = true;
+        error = null;
+      });
+    }
 
     try {
       final uri = Uri.parse(
@@ -804,11 +805,13 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      setState(() {
-        error = e.toString();
-      });
+      if (!silent) {
+        setState(() {
+          error = e.toString();
+        });
+      }
     } finally {
-      if (mounted) {
+      if (!silent && mounted) {
         setState(() {
           busy = false;
         });
@@ -885,7 +888,7 @@ class _HomePageState extends State<HomePage> {
       queryParameters: {
         'period': '5d',
         'interval': '15m',
-        'top_n': '3',
+        'top_n': '20',
       },
     );
 
@@ -944,478 +947,21 @@ class _HomePageState extends State<HomePage> {
   // FIND VERIFIED TRADE
   // =========================================================
 
+  // =========================================================
+  // V6.6 NON-BLOCKING SETUP DISCOVERY
+  // =========================================================
+
   Future<void> findVerifiedTrade() async {
-    if (busy) {
-      return;
-    }
+    // Deep validation is server-owned in V6.6. The phone must not
+    // serially wait for candidate #1 before candidate #2/#3.
+    await runAutoManagerNow();
+    await Future.delayed(const Duration(seconds: 1));
+    await loadAutoDashboard();
 
-    setState(() {
-      busy = true;
-
-      scanningMarkets = true;
-
-      findingVerifiedTrade = true;
-
-      verifiedTrade = null;
-
-      liveEntryAssessment = null;
-      serverWatcher = null;
-      serverWatchers = [];
-      forwardStats = null;
-      watcherPollTimer?.cancel();
-
-      validationHistory = [];
-
-      error = null;
-
-      networkStatus = null;
-
-      currentAttempt = 0;
-
-      currentValidationMarket =
-          'Scanning all markets...';
-    });
-
-    try {
-      // =====================================================
-      // 1. FAST SCAN
-      // =====================================================
-
-      final scanResult =
-          await runFastScanRequest();
-
-      if (!mounted) {
-        return;
-      }
-
+    if (mounted) {
       setState(() {
-        fastScan = scanResult;
-        scanningMarkets = false;
+        selectedTab = 1;
       });
-
-      final rawCandidates =
-          scanResult[
-                  'top_candidates']
-              as List?;
-
-      if (rawCandidates == null ||
-          rawCandidates.isEmpty) {
-        throw Exception(
-          'Fast scanner returned '
-          'no candidates',
-        );
-      }
-
-      final candidates = <
-          Map<String, dynamic>>[];
-
-      for (final item
-          in rawCandidates) {
-        if (item is Map) {
-          candidates.add(
-            Map<String, dynamic>.from(
-              item,
-            ),
-          );
-        }
-      }
-
-      if (candidates.isEmpty) {
-        throw Exception(
-          'No valid candidate '
-          'records received',
-        );
-      }
-
-      final count =
-          candidates.length > 3
-              ? 3
-              : candidates.length;
-
-      // =====================================================
-      // 2. DEEP VALIDATE EACH MARKET
-      // =====================================================
-
-      for (
-        int index = 0;
-        index < count;
-        index++
-      ) {
-        final candidate =
-            candidates[index];
-
-        final market =
-            candidate['market']
-                    ?.toString() ??
-                'UNKNOWN';
-
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          currentValidationMarket =
-              'Deep validating '
-              '#${index + 1} $market';
-
-          networkStatus =
-              'Preparing validation...';
-        });
-
-        Map<String, dynamic> deep;
-
-        try {
-          deep =
-              await deepValidateWithRecovery(
-            candidate,
-          );
-        } on NetworkValidationException catch (e) {
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            validationHistory.add({
-              'position':
-                  index + 1,
-
-              'market':
-                  market,
-
-              'symbol':
-                  candidate[
-                      'symbol'],
-
-              'fast_score':
-                  candidate[
-                      'fast_score'],
-
-              'fast_direction':
-                  candidate[
-                      'direction'],
-
-              'deep_status':
-                  'NETWORK_ERROR',
-
-              'verified':
-                  false,
-
-              'error':
-                  e.message,
-            });
-
-            currentValidationMarket =
-                '$market validation '
-                'could not complete';
-
-            networkStatus =
-                'Network connection failed '
-                'after $maximumAttempts attempts.';
-          });
-
-          // IMPORTANT:
-          // Do NOT move to candidate #2 after a
-          // network failure.
-          throw NetworkValidationException(
-            market:
-                market,
-            message:
-                e.message,
-          );
-        } catch (e) {
-          if (!mounted) {
-            return;
-          }
-
-          setState(() {
-            validationHistory.add({
-              'position':
-                  index + 1,
-
-              'market':
-                  market,
-
-              'symbol':
-                  candidate[
-                      'symbol'],
-
-              'fast_score':
-                  candidate[
-                      'fast_score'],
-
-              'fast_direction':
-                  candidate[
-                      'direction'],
-
-              'deep_status':
-                  'ERROR',
-
-              'verified':
-                  false,
-
-              'error':
-                  e.toString(),
-            });
-          });
-
-          // Non-network backend error:
-          // stop rather than falsely treating the
-          // candidate as rejected.
-          break;
-        }
-
-        // ===================================================
-        // PARSE V4.6 RESPONSE
-        // ===================================================
-
-        final finalStatus =
-            deep['final_status']
-                    ?.toString() ??
-                'UNKNOWN';
-
-        Map<String, dynamic>?
-            finalMarket;
-
-        final rawFinalMarket =
-            deep['final_market'];
-
-        if (rawFinalMarket is Map) {
-          finalMarket =
-              Map<String, dynamic>.from(
-            rawFinalMarket,
-          );
-        }
-
-        final verified =
-            finalMarket?[
-                        'verified'] ==
-                    true ||
-                finalStatus ==
-                    'VERIFIED_TRADE';
-
-        final deepStatus =
-            finalMarket?[
-                        'status']
-                    ?.toString() ??
-                finalStatus;
-
-        final history = <
-            String, dynamic>{
-          'position':
-              index + 1,
-
-          'market':
-              market,
-
-          'symbol':
-              candidate[
-                  'symbol'],
-
-          'fast_score':
-              candidate[
-                  'fast_score'],
-
-          'fast_direction':
-              candidate[
-                  'direction'],
-
-          'deep_status':
-              deepStatus,
-
-          'verified':
-              verified,
-
-          'deep_score':
-              finalMarket?[
-                  'deep_score'],
-
-          'trades':
-              finalMarket?[
-                  'trades'],
-
-          'wins':
-              finalMarket?[
-                  'wins'],
-
-          'losses':
-              finalMarket?[
-                  'losses'],
-
-          'win_rate':
-              finalMarket?[
-                  'win_rate'],
-
-          'profit_factor':
-              finalMarket?[
-                  'profit_factor'],
-
-          'return_pct':
-              finalMarket?[
-                  'return_pct'],
-
-          'max_drawdown':
-              finalMarket?[
-                  'max_drawdown'],
-
-          'interval':
-              finalMarket?[
-                  'interval'],
-
-          'period':
-              finalMarket?[
-                  'period'],
-
-          'threshold_pct':
-              finalMarket?[
-                  'threshold_pct'],
-
-          'holding_candles':
-              finalMarket?[
-                  'holding_candles'],
-
-          'sample_reliability_pct':
-              finalMarket?[
-                  'sample_reliability_pct'],
-
-          'wilson_lower_win_rate_pct':
-              finalMarket?[
-                  'wilson_lower_win_rate_pct'],
-
-          'reliability_adjusted_score':
-              finalMarket?[
-                  'reliability_adjusted_score'],
-
-          'near_verified':
-              finalMarket?[
-                  'near_verified'] == true,
-
-          'primary_reason':
-              finalMarket?[
-                  'primary_reason'],
-
-          'rejection_reasons':
-              finalMarket?[
-                  'rejection_reasons'],
-
-          'explanation':
-              finalMarket?[
-                  'explanation'],
-        };
-
-        if (!mounted) {
-          return;
-        }
-
-        setState(() {
-          validationHistory.add(
-            history,
-          );
-
-          networkStatus =
-              '$market validation complete';
-        });
-
-        // ===================================================
-        // NOT VERIFIED
-        // ===================================================
-
-        if (!verified ||
-            finalMarket == null) {
-          continue;
-        }
-
-        // ===================================================
-        // DIRECTION AGREEMENT
-        // ===================================================
-
-        final fastDirection =
-            candidate[
-                    'direction']
-                ?.toString();
-
-        final deepDirection =
-            finalMarket[
-                    'direction']
-                ?.toString();
-
-        if (fastDirection !=
-            deepDirection) {
-          setState(() {
-            validationHistory.last[
-                    'verified'] =
-                false;
-
-            validationHistory.last[
-                    'deep_status'] =
-                'DIRECTION_MISMATCH';
-          });
-
-          continue;
-        }
-
-        // ===================================================
-        // VERIFIED
-        // ===================================================
-
-        final result = <
-            String, dynamic>{
-          ...finalMarket,
-
-          'fast_rank':
-              index + 1,
-
-          'fast_score':
-              candidate[
-                  'fast_score'],
-
-          'fast_direction':
-              fastDirection,
-
-          'direction_agreement':
-              true,
-        };
-
-        setState(() {
-          verifiedTrade ??=
-              result;
-
-          currentValidationMarket =
-              '$market VERIFIED';
-
-          networkStatus =
-              'Deep validation passed • '
-              'adding candidate to V5.4 watch portfolio';
-        });
-
-        await createServerWatcher(
-          result,
-        );
-
-        // V5.4 intentionally continues through the remaining
-        // shortlisted candidates. Multiple VERIFIED setups can
-        // be watched simultaneously, so a waiting/overextended
-        // #1 candidate does not block a better live entry in #2/#3.
-      }
-    } on NetworkValidationException catch (_) {
-      // Already shown in the validation card.
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        error =
-            'Verified trade search '
-            'failed: $e';
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          busy = false;
-          scanningMarkets = false;
-          findingVerifiedTrade = false;
-        });
-      }
     }
   }
 
@@ -2898,9 +2444,7 @@ class _HomePageState extends State<HomePage> {
     signalPollTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) {
-        if (!busy) {
-          refreshSignal();
-        }
+        refreshSignal(silent: true);
       },
     );
   }
@@ -2914,7 +2458,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
 
     Future.microtask(
-      refreshSignal,
+      () => refreshSignal(silent: true),
     );
 
     Future.microtask(
@@ -3534,8 +3078,7 @@ class _HomePageState extends State<HomePage> {
         forwardStats?['pnl'] ??
         0;
     final forwardWr = forwardStats?['win_rate_pct'] ??
-        forwardStats?['forward_win_rate_pct'] ??
-        0;
+        forwardStats?['forward_win_rate_pct'];
 
     final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
     final ranking = (fastScan?['ranking'] as List?) ?? const [];
@@ -3993,11 +3536,11 @@ class _HomePageState extends State<HomePage> {
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'VERIFIED or EXPERIMENTAL + live direction agrees'),
+                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Live direction must agree'),
                 Divider(height: 24),
                 _MidnightRuleRow('AI PAPER path', '≥ 40%', 'Directional model AI + direction agreement'),
                 Divider(height: 24),
-                _MidnightRuleRow('Absolute PAPER floor', '30%', 'No active entry logic uses the old high-confidence gate'),
+                _MidnightRuleRow('REJECT', 'SHADOW', 'Rejected setups remain counterfactual evidence only'),
               ],
             ),
           ),
@@ -4045,7 +3588,7 @@ class _HomePageState extends State<HomePage> {
                 child: FilledButton.tonalIcon(
                   onPressed: busy ? null : findVerifiedTrade,
                   icon: const Icon(Icons.verified_rounded),
-                  label: const Text('Deep verify'),
+                  label: const Text('Queue validation'),
                 ),
               ),
             ],
@@ -4177,7 +3720,7 @@ class _HomePageState extends State<HomePage> {
             children: [
               statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
               const SizedBox(width: 10),
-              statTile('Forward WR', '${formatPercent(forwardWr)}%', Icons.percent_rounded),
+              statTile('Forward WR', forwardWr == null ? '-' : '${formatNumber(forwardWr, decimals: 1)}%', Icons.percent_rounded),
             ],
           ),
           const SizedBox(height: 10),
