@@ -1,3 +1,4 @@
+
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -68,6 +69,20 @@ from database import (
 
 
 # ============================================================
+# V6.5.2 UNIFIED ADAPTIVE THRESHOLD POLICY
+# ============================================================
+PAPER_NORMAL_MIN_CONFIDENCE = 0.30
+PAPER_AI_MIN_CONFIDENCE = 0.40
+PAPER_ABSOLUTE_MIN_CONFIDENCE = 0.30
+
+# Make the threshold uniform across ALL risk modes. Risk mode now changes
+# position sizing / drawdown controls only, not entry-confidence requirements.
+PROFILES = {
+    name: replace(profile, min_confidence=PAPER_NORMAL_MIN_CONFIDENCE)
+    for name, profile in PROFILES.items()
+}
+
+# ============================================================
 # JASONG AI TRADER V6.5
 # HIGH-THROUGHPUT AUTONOMOUS PAPER LEARNING ENGINE
 # ============================================================
@@ -96,8 +111,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.5.1 API",
-    version="6.5.1",
+    title="Jasong AI Trader V6.5.2 API",
+    version="6.5.2",
 )
 
 app.add_middleware(
@@ -882,10 +897,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.5",
+            "Jasong AI Trader V6.5.2",
 
         "version":
-            "6.5.0",
+            "6.5.2",
 
         "mode":
             "paper-trading",
@@ -911,8 +926,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.5.0",
-        "engine": "JASONG_AI_V6.5",
+        "version": "6.5.2",
+        "engine": "JASONG_AI_V6.5.2",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -935,12 +950,11 @@ def health():
             else None
         ),
         "threshold_policy": {
-            "normal_min_confidence": 0.30,
-            "normal_min_confidence_pct": 30.0,
-            "ai_min_confidence": 0.40,
-            "ai_min_confidence_pct": 40.0,
-            "legacy_67_gate_active": False,
-            "paper_only": True,
+            "normal_min_confidence": PAPER_NORMAL_MIN_CONFIDENCE,
+            "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
+            "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
+            "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
+                        "paper_only": True,
         },
         "live_execution": False,
     }
@@ -987,7 +1001,7 @@ def fx_universe(
     selected = universe[offset: offset + limit]
 
     return {
-        "version": "6.5.0",
+        "version": "6.5.2",
         "total_fx_instruments": len(universe),
         "offset": offset,
         "returned": len(selected),
@@ -999,7 +1013,7 @@ def fx_universe(
 @app.get("/market-data-health")
 def get_market_data_health():
     return {
-        "version": "6.5.0",
+        "version": "6.5.2",
         **market_data_health(),
         "live_execution": False,
     }
@@ -1032,7 +1046,7 @@ def market_data_probe(
 
 
 # ============================================================
-# V6.5.1 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
+# V6.5.2 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
 # ============================================================
 
 def _v651_confidence01(value) -> float:
@@ -1108,7 +1122,7 @@ def _v651_signal_bridge(
     eligible = directional and (normal_pass or ai_pass)
 
     diagnostic = {
-        "version": "6.5.1",
+        "version": "6.5.2",
         "paper_only": True,
         "live_execution": False,
         "direction": direction,
@@ -1191,7 +1205,7 @@ def signal(
     interval: str = "15m",
     balance: float = 10000.0,
 ):
-    """V6.5.1 app signal plus autonomous PAPER bridge diagnostics."""
+    """V6.5.2 app signal plus autonomous PAPER bridge diagnostics."""
     validate_risk_mode(risk_mode)
     validate_balance(balance, "balance")
 
@@ -1218,8 +1232,7 @@ def signal(
             "ai_min_confidence": V64LearningTradeEngine.AI_MIN_CONFIDENCE,
             "ai_min_confidence_pct":
                 V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0,
-            "legacy_67_gate_active": False,
-            "paper_only": True,
+                        "paper_only": True,
         },
         "live_execution": False,
     })
@@ -3815,7 +3828,7 @@ def start_confidence_wr_analysis(
     min_trades_promising: int = 10,
     minimum_trade_confidence: float = 0.30,
 ):
-    """Raw confidence calibration from 30% upward against realised win rate.\n\n    One frozen pre-test model is used per market; the legacy 67% gate is not used by V6.5 PAPER learning.\n    This endpoint never opens a trade.\n    """
+    """Raw confidence calibration from 30% upward against realised win rate.\n\n    One frozen pre-test model is used per market; the legacy high-confidence gate is not used by V6.5 PAPER learning.\n    This endpoint never opens a trade.\n    """
     validate_risk_mode(risk_mode)
 
     try:
@@ -4507,13 +4520,12 @@ def get_forward_stats(
 @app.get("/v65/threshold-policy")
 def v65_threshold_policy():
     return {
-        "version": "6.5.0",
-        "normal_min_confidence": 0.30,
-        "normal_min_confidence_pct": 30.0,
-        "ai_min_confidence": 0.40,
-        "ai_min_confidence_pct": 40.0,
-        "legacy_67_gate_active": False,
-        "entry_rule": (
+        "version": "6.5.2",
+        "normal_min_confidence": PAPER_NORMAL_MIN_CONFIDENCE,
+        "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
+        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
+        "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
+                "entry_rule": (
             "VERIFIED setup may enter PAPER through normal confidence >=30% "
             "with live direction agreement OR AI confidence >=40% with "
             "AI approval and direction agreement."
@@ -4563,7 +4575,7 @@ def v64_learning_pause():
 def v64_learning_universe(limit: int = 80):
     rows = get_learning_universe(limit=limit)
     return {
-        "version": "6.5.0",
+        "version": "6.5.2",
         "target_full_rotation_minutes": 12,
         "batch_size": FX_DISCOVERY_BATCH_SIZE,
         "scan_interval_minutes": 3,
@@ -4578,7 +4590,7 @@ def persistent_state_status():
     snapshot = V61_STATE_STORE.snapshot()
     return {
         "status": "ok",
-        "version": "6.5.0",
+        "version": "6.5.2",
         "path": str(V61_STATE_STORE.path),
         "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
         "meta": snapshot.get("_meta", {}),
