@@ -4,11 +4,12 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
 
 class AutomatedTradeManager:
-    """Paper-only high-throughput candidate manager for Jasong AI Trader V6.4.
+    """Paper-only non-blocking candidate manager for Jasong AI Trader V6.6.
 
     Stability changes:
       - only ONE heavy auto-manager cycle can run at a time
@@ -49,6 +50,17 @@ class AutomatedTradeManager:
         self.state_store = state_store
         self.learning_engine = learning_engine
 
+        # V6.6: deep validation is decoupled from the scan cycle.
+        # The manager can keep scanning/scheduling while expensive historical
+        # validation runs in a bounded worker pool.
+        self.validation_workers = 3
+        self._validation_executor = ThreadPoolExecutor(
+            max_workers=self.validation_workers,
+            thread_name_prefix="jasong-v66-deep",
+        )
+        self._validation_inflight: Dict[str, Dict[str, Any]] = {}
+        self._validation_history: List[Dict[str, Any]] = []
+
         self._lock = threading.RLock()
         self._run_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -85,7 +97,10 @@ class AutomatedTradeManager:
             "progress_percent": 0,
             "progress_candidate": None,
             "max_deep_validations_per_cycle": 3,
-            "rotation_mode": "V6.4_HIGH_THROUGHPUT_LEARNING",
+            "background_validation_workers": 3,
+            "background_validations": 0,
+            "background_validation_last": None,
+            "rotation_mode": "V6.6_NON_BLOCKING_VALIDATION",
             "candidate_cooldowns": {},
             "last_rotated_symbol": None,
         }
@@ -251,6 +266,13 @@ class AutomatedTradeManager:
                 }
             )
 
+            state["background_validations"] = len(self._validation_inflight)
+            state["background_validation_workers"] = self.validation_workers
+            state["validation_inflight"] = [
+                {k: v for k, v in item.items() if k != "future"}
+                for item in self._validation_inflight.values()
+            ]
+            state["validation_history"] = list(self._validation_history[-20:])
             return state
 
     def _set_progress(
@@ -534,11 +556,18 @@ class AutomatedTradeManager:
                         "completed_at"
                     ] = time.time()
 
-            self._set_progress(
-                stage="COMPLETED",
-                message="Automated cycle completed",
-                percent=100,
-            )
+            if self._validation_capacity() < self.validation_workers:
+                self._set_progress(
+                    stage="BACKGROUND_VALIDATION",
+                    message=f"{len(self._validation_inflight)} deep validation job(s) running in background",
+                    percent=65,
+                )
+            else:
+                self._set_progress(
+                    stage="COMPLETED",
+                    message="Automated discovery cycle completed",
+                    percent=100,
+                )
 
         except Exception as exc:
             with self._lock:
@@ -709,73 +738,206 @@ class AutomatedTradeManager:
         }
 
     # --------------------------------------------------------------
+    # V6.6 non-blocking deep-validation pool
+    # --------------------------------------------------------------
+
+    def _validation_key(self, candidate: Dict[str, Any]) -> str:
+        return self._rotation_key(candidate)
+
+    def _validation_capacity(self) -> int:
+        with self._lock:
+            return max(0, self.validation_workers - len(self._validation_inflight))
+
+    def _queue_background_validation(self, candidate: Dict[str, Any], settings: Dict[str, Any]) -> bool:
+        key = self._validation_key(candidate)
+        market_name = str(candidate.get("market") or candidate.get("symbol") or key)
+
+        with self._lock:
+            if key in self._validation_inflight:
+                return False
+            if len(self._validation_inflight) >= self.validation_workers:
+                return False
+            meta = {
+                "key": key,
+                "market": market_name,
+                "symbol": str(candidate.get("symbol") or ""),
+                "direction": str(candidate.get("direction") or "").upper(),
+                "queued_at": time.time(),
+                "status": "RUNNING",
+            }
+            self._validation_inflight[key] = meta
+            self._state["background_validations"] = len(self._validation_inflight)
+
+        future = self._validation_executor.submit(
+            self.validate_candidate_func,
+            candidate=candidate,
+            risk_mode=str(settings.get("risk_mode", "Balanced")),
+            starting_balance=float(settings.get("starting_balance", 10000.0)),
+            payout=float(settings.get("payout", 0.80)),
+        )
+
+        with self._lock:
+            if key in self._validation_inflight:
+                self._validation_inflight[key]["future"] = future
+
+        future.add_done_callback(
+            lambda f, c=dict(candidate), s=dict(settings), k=key: self._complete_background_validation(k, c, s, f)
+        )
+        return True
+
+    def _complete_background_validation(
+        self,
+        key: str,
+        candidate: Dict[str, Any],
+        settings: Dict[str, Any],
+        future: Future,
+    ) -> None:
+        market_name = str(candidate.get("market") or candidate.get("symbol") or key)
+        symbol = str(candidate.get("symbol") or "")
+        completed_at = time.time()
+
+        try:
+            validated = dict(future.result() or {})
+            error = None
+        except Exception as exc:
+            validated = {
+                "market": candidate.get("market"),
+                "symbol": symbol,
+                "direction": candidate.get("direction"),
+                "status": "ERROR",
+                "verified": False,
+                "explanation": str(exc),
+            }
+            error = str(exc)
+
+        # Preserve ranking context for watcher/learning analytics.
+        for field in (
+            "adaptive_rank_score", "smart_fast_score", "quality_tier",
+            "forward_symbol_stats", "strategy_health",
+            "strategy_health_reason", "strategy_quarantined",
+        ):
+            if validated.get(field) is None and candidate.get(field) is not None:
+                validated[field] = candidate.get(field)
+
+        learning_submit_error = None
+        if self.learning_engine is not None:
+            try:
+                self.learning_engine.submit_candidate(
+                    candidate=candidate,
+                    validated=validated,
+                    risk_mode=str(settings.get("risk_mode", "Balanced")),
+                    starting_balance=float(settings.get("starting_balance", 10000.0)),
+                    payout=float(settings.get("payout", 0.80)),
+                )
+            except Exception as exc:
+                learning_submit_error = str(exc)
+
+        watcher_id = None
+        watcher_status = None
+        if bool(validated.get("verified", False)) and symbol:
+            try:
+                active = self._active_watchers()
+                target = int(settings.get("target_active_watchers", 6))
+                active_symbols = {str(w.get("symbol") or "") for w in active}
+                if symbol not in active_symbols and len(active) < target:
+                    watcher = self.watcher_engine.create(
+                        candidate=validated,
+                        risk_mode=str(settings.get("risk_mode", "Balanced")),
+                        starting_balance=float(settings.get("starting_balance", 10000.0)),
+                        payout=float(settings.get("payout", 0.80)),
+                    )
+                    watcher_id = watcher.get("watcher_id")
+                    watcher_status = watcher.get("status")
+                    with self._lock:
+                        self._state["verified_created"] = int(self._state.get("verified_created", 0)) + 1
+            except Exception as exc:
+                watcher_status = f"WATCHER_ERROR: {exc}"
+
+        if not bool(validated.get("verified", False)):
+            self._set_candidate_cooldown(candidate, str(validated.get("status", "NOT_VERIFIED")))
+
+        summary = {
+            "market": market_name,
+            "symbol": symbol,
+            "direction": str(candidate.get("direction") or "").upper(),
+            "status": str(validated.get("status") or "NOT_VERIFIED"),
+            "verified": bool(validated.get("verified", False)),
+            "queued_at": None,
+            "completed_at": completed_at,
+            "elapsed_seconds": None,
+            "watcher_id": watcher_id,
+            "watcher_status": watcher_status,
+            "learning_submit_error": learning_submit_error,
+            "error": error,
+        }
+
+        with self._lock:
+            meta = self._validation_inflight.pop(key, None) or {}
+            summary["queued_at"] = meta.get("queued_at")
+            if summary["queued_at"]:
+                summary["elapsed_seconds"] = round(completed_at - float(summary["queued_at"]), 1)
+            self._validation_history.append(summary)
+            self._validation_history = self._validation_history[-100:]
+            self._state["background_validations"] = len(self._validation_inflight)
+            self._state["background_validation_last"] = summary
+            self._state["last_rotated_symbol"] = symbol
+            if self._validation_inflight:
+                self._state["progress_stage"] = "BACKGROUND_VALIDATION"
+                self._state["progress_message"] = f"{len(self._validation_inflight)} deep validation job(s) running in background"
+                self._state["progress_percent"] = 65
+                self._state["progress_candidate"] = None
+            else:
+                self._state["progress_stage"] = "IDLE"
+                self._state["progress_message"] = "Background validation complete; waiting for next scan"
+                self._state["progress_percent"] = 100
+                self._state["progress_candidate"] = None
+
+        self._persist_state()
+
+    # --------------------------------------------------------------
     # one automated cycle
     # --------------------------------------------------------------
 
     def _run_cycle(
         self,
     ) -> dict:
+        """Run a fast discovery cycle and QUEUE deep validation.
+
+        V6.6 deliberately does not wait for expensive optimiser/backtest work.
+        The scan cycle returns quickly while a bounded background pool validates
+        the best eligible candidates. This keeps Auto Manager responsive and
+        allows the next discovery cycle to occur on schedule.
+        """
         with self._lock:
-            settings = dict(
-                self._state
-            )
+            settings = dict(self._state)
 
         started_at = time.time()
-
-        active_before = (
-            self._active_watchers()
-        )
-
-        target = int(
-            settings.get(
-                "target_active_watchers",
-                3,
-            )
-        )
-
-        available_slots = max(
-            0,
-            target
-            - len(
-                active_before
-            ),
-        )
+        active_before = self._active_watchers()
+        target = int(settings.get("target_active_watchers", 6))
+        available_slots = max(0, target - len(active_before))
+        max_queue = int(settings.get("max_deep_validations_per_cycle", 3))
+        capacity = self._validation_capacity()
+        queue_limit = min(max_queue, capacity)
 
         result = {
-            "started_at":
-                started_at,
-            "active_before":
-                len(
-                    active_before
-                ),
-            "target_active_watchers":
-                target,
-            "available_slots":
-                available_slots,
-            "scanned":
-                0,
-            "deep_validated":
-                0,
-            "verified_created":
-                0,
-            "skipped_existing":
-                0,
-            "skipped_cooldown":
-                0,
-            "skipped_quarantined":
-                0,
-            "candidates":
-                [],
-            "max_deep_validations_per_cycle":
-                int(settings.get("max_deep_validations_per_cycle", 3)),
+            "version": "6.6.0",
+            "started_at": started_at,
+            "active_before": len(active_before),
+            "target_active_watchers": target,
+            "available_slots": available_slots,
+            "scanned": 0,
+            "deep_queued": 0,
+            "deep_validated": 0,
+            "verified_created": 0,
+            "skipped_existing": 0,
+            "skipped_cooldown": 0,
+            "skipped_quarantined": 0,
+            "skipped_inflight": 0,
+            "candidates": [],
+            "background_validation_capacity": capacity,
+            "max_deep_validations_per_cycle": max_queue,
+            "validation_mode": "V6.6_NON_BLOCKING_POOL",
         }
-
-        if available_slots <= 0:
-            result["normal_watcher_pool_full"] = True
-            result["reason"] = (
-                "Normal watcher portfolio is full; V6.4 continues sourcing "
-                "candidates for learning/shadow PAPER evidence."
-            )
 
         try:
             self._set_progress(
@@ -783,371 +945,77 @@ class AutomatedTradeManager:
                 message="Scanning and ranking markets",
                 percent=15,
             )
-
-            candidates = (
-                self.scan_candidates_func(
-                    top_n=int(
-                        settings.get(
-                            "scan_top_n",
-                            5,
-                        )
-                    ),
-                    payout=float(
-                        settings.get(
-                            "payout",
-                            0.80,
-                        )
-                    ),
-                )
+            candidates = self.scan_candidates_func(
+                top_n=int(settings.get("scan_top_n", 20)),
+                payout=float(settings.get("payout", 0.80)),
             )
-
-            result[
-                "scanned"
-            ] = len(
-                candidates
-            )
+            result["scanned"] = len(candidates)
 
             self._set_progress(
                 stage="RANKING",
-                message=(
-                    f"Ranked {len(candidates)} candidates; "
-                    "selecting the best eligible market"
-                ),
-                percent=30,
+                message=f"Ranked {len(candidates)} candidates; queueing background validation",
+                percent=35,
             )
 
-            active_symbols = (
-                self._active_symbols()
-            )
-
-            deep_attempts = 0
-            max_deep_attempts = int(
-                settings.get(
-                    "max_deep_validations_per_cycle",
-                    1,
-                )
-            )
-
+            active_symbols = self._active_symbols()
+            queued = 0
             for candidate in candidates:
-                # V6.4 keeps sourcing/deep-validating for the learning engine
-                # even when the normal watcher portfolio is already full.
-
-                symbol = str(
-                    candidate.get(
-                        "symbol"
-                    )
-                    or ""
-                )
-
-                if (
-                    not symbol
-                    or symbol
-                    in active_symbols
-                ):
-                    result[
-                        "skipped_existing"
-                    ] += 1
-                    continue
-
-                if bool(
-                    candidate.get(
-                        "strategy_quarantined",
-                        False,
-                    )
-                ):
-                    result[
-                        "skipped_quarantined"
-                    ] += 1
-                    continue
-
-                if self._cooldown_active(
-                    candidate
-                ):
-                    result[
-                        "skipped_cooldown"
-                    ] += 1
-                    continue
-
-                if (
-                    candidate.get(
-                        "quality_tier"
-                    )
-                    == "REJECT"
-                ):
-                    continue
-
-                if deep_attempts >= max_deep_attempts:
-                    result["reason"] = (
-                        "V5.5.2 cycle limit reached: "
-                        "one heavy deep validation per cycle."
-                    )
+                if queued >= queue_limit:
                     break
 
-                deep_attempts += 1
-
-                market_name = str(
-                    candidate.get("market")
-                    or symbol
-                )
-
-                self._set_progress(
-                    stage="DEEP_VALIDATION",
-                    message=(
-                        f"Deep validating {market_name} "
-                        f"({deep_attempts}/{max_deep_attempts})"
-                    ),
-                    percent=55,
-                    candidate=market_name,
-                )
-
-                validated = (
-                    self.validate_candidate_func(
-                        candidate=
-                            candidate,
-                        risk_mode=str(
-                            settings.get(
-                                "risk_mode",
-                                "Balanced",
-                            )
-                        ),
-                        starting_balance=float(
-                            settings.get(
-                                "starting_balance",
-                                10000.0,
-                            )
-                        ),
-                        payout=float(
-                            settings.get(
-                                "payout",
-                                0.80,
-                            )
-                        ),
-                    )
-                )
-
-                result[
-                    "deep_validated"
-                ] += 1
-
-                summary = {
-                    "market":
-                        candidate.get(
-                            "market"
-                        ),
-                    "symbol":
-                        symbol,
-                    "adaptive_rank_score":
-                        candidate.get(
-                            "adaptive_rank_score"
-                        ),
-                    "smart_fast_score":
-                        candidate.get(
-                            "smart_fast_score",
-                            candidate.get(
-                                "fast_score"
-                            ),
-                        ),
-                    "quality_tier":
-                        candidate.get(
-                            "quality_tier"
-                        ),
-                    "strategy_health":
-                        candidate.get(
-                            "strategy_health"
-                        ),
-                    "forward_evidence_active":
-                        candidate.get(
-                            "forward_evidence_active"
-                        ),
-                    "deep_status":
-                        validated.get(
-                            "status"
-                        ),
-                    "verified":
-                        bool(
-                            validated.get(
-                                "verified",
-                                False,
-                            )
-                        ),
-                }
-
-                result[
-                    "candidates"
-                ].append(
-                    summary
-                )
-
-                if self.learning_engine is not None:
-                    try:
-                        self.learning_engine.submit_candidate(
-                            candidate=candidate,
-                            validated=validated,
-                            risk_mode=str(settings.get("risk_mode", "Balanced")),
-                            starting_balance=float(settings.get("starting_balance", 10000.0)),
-                            payout=float(settings.get("payout", 0.80)),
-                        )
-                    except Exception as learning_exc:
-                        summary["learning_submit_error"] = str(learning_exc)
-
+                symbol = str(candidate.get("symbol") or "")
+                key = self._validation_key(candidate)
+                if not symbol or symbol in active_symbols:
+                    result["skipped_existing"] += 1
+                    continue
+                if bool(candidate.get("strategy_quarantined", False)):
+                    result["skipped_quarantined"] += 1
+                    continue
+                if self._cooldown_active(candidate):
+                    result["skipped_cooldown"] += 1
+                    continue
+                if candidate.get("quality_tier") == "REJECT":
+                    continue
                 with self._lock:
-                    self._state[
-                        "last_rotated_symbol"
-                    ] = symbol
+                    if key in self._validation_inflight:
+                        result["skipped_inflight"] += 1
+                        continue
 
-                if not bool(
-                    validated.get(
-                        "verified",
-                        False,
-                    )
-                ):
-                    self._set_candidate_cooldown(
-                        candidate,
-                        str(
-                            validated.get(
-                                "status",
-                                "NOT_VERIFIED",
-                            )
-                        ),
-                    )
+                ok = self._queue_background_validation(candidate, settings)
+                if not ok:
                     continue
+                queued += 1
+                result["deep_queued"] += 1
+                result["candidates"].append({
+                    "market": candidate.get("market"),
+                    "symbol": symbol,
+                    "direction": candidate.get("direction"),
+                    "smart_fast_score": candidate.get("smart_fast_score", candidate.get("fast_score")),
+                    "quality_tier": candidate.get("quality_tier"),
+                    "validation_status": "RUNNING_IN_BACKGROUND",
+                })
 
-                validated[
-                    "adaptive_rank_score"
-                ] = candidate.get(
-                    "adaptive_rank_score"
-                )
-
-                validated[
-                    "smart_fast_score"
-                ] = candidate.get(
-                    "smart_fast_score",
-                    candidate.get(
-                        "fast_score"
-                    ),
-                )
-
-                validated[
-                    "quality_tier"
-                ] = candidate.get(
-                    "quality_tier"
-                )
-
-                validated[
-                    "forward_symbol_stats"
-                ] = candidate.get(
-                    "forward_symbol_stats"
-                )
-
-                validated[
-                    "strategy_health"
-                ] = candidate.get(
-                    "strategy_health"
-                )
-
-                validated[
-                    "strategy_health_reason"
-                ] = candidate.get(
-                    "strategy_health_reason"
-                )
-
-                validated[
-                    "strategy_quarantined"
-                ] = candidate.get(
-                    "strategy_quarantined",
-                    False,
-                )
-
-                if result["verified_created"] >= available_slots:
-                    summary["watcher_status"] = "LEARNING_ONLY_POOL_FULL"
-                    continue
-
+            inflight = len(self._validation_inflight)
+            if inflight:
                 self._set_progress(
-                    stage="WATCHER_CREATION",
-                    message=(
-                        f"{market_name} VERIFIED; creating server watcher"
-                    ),
-                    percent=85,
-                    candidate=market_name,
+                    stage="BACKGROUND_VALIDATION",
+                    message=f"{inflight} deep validation job(s) running; scanner remains responsive",
+                    percent=65,
+                )
+            else:
+                self._set_progress(
+                    stage="IDLE",
+                    message="No eligible deep-validation work; waiting for next cycle",
+                    percent=100,
                 )
 
-                watcher = (
-                    self.watcher_engine.create(
-                        candidate=
-                            validated,
-                        risk_mode=str(
-                            settings.get(
-                                "risk_mode",
-                                "Balanced",
-                            )
-                        ),
-                        starting_balance=float(
-                            settings.get(
-                                "starting_balance",
-                                10000.0,
-                            )
-                        ),
-                        payout=float(
-                            settings.get(
-                                "payout",
-                                0.80,
-                            )
-                        ),
-                    )
-                )
-
-                active_symbols.add(
-                    symbol
-                )
-
-                result[
-                    "verified_created"
-                ] += 1
-
-                summary[
-                    "watcher_id"
-                ] = watcher.get(
-                    "watcher_id"
-                )
-
-                summary[
-                    "watcher_status"
-                ] = watcher.get(
-                    "status"
-                )
-
-            self._set_progress(
-                stage="FINALISING",
-                message=(
-                    "Cycle finished. V5.6 rotation will continue "
-                    "through the next eligible ranked candidate."
-                ),
-                percent=95,
-            )
-
-            self._finish_run(
-                result=result,
-                error=None,
-            )
-
+            result["background_validations"] = inflight
+            result["elapsed_seconds"] = round(time.time() - started_at, 3)
             return result
 
         except Exception as exc:
-            result[
-                "error"
-            ] = str(
-                exc
-            )
-
-            self._finish_run(
-                result=result,
-                error=str(
-                    exc
-                ),
-            )
-
-            # Keep error inside the completed job result instead of
-            # crashing the HTTP request/process.
+            result["error"] = str(exc)
+            result["elapsed_seconds"] = round(time.time() - started_at, 3)
             return result
 
     def _finish_run(
