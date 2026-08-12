@@ -28,10 +28,10 @@ class V64LearningTradeEngine:
     No broker credentials are accepted and no live order is sent.
     """
 
-    VERSION = "6.5.1"
+    VERSION = "6.5.2"
     NAMESPACE = "v64_learning_engine"
 
-    # V6.5.1 PAPER-learning entry thresholds.
+    # V6.5.2 PAPER-learning entry thresholds.
     # Experimental only: broker execution remains disabled.
     NORMAL_MIN_CONFIDENCE = 0.30
     AI_MIN_CONFIDENCE = 0.40
@@ -359,13 +359,13 @@ class V64LearningTradeEngine:
         live: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        V6.5.1 PAPER-only entry policy.
+        V6.5.2 PAPER-only entry policy.
 
         A VERIFIED watcher may enter when live direction matches and either:
         - normal quantitative confidence >= 30%, or
         - directional model-AI confidence >= 40%.
 
-        The former 67% gate is not used by this learning path.
+        The legacy high-confidence gate is removed from this learning path.
         """
         wanted = str(watcher.get("direction") or "").upper()
         live_direction = str(
@@ -422,7 +422,7 @@ class V64LearningTradeEngine:
                 "normal_pass": True,
                 "ai_pass": True,
                 "direction_match": True,
-                "reason": "V6.5.1 BOTH path: normal >=30% and model-AI >=40%",
+                "reason": "V6.5.2 BOTH path: normal >=30% and model-AI >=40%",
             }
 
         if normal_pass:
@@ -435,7 +435,7 @@ class V64LearningTradeEngine:
                 "normal_pass": True,
                 "ai_pass": False,
                 "direction_match": True,
-                "reason": "V6.5.1 NORMAL path: quantitative confidence >=30%",
+                "reason": "V6.5.2 NORMAL path: quantitative confidence >=30%",
             }
 
         if ai_pass:
@@ -448,7 +448,7 @@ class V64LearningTradeEngine:
                 "normal_pass": False,
                 "ai_pass": True,
                 "direction_match": True,
-                "reason": "V6.5.1 MODEL_AI path: directional model-AI >=40%",
+                "reason": "V6.5.2 MODEL_AI path: directional model-AI >=40%",
             }
 
         return {
@@ -460,7 +460,7 @@ class V64LearningTradeEngine:
             "normal_pass": False,
             "ai_pass": False,
             "direction_match": True,
-            "reason": "Below V6.5.1 PAPER thresholds: normal <30% and model-AI <40%",
+            "reason": "Below V6.5.2 PAPER thresholds: normal <30% and model-AI <40%",
         }
 
     def _open_trade(
@@ -703,12 +703,12 @@ class V64LearningTradeEngine:
 
         buckets = {}
         bucket_defs = [
-            ("0-34", 0.0, 0.35),
+            ("0-29", 0.00, 0.30),
+            ("30-34", 0.30, 0.35),
             ("35-39", 0.35, 0.40),
             ("40-49", 0.40, 0.50),
             ("50-59", 0.50, 0.60),
-            ("60-66", 0.60, 0.67),
-            ("67+", 0.67, 1.01),
+            ("60+", 0.60, 1.01),
         ]
         all_outcomes = actual + shadow
         for name, low, high in bucket_defs:
