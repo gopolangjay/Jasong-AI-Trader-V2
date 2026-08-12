@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import threading
@@ -7,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class AutomatedTradeManager:
-    """Paper-only automated candidate manager for Jasong AI Trader V6.1.
+    """Paper-only high-throughput candidate manager for Jasong AI Trader V6.4.
 
     Stability changes:
       - only ONE heavy auto-manager cycle can run at a time
@@ -40,11 +41,13 @@ class AutomatedTradeManager:
         validate_candidate_func: Callable[..., Dict[str, Any]],
         watcher_engine: Any,
         state_store=None,
+        learning_engine=None,
     ):
         self.scan_candidates_func = scan_candidates_func
         self.validate_candidate_func = validate_candidate_func
         self.watcher_engine = watcher_engine
         self.state_store = state_store
+        self.learning_engine = learning_engine
 
         self._lock = threading.RLock()
         self._run_lock = threading.Lock()
@@ -65,9 +68,9 @@ class AutomatedTradeManager:
             "risk_mode": "Balanced",
             "starting_balance": 10000.0,
             "payout": 0.80,
-            "scan_interval_minutes": 15,
-            "target_active_watchers": 3,
-            "scan_top_n": 9,
+            "scan_interval_minutes": 3,
+            "target_active_watchers": 6,
+            "scan_top_n": 20,
             "last_run_at": None,
             "next_run_at": None,
             "last_result": None,
@@ -81,8 +84,8 @@ class AutomatedTradeManager:
             "progress_message": "Waiting for next cycle",
             "progress_percent": 0,
             "progress_candidate": None,
-            "max_deep_validations_per_cycle": 1,
-            "rotation_mode": "V5.6_PROGRESSIVE",
+            "max_deep_validations_per_cycle": 3,
+            "rotation_mode": "V6.4_HIGH_THROUGHPUT_LEARNING",
             "candidate_cooldowns": {},
             "last_rotated_symbol": None,
         }
@@ -150,29 +153,29 @@ class AutomatedTradeManager:
         risk_mode: str,
         starting_balance: float,
         payout: float,
-        scan_interval_minutes: int = 15,
-        target_active_watchers: int = 3,
-        scan_top_n: int = 9,
+        scan_interval_minutes: int = 3,
+        target_active_watchers: int = 6,
+        scan_top_n: int = 20,
     ) -> dict:
-        if scan_interval_minutes < 5:
+        if scan_interval_minutes < 2:
             raise ValueError(
-                "scan_interval_minutes must be at least 5"
+                "scan_interval_minutes must be at least 2"
             )
 
         if (
             target_active_watchers < 1
-            or target_active_watchers > 5
+            or target_active_watchers > 8
         ):
             raise ValueError(
-                "target_active_watchers must be between 1 and 5"
+                "target_active_watchers must be between 1 and 8"
             )
 
         if (
             scan_top_n < target_active_watchers
-            or scan_top_n > 9
+            or scan_top_n > 30
         ):
             raise ValueError(
-                "scan_top_n must be >= target_active_watchers and <= 9"
+                "scan_top_n must be >= target_active_watchers and <= 30"
             )
 
         now = time.time()
@@ -209,7 +212,7 @@ class AutomatedTradeManager:
                 "progress_message": "Waiting for next cycle",
                 "progress_percent": 0,
                 "progress_candidate": None,
-                "max_deep_validations_per_cycle": 1,
+                "max_deep_validations_per_cycle": 3,
             })
 
         self._persist_state()
@@ -631,14 +634,14 @@ class AutomatedTradeManager:
             "WATCH",
             "NEAR_VERIFIED",
         }:
-            seconds = 30 * 60
+            seconds = 12 * 60
         elif clean_status in {
             "REJECT",
             "NOT_VERIFIED",
             "NO_DATA",
             "ERROR",
         }:
-            seconds = 60 * 60
+            seconds = 20 * 60
         else:
             seconds = 15 * 60
 
@@ -764,22 +767,15 @@ class AutomatedTradeManager:
             "candidates":
                 [],
             "max_deep_validations_per_cycle":
-                1,
+                int(settings.get("max_deep_validations_per_cycle", 3)),
         }
 
         if available_slots <= 0:
-            result[
-                "reason"
-            ] = (
-                "Watcher portfolio already at target capacity."
+            result["normal_watcher_pool_full"] = True
+            result["reason"] = (
+                "Normal watcher portfolio is full; V6.4 continues sourcing "
+                "candidates for learning/shadow PAPER evidence."
             )
-
-            self._finish_run(
-                result=result,
-                error=None,
-            )
-
-            return result
 
         try:
             self._set_progress(
@@ -833,13 +829,8 @@ class AutomatedTradeManager:
             )
 
             for candidate in candidates:
-                if (
-                    result[
-                        "verified_created"
-                    ]
-                    >= available_slots
-                ):
-                    break
+                # V6.4 keeps sourcing/deep-validating for the learning engine
+                # even when the normal watcher portfolio is already full.
 
                 symbol = str(
                     candidate.get(
@@ -987,6 +978,18 @@ class AutomatedTradeManager:
                     summary
                 )
 
+                if self.learning_engine is not None:
+                    try:
+                        self.learning_engine.submit_candidate(
+                            candidate=candidate,
+                            validated=validated,
+                            risk_mode=str(settings.get("risk_mode", "Balanced")),
+                            starting_balance=float(settings.get("starting_balance", 10000.0)),
+                            payout=float(settings.get("payout", 0.80)),
+                        )
+                    except Exception as learning_exc:
+                        summary["learning_submit_error"] = str(learning_exc)
+
                 with self._lock:
                     self._state[
                         "last_rotated_symbol"
@@ -1054,6 +1057,10 @@ class AutomatedTradeManager:
                     "strategy_quarantined",
                     False,
                 )
+
+                if result["verified_created"] >= available_slots:
+                    summary["watcher_status"] = "LEARNING_ONLY_POOL_FULL"
+                    continue
 
                 self._set_progress(
                     stage="WATCHER_CREATION",
