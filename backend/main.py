@@ -14,6 +14,8 @@ from market_data_router import (
     canonical_fx_symbol,
     get_forex_universe,
     get_market_data,
+    get_discovery_market_data,
+    get_learning_universe,
     market_data_health,
 )
 
@@ -57,6 +59,7 @@ from autonomous_controller import AutonomousController
 from confidence_replay import ConfidenceReplayEngine
 from confidence_wr_analyzer import ConfidenceWinRateAnalyzer
 from persistent_state import PersistentStateStore
+from v64_learning_engine import V64LearningTradeEngine
 
 from database import (
     SessionLocal,
@@ -66,8 +69,8 @@ from database import (
 
 
 # ============================================================
-# JASONG AI TRADER V6.2
-# MULTI-SOURCE AUTONOMOUS PAPER/DEMO TRADING ENGINE
+# JASONG AI TRADER V6.4
+# HIGH-THROUGHPUT AUTONOMOUS PAPER LEARNING ENGINE
 # ============================================================
 
 CORE_MARKETS = {
@@ -88,14 +91,14 @@ MARKETS = dict(CORE_MARKETS)
 # Twelve Data Basic is intentionally protected from credit exhaustion.
 # The full provider universe is available, but Auto Manager rotates a small
 # discovery batch through it rather than downloading 1,300+ histories at once.
-FX_DISCOVERY_BATCH_SIZE = 6
+FX_DISCOVERY_BATCH_SIZE = 20
 _FX_DISCOVERY_OFFSET = 0
 _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.2 API",
-    version="6.2.0",
+    title="Jasong AI Trader V6.4 API",
+    version="6.4.0",
 )
 
 app.add_middleware(
@@ -880,10 +883,10 @@ def build(
 def root():
     return {
         "name":
-            "Jasong AI Trader V6.2",
+            "Jasong AI Trader V6.4",
 
         "version":
-            "6.2.0",
+            "6.4.0",
 
         "mode":
             "paper-trading",
@@ -909,8 +912,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.2.0",
-        "engine": "JASONG_AI_V6.2",
+        "version": "6.4.0",
+        "engine": "JASONG_AI_V6.4",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -926,6 +929,11 @@ def health():
         ),
         "fx_universe_size": provider.get(
             "universe_size", 0
+        ),
+        "v64_learning": (
+            V64_LEARNING_ENGINE.status()
+            if "V64_LEARNING_ENGINE" in globals()
+            else None
         ),
         "live_execution": False,
     }
@@ -972,7 +980,7 @@ def fx_universe(
     selected = universe[offset: offset + limit]
 
     return {
-        "version": "6.2.0",
+        "version": "6.4.0",
         "total_fx_instruments": len(universe),
         "offset": offset,
         "returned": len(selected),
@@ -984,7 +992,7 @@ def fx_universe(
 @app.get("/market-data-health")
 def get_market_data_health():
     return {
-        "version": "6.2.0",
+        "version": "6.4.0",
         **market_data_health(),
         "live_execution": False,
     }
@@ -3133,7 +3141,7 @@ def _v55_scan_candidates(
 
     raw_result = fast_scan_markets(
         markets=scan_markets,
-        get_data_func=get_data,
+        get_data_func=get_discovery_market_data,
         add_indicators_func=add_indicators,
         period="5d",
         interval="15m",
@@ -3241,6 +3249,20 @@ def _v55_validate_candidate(
     }
 
 
+V64_LEARNING_ENGINE = V64LearningTradeEngine(
+    signal_func=_v63_adaptive_live_signal,
+    price_func=_v53_latest_price,
+    state_store=V61_STATE_STORE,
+    max_watchers=6,
+    max_open_trades=3,
+    watcher_refresh_seconds=60,
+    starting_balance=10000.0,
+    payout=0.80,
+    default_stake_pct=0.01,
+)
+V64_LEARNING_ENGINE.start()
+
+
 V55_AUTO_MANAGER = AutomatedTradeManager(
     scan_candidates_func=
         _v55_scan_candidates,
@@ -3249,6 +3271,7 @@ V55_AUTO_MANAGER = AutomatedTradeManager(
     watcher_engine=
         V53_WATCHER_ENGINE,
     state_store=V61_STATE_STORE,
+    learning_engine=V64_LEARNING_ENGINE,
 )
 
 V55_AUTO_MANAGER.start_thread()
@@ -3259,30 +3282,27 @@ V55_AUTO_MANAGER.start_thread()
 # ============================================================
 
 def _v62_ensure_auto_manager() -> None:
-    """Ensure autonomous PAPER mode is enabled after every backend start.
+    """Migrate persisted Auto Manager state to the V6.4 learning cadence.
 
-    Existing persisted settings are retained whenever Auto Manager is already
-    enabled. If persisted state is disabled or absent, safe defaults are used.
+    Risk mode, balance and payout are preserved where available, while the
+    sourcing cadence/watch capacity is upgraded to the V6.4 defaults.
     """
 
     try:
         state = V55_AUTO_MANAGER.status()
-
-        if not bool(state.get("enabled", False)):
-            V55_AUTO_MANAGER.enable(
-                risk_mode="Balanced",
-                starting_balance=10000.0,
-                payout=0.80,
-                scan_interval_minutes=15,
-                target_active_watchers=3,
-                scan_top_n=6,
-            )
-
+        V55_AUTO_MANAGER.enable(
+            risk_mode=str(state.get("risk_mode", "Balanced")),
+            starting_balance=float(state.get("starting_balance", 10000.0) or 10000.0),
+            payout=float(state.get("payout", 0.80) or 0.80),
+            scan_interval_minutes=3,
+            target_active_watchers=6,
+            scan_top_n=20,
+        )
         V55_AUTO_MANAGER.start_thread()
 
     except Exception as exc:
         print(
-            "[V6.2 AUTO START ERROR]",
+            "[V6.4 AUTO START ERROR]",
             exc,
         )
 
@@ -3427,9 +3447,9 @@ def start_auto_manager(
     risk_mode: str = "Balanced",
     starting_balance: float = 10000.0,
     payout: float = 0.80,
-    scan_interval_minutes: int = 15,
-    target_active_watchers: int = 3,
-    scan_top_n: int = 9,
+    scan_interval_minutes: int = 3,
+    target_active_watchers: int = 6,
+    scan_top_n: int = 20,
 ):
     validate_risk_mode(
         risk_mode
@@ -4311,12 +4331,61 @@ def get_forward_stats(
     )
 
 
+
+# ============================================================
+# V6.4 HIGH-THROUGHPUT PAPER LEARNING API
+# ============================================================
+
+@app.get("/v64/learning-status")
+def v64_learning_status():
+    return V64_LEARNING_ENGINE.status()
+
+
+@app.get("/v64/learning-watchers")
+def v64_learning_watchers():
+    return V64_LEARNING_ENGINE.watchers()
+
+
+@app.get("/v64/learning-journal")
+def v64_learning_journal(limit: int = 200):
+    return V64_LEARNING_ENGINE.journal(limit=limit)
+
+
+@app.post("/v64/learning/run-now")
+def v64_learning_run_now():
+    return V64_LEARNING_ENGINE.tick()
+
+
+@app.post("/v64/learning/enable")
+def v64_learning_enable():
+    return V64_LEARNING_ENGINE.enable()
+
+
+@app.post("/v64/learning/pause")
+def v64_learning_pause():
+    return V64_LEARNING_ENGINE.pause()
+
+
+@app.get("/v64/learning-universe")
+def v64_learning_universe(limit: int = 80):
+    rows = get_learning_universe(limit=limit)
+    return {
+        "version": "6.4.0",
+        "target_full_rotation_minutes": 12,
+        "batch_size": FX_DISCOVERY_BATCH_SIZE,
+        "scan_interval_minutes": 3,
+        "returned": len(rows),
+        "markets": rows,
+        "live_execution": False,
+    }
+
+
 @app.get("/persistent-state")
 def persistent_state_status():
     snapshot = V61_STATE_STORE.snapshot()
     return {
         "status": "ok",
-        "version": "6.2.0",
+        "version": "6.4.0",
         "path": str(V61_STATE_STORE.path),
         "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
         "meta": snapshot.get("_meta", {}),
