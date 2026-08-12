@@ -332,11 +332,15 @@ jobs:
   run: |
     set -euo pipefail
 
-    flutter build apk \
-  --release \
-  --verbose \
-  -- \
-  --no-watch-fs
+    - name: Build release APK
+        working-directory: mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          flutter build apk \
+            --release \
+            --verbose
 
       # ============================================================
       # 16. VERIFY APK
