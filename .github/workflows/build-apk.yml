@@ -327,14 +327,15 @@ jobs:
       # 15. BUILD RELEASE APK
       # ============================================================
       - name: Build release APK
-        working-directory: mobile
-        shell: bash
-        run: |
-          set -euo pipefail
+  working-directory: mobile
+  shell: bash
+  run: |
+    set -euo pipefail
 
-          flutter build apk \
-            --release \
-            --verbose
+    flutter build apk \
+      --release \
+      --verbose \
+      -- --no-watch-fs
 
       # ============================================================
       # 16. VERIFY APK
