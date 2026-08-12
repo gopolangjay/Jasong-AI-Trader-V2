@@ -101,35 +101,28 @@ jobs:
       # ============================================================
       # 7. GENERATE GRADLE WRAPPER
       # ============================================================
-      - name: Generate Android Gradle wrapper
-        working-directory: mobile/android
-        run: |
-          echo "Checking Android Gradle wrapper..."
+      - name: Setup Gradle 8.13
+  uses: gradle/actions/setup-gradle@v6
+  with:
+    gradle-version: '8.13'
 
-          if [ ! -f gradlew ] || \
-             [ ! -f gradlew.bat ] || \
-             [ ! -f gradle/wrapper/gradle-wrapper.jar ] || \
-             [ ! -f gradle/wrapper/gradle-wrapper.properties ]; then
+- name: Generate Android Gradle wrapper
+  working-directory: mobile/android
+  shell: bash
+  run: |
+    set -euxo pipefail
 
-            echo "Gradle wrapper incomplete or missing."
-            echo "Generating Gradle 8.10.2 wrapper..."
+    echo "System Gradle:"
+    gradle --version
 
-            gradle wrapper \
-              --gradle-version 8.10.2 \
-              --distribution-type bin
+    gradle wrapper \
+      --gradle-version 8.13 \
+      --distribution-type bin
 
-          else
-            echo "Gradle wrapper already present."
-          fi
+    chmod +x gradlew
 
-          chmod +x gradlew
-
-          echo "Gradle wrapper files:"
-          ls -la
-          ls -la gradle/wrapper || true
-
-          echo "Wrapper version:"
-          ./gradlew --version
+    echo "Wrapper Gradle:"
+    ./gradlew --version
 
       # ============================================================
       # 8. CHECK FOR DELETED FLUTTER V1 EMBEDDING
