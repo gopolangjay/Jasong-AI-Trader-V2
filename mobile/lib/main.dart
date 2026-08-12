@@ -19,63 +19,9 @@ class JasongApp extends StatelessWidget {
       title: 'Jasong AI Trader',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        useMaterial3: true,
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF07111A),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF65E6D3),
-          brightness: Brightness.dark,
-          primary: const Color(0xFF65E6D3),
-          secondary: const Color(0xFF6FA8FF),
-          surface: const Color(0xFF0E1A24),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          scrolledUnderElevation: 0,
-        ),
-        cardTheme: CardThemeData(
-          color: const Color(0xFF0E1A24),
-          elevation: 0,
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(22),
-            side: const BorderSide(
-              color: Color(0xFF17303A),
-            ),
-          ),
-        ),
-        navigationBarTheme: NavigationBarThemeData(
-          backgroundColor: const Color(0xFF0A151E),
-          indicatorColor: const Color(0xFF65E6D3).withOpacity(.16),
-          labelTextStyle: WidgetStateProperty.resolveWith((states) {
-            return TextStyle(
-              fontSize: 11,
-              fontWeight: states.contains(WidgetState.selected)
-                  ? FontWeight.w800
-                  : FontWeight.w500,
-              color: states.contains(WidgetState.selected)
-                  ? const Color(0xFF65E6D3)
-                  : Colors.white54,
-            );
-          }),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: const Color(0xFF0B1720),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Color(0xFF24404B)),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Color(0xFF24404B)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Color(0xFF65E6D3)),
-          ),
-        ),
+        useMaterial3: true,
+        colorSchemeSeed: Colors.teal,
       ),
       home: const HomePage(),
     );
@@ -105,8 +51,6 @@ class _HomePageState extends State<HomePage> {
   );
 
   String risk = 'Balanced';
-
-  int selectedTab = 0;
 
   final String apiBase =
       const String.fromEnvironment(
@@ -2924,7 +2868,6 @@ class _HomePageState extends State<HomePage> {
     autoDashboardPollTimer?.cancel();
     symbol.dispose();
     balance.dispose();
-    copilotController.dispose();
 
     super.dispose();
   }
@@ -3471,1149 +3414,3456 @@ class _HomePageState extends State<HomePage> {
   Widget build(
     BuildContext context,
   ) {
-    final cs = Theme.of(context).colorScheme;
-
     final liveDecision =
-        sig?['decision']?.toString().toUpperCase() ?? 'WAIT';
-    final confidence = formatPercent(sig?['confidence']);
-    final aiUp = formatPercent(sig?['combined_up_probability']);
+        sig?['decision']
+                ?.toString() ??
+            'WAIT';
 
-    final dashboard = autoDashboard ?? <String, dynamic>{};
-    final manager = dashboard['manager'] is Map
-        ? Map<String, dynamic>.from(dashboard['manager'] as Map)
-        : <String, dynamic>{};
-    final summary = dashboard['summary'] is Map
-        ? Map<String, dynamic>.from(dashboard['summary'] as Map)
-        : <String, dynamic>{};
+    final confidence =
+        formatPercent(
+      sig?['confidence'],
+    );
 
-    final autoOn = dashboard['auto_mode'] == true ||
-        manager['enabled'] == true ||
-        systemOverview?['auto_manager_enabled'] == true;
+    final aiUp =
+        formatPercent(
+      sig?[
+          'combined_up_probability'],
+    );
 
-    final stage = summary['current_stage']?.toString() ??
-        manager['progress_stage']?.toString() ??
-        'IDLE';
-    final stageMessage = summary['current_message']?.toString() ??
-        manager['progress_message']?.toString() ??
-        'Waiting for next automatic cycle';
-    final progress = double.tryParse(
-          '${summary['progress_percent'] ?? manager['progress_percent'] ?? 0}',
-        ) ??
-        0.0;
+    final curve =
+        (bt?['equity_curve']
+                    as List?) ??
+            const [];
 
-    final activeWatchers = int.tryParse(
-          '${summary['active_watchers'] ?? serverWatchers.length}',
-        ) ??
-        serverWatchers.length;
-    final targetWatchers = int.tryParse(
-          '${summary['target_active_watchers'] ?? 6}',
-        ) ??
-        6;
-    final openTrades = int.tryParse(
-          '${summary['open_trades'] ?? paperTrades.where((t) => t['status'] == 'OPEN').length}',
-        ) ??
-        0;
+    final topCandidates =
+        (fastScan?[
+                    'top_candidates']
+                as List?) ??
+            const [];
 
-    final forwardTrades = forwardStats?['forward_trades'] ??
-        forwardStats?['trades'] ??
-        0;
-    final paperBalance = forwardStats?['paper_balance'] ?? balance.text.trim();
-    final totalPnl = forwardStats?['total_pnl'] ??
-        forwardStats?['pnl'] ??
-        0;
-    final forwardWr = forwardStats?['win_rate_pct'] ??
-        forwardStats?['forward_win_rate_pct'] ??
-        0;
+    final ranking =
+        (fastScan?['ranking']
+                    as List?) ??
+            const [];
 
-    final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
-    final ranking = (fastScan?['ranking'] as List?) ?? const [];
+    final hasNetworkFailure =
+        validationHistory.any(
+      (item) =>
+          item['deep_status'] ==
+          'NETWORK_ERROR',
+    );
 
-    Color sideColor(String value) {
-      final v = value.toUpperCase();
-      if (v == 'BUY' || v == 'WIN' || v == 'OPEN') {
-        return const Color(0xFF67F0C1);
-      }
-      if (v == 'SELL' || v == 'LOSS') {
-        return const Color(0xFFFF6B75);
-      }
-      return const Color(0xFFFFD75E);
-    }
+    final hasBackendFailure =
+        validationHistory.any(
+      (item) =>
+          item['deep_status'] ==
+          'ERROR',
+    );
 
-    Widget glassCard({
-      required Widget child,
-      EdgeInsets padding = const EdgeInsets.all(16),
-      Color? glow,
-    }) {
-      return Container(
-        padding: padding,
-        decoration: BoxDecoration(
-          color: const Color(0xFF0E1A24).withOpacity(.94),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(
-            color: glow?.withOpacity(.28) ?? const Color(0xFF18313C),
+    return Scaffold(
+      appBar: AppBar(
+        title:
+            const Text(
+          'Jasong AI Trader V6.5.1',
+        ),
+        actions: [
+          IconButton(
+            onPressed:
+                busy
+                    ? null
+                    : refreshSignal,
+            icon:
+                const Icon(
+              Icons.refresh,
+            ),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: (glow ?? Colors.black).withOpacity(.08),
-              blurRadius: 26,
-              offset: const Offset(0, 12),
-            ),
-          ],
-        ),
-        child: child,
-      );
-    }
+        ],
+      ),
 
-    Widget sectionTitle(String title, {String? subtitle}) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: .2,
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: Colors.white54,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
+      body: RefreshIndicator(
+        onRefresh:
+            refreshSignal,
 
-    Widget statTile(
-      String label,
-      String value,
-      IconData icon, {
-      Color? valueColor,
-    }) {
-      return Expanded(
-        child: glassCard(
-          padding: const EdgeInsets.all(14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, color: cs.primary, size: 20),
-              const SizedBox(height: 14),
-              Text(
-                value,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.w900,
-                  color: valueColor ?? Colors.white,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white54,
-                  fontSize: 11,
-                ),
-              ),
-            ],
+        child: ListView(
+          physics:
+              const AlwaysScrollableScrollPhysics(),
+
+          padding:
+              const EdgeInsets.all(
+            14,
           ),
-        ),
-      );
-    }
 
-    Widget pill(
-      String text, {
-      IconData? icon,
-      Color? color,
-    }) {
-      final c = color ?? cs.primary;
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-        decoration: BoxDecoration(
-          color: c.withOpacity(.12),
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: c.withOpacity(.20)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            if (icon != null) ...[
-              Icon(icon, size: 13, color: c),
-              const SizedBox(width: 5),
-            ],
-            Text(
-              text,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w900,
-                color: c,
-                letterSpacing: .25,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    Widget watcherCard(Map<String, dynamic> w) {
-      final market = w['market']?.toString() ?? w['symbol']?.toString() ?? 'MARKET';
-      final direction = w['direction']?.toString().toUpperCase() ?? 'WAIT';
-      final status = w['status']?.toString().toUpperCase() ?? 'WATCHING';
-      final conf = formatPercent(w['confidence']);
-      final reason = w['last_reason']?.toString() ?? watcherLifecycleSubtitle(w);
-      return glassCard(
-        glow: sideColor(direction),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: sideColor(direction).withOpacity(.12),
-                borderRadius: BorderRadius.circular(15),
-              ),
-              child: Icon(Icons.currency_exchange_rounded, color: sideColor(direction)),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          market,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ),
-                      Text(
-                        direction,
-                        style: TextStyle(
-                          color: sideColor(direction),
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 5),
-                  Row(
-                    children: [
-                      pill(status, color: watcherStatusColor(status)),
-                      const SizedBox(width: 7),
-                      if (conf != '0.0')
-                        Text(
-                          '$conf%',
-                          style: const TextStyle(
-                            color: Colors.white60,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    reason,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white60,
-                      fontSize: 12,
-                      height: 1.35,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    Widget dashboardPage() {
-      return ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(26),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  cs.primary.withOpacity(.22),
-                  const Color(0xFF0D2630),
-                  const Color(0xFF0B1620),
-                ],
-              ),
-              border: Border.all(color: cs.primary.withOpacity(.25)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+            // =================================================
+            // JASONG BRAND HEADER
+            // =================================================
+            Card(
+              elevation: 0,
+              color: Colors.black,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                child: Column(
                   children: [
-                    pill(
-                      autoOn ? 'AUTO MANAGER ON' : 'AUTO MANAGER OFF',
-                      icon: autoOn ? Icons.bolt_rounded : Icons.pause_rounded,
-                      color: autoOn ? cs.primary : const Color(0xFFFFD75E),
+                    Image.asset(
+                      'assets/images/jasong_logo.png',
+                      width: 280,
+                      height: 126,
+                      fit: BoxFit.contain,
+                      semanticLabel: 'Jasong infinity snake and lion logo',
                     ),
-                    const Spacer(),
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: systemOverview != null || autoDashboard != null
-                            ? const Color(0xFF67F0C1)
-                            : const Color(0xFFFFD75E),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
+                    const SizedBox(height: 4),
                     const Text(
-                      'V6.5',
+                      'Power • Evolution • Legacy',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white60,
+                        color: Color(0xFFFFC83D),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
-                Text(
-                  stage.replaceAll('_', ' '),
-                  style: const TextStyle(
-                    fontSize: 27,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: .2,
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  stageMessage,
-                  style: const TextStyle(
-                    color: Colors.white60,
-                    fontSize: 13,
-                    height: 1.35,
-                  ),
-                ),
-                const SizedBox(height: 18),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(99),
-                  child: LinearProgressIndicator(
-                    value: progress.clamp(0, 100) / 100,
-                    minHeight: 7,
-                    backgroundColor: Colors.white10,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Text(
-                      'Next scan ${formatEpochTime(summary['next_scan_at'])}',
-                      style: const TextStyle(color: Colors.white54, fontSize: 11),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${progress.round()}%',
-                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              statTile('Paper balance', '$paperBalance', Icons.account_balance_wallet_outlined),
-              const SizedBox(width: 10),
-              statTile('Open trades', '$openTrades / 3', Icons.swap_horiz_rounded),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              statTile('Watchers', '$activeWatchers / $targetWatchers', Icons.visibility_outlined),
-              const SizedBox(width: 10),
-              statTile('Forward trades', '$forwardTrades', Icons.show_chart_rounded),
-            ],
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('Live intelligence', subtitle: 'Current signal for ${symbol.text.trim()}'),
-          glassCard(
-            glow: sideColor(liveDecision),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+
+            const SizedBox(height: 10),
+
+            const Text(
+              'AI-assisted paper trading',
+              style:
+                  TextStyle(
+                fontWeight:
+                    FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(
+              height: 10,
+            ),
+
+            TextField(
+              controller:
+                  symbol,
+              decoration:
+                  const InputDecoration(
+                labelText:
+                    'Market symbol',
+                border:
+                    OutlineInputBorder(),
+              ),
+            ),
+
+            const SizedBox(
+              height: 10,
+            ),
+
+            TextField(
+              controller:
+                  balance,
+              keyboardType:
+                  TextInputType.number,
+              decoration:
+                  const InputDecoration(
+                labelText:
+                    'Paper balance',
+                border:
+                    OutlineInputBorder(),
+              ),
+            ),
+
+            const SizedBox(
+              height: 10,
+            ),
+
+            DropdownButtonFormField<
+                String>(
+              value:
+                  risk,
+              decoration:
+                  const InputDecoration(
+                labelText:
+                    'Risk mode',
+                border:
+                    OutlineInputBorder(),
+              ),
+              items: [
+                'Conservative',
+                'Balanced',
+                'Aggressive',
+              ]
+                  .map(
+                    (value) =>
+                        DropdownMenuItem<
+                            String>(
+                      value:
+                          value,
+                      child:
+                          Text(
+                        value,
+                      ),
+                    ),
+                  )
+                  .toList(),
+              onChanged:
+                  busy
+                      ? null
+                      : (value) {
+                          setState(
+                            () {
+                              risk =
+                                  value ??
+                                      'Balanced';
+                            },
+                          );
+                        },
+            ),
+
+            const SizedBox(
+              height: 14,
+            ),
+
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(
+                  18,
+                ),
+                child: Column(
                   children: [
                     Text(
                       liveDecision,
-                      style: TextStyle(
-                        fontSize: 34,
-                        fontWeight: FontWeight.w900,
-                        color: sideColor(liveDecision),
+                      style:
+                          TextStyle(
+                        fontSize: 44,
+                        fontWeight:
+                            FontWeight.w900,
+                        color:
+                            decisionColor(
+                          liveDecision,
+                        ),
                       ),
                     ),
-                    const Spacer(),
-                    pill(risk.toUpperCase(), icon: Icons.shield_outlined),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  sig?['reason']?.toString() ?? 'Waiting for signal...',
-                  style: const TextStyle(color: Colors.white60, height: 1.35),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(child: _midnightValue('Quant', '$confidence%')),
-                    const SizedBox(width: 8),
-                    Expanded(child: _midnightValue('AI up', '$aiUp%')),
-                    const SizedBox(width: 8),
-                    Expanded(child: _midnightValue('RSI', formatNumber(sig?['rsi']))),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: busy ? null : scanAllMarkets,
-                  icon: const Icon(Icons.radar_rounded),
-                  label: const Text('Scan markets'),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: FilledButton.tonalIcon(
-                  onPressed: busy ? null : findVerifiedTrade,
-                  icon: const Icon(Icons.verified_rounded),
-                  label: const Text('Find setup'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('Active watchers', subtitle: 'Verified setups under live observation'),
-          if (serverWatchers.isEmpty)
-            glassCard(
-              child: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    Icon(Icons.visibility_off_outlined, color: Colors.white38),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'No watcher snapshot loaded yet. Auto Manager will populate this automatically.',
-                        style: TextStyle(color: Colors.white54),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else
-            ...serverWatchers.take(4).map((w) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: watcherCard(w),
-                )),
-          const SizedBox(height: 10),
-          sectionTitle('V6.5 learning policy'),
-          glassCard(
-            child: const Column(
-              children: [
-                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Verified + live direction agrees'),
-                Divider(height: 24),
-                _MidnightRuleRow('AI PAPER path', '≥ 40%', 'AI approves + direction agrees'),
-                Divider(height: 24),
-                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
-              ],
-            ),
-          ),
-          if (error != null) ...[
-            const SizedBox(height: 14),
-            glassCard(
-              glow: const Color(0xFFFF6B75),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(Icons.error_outline_rounded, color: Color(0xFFFF6B75)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      error!,
-                      style: const TextStyle(color: Color(0xFFFF9098), fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ],
-      );
-    }
 
-    Widget marketsPage() {
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-        children: [
-          sectionTitle('Market scanner', subtitle: 'Fast ranking across the configured FX universe'),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: busy ? null : scanAllMarkets,
-                  icon: scanningMarkets
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.radar_rounded),
-                  label: Text(scanningMarkets ? 'Scanning...' : 'Fast scan'),
+                    const SizedBox(
+                      height: 6,
+                    ),
+
+                    Text(
+                      sig?['reason']
+                              ?.toString() ??
+                          'Waiting for signal...',
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: FilledButton.tonalIcon(
-                  onPressed: busy ? null : findVerifiedTrade,
-                  icon: const Icon(Icons.verified_rounded),
-                  label: const Text('Deep verify'),
+            ),
+
+            Row(
+              children: [
+                metric(
+                  'Confidence',
+                  '$confidence%',
                 ),
+
+                metric(
+                  'AI up',
+                  '$aiUp%',
+                ),
+              ],
+            ),
+
+            Row(
+              children: [
+                metric(
+                  'Price',
+                  formatPrice(
+                    sig?['price'],
+                  ),
+                ),
+
+                metric(
+                  'RSI',
+                  formatNumber(
+                    sig?['rsi'],
+                  ),
+                ),
+              ],
+            ),
+
+            Row(
+              children: [
+                metric(
+                  'Paper stake',
+                  '${sig?['suggested_paper_stake'] ?? '-'}',
+                ),
+
+                metric(
+                  'Mode',
+                  risk,
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 12,
+            ),
+
+            FilledButton.icon(
+              onPressed:
+                  busy
+                      ? null
+                      : refreshSignal,
+              icon:
+                  const Icon(
+                Icons.psychology,
               ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          if (topCandidates.isEmpty)
-            glassCard(
-              child: const Text(
-                'Run a market scan to populate ranked opportunities.',
-                style: TextStyle(color: Colors.white54),
+              label:
+                  const Text(
+                'Refresh AI Signal',
               ),
-            )
-          else ...[
-            sectionTitle('Top opportunities'),
-            ...topCandidates.take(6).whereType<Map>().map((raw) {
-              final item = Map<String, dynamic>.from(raw);
-              final market = item['market']?.toString() ?? item['symbol']?.toString() ?? '-';
-              final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
-              final score = item['smart_fast_score'] ?? item['fast_score'] ?? item['score'] ?? '-';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(22),
-                  onTap: () => analyseMarket(item),
-                  child: glassCard(
-                    glow: sideColor(direction),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            OutlinedButton.icon(
+              onPressed:
+                  busy
+                      ? null
+                      : runBacktest,
+              icon:
+                  const Icon(
+                Icons.query_stats,
+              ),
+              label:
+                  const Text(
+                'Run Backtest',
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            FilledButton.icon(
+              onPressed:
+                  busy
+                      ? null
+                      : scanAllMarkets,
+              icon:
+                  const Icon(
+                Icons.radar,
+              ),
+              label:
+                  const Text(
+                'Fast Scan All Markets',
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            FilledButton.icon(
+              onPressed:
+                  busy
+                      ? null
+                      : findVerifiedTrade,
+              icon:
+                  const Icon(
+                Icons.verified,
+              ),
+              label:
+                  const Text(
+                'Find Verified Trade',
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            OutlinedButton.icon(
+              onPressed:
+                  busy ||
+                          ![
+                            'BUY',
+                            'SELL',
+                          ].contains(
+                            liveDecision,
+                          )
+                      ? null
+                      : recordPaperTrade,
+              icon:
+                  const Icon(
+                Icons.edit_note,
+              ),
+              label:
+                  const Text(
+                'Record Paper Trade',
+              ),
+            ),
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            // =================================================
+            // V5.5.3 AUTO MODE DASHBOARD
+            // =================================================
+
+            if (autoDashboard != null)
+              Builder(
+                builder: (context) {
+                  final dashboard =
+                      autoDashboard!;
+
+                  final manager =
+                      dashboard['manager']
+                              is Map
+                          ? Map<String, dynamic>.from(
+                              dashboard[
+                                      'manager']
+                                  as Map,
+                            )
+                          : <String, dynamic>{};
+
+                  final summary =
+                      dashboard['summary']
+                              is Map
+                          ? Map<String, dynamic>.from(
+                              dashboard[
+                                      'summary']
+                                  as Map,
+                            )
+                          : <String, dynamic>{};
+
+                  final autoOn =
+                      dashboard['auto_mode']
+                              == true;
+
+                  final stage =
+                      summary['current_stage']
+                              ?.toString() ??
+                          'IDLE';
+
+                  final progress =
+                      int.tryParse(
+                            '${summary['progress_percent'] ?? 0}',
+                          ) ??
+                          0;
+
+                  final lifecycle =
+                      (dashboard[
+                                  'lifecycle']
+                              as List?) ??
+                          const [];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment
+                                .stretch,
+                        children: [
+                          Row(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .spaceBetween,
                             children: [
-                              Text(market, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
-                              const SizedBox(height: 4),
+                              const Text(
+                                'V6 AUTONOMOUS PAPER ENGINE',
+                                style:
+                                    TextStyle(
+                                  fontSize: 20,
+                                  fontWeight:
+                                      FontWeight
+                                          .bold,
+                                ),
+                              ),
                               Text(
-                                item['reason']?.toString() ?? item['status']?.toString() ?? 'Ranked opportunity',
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(color: Colors.white54, fontSize: 12),
+                                autoOn
+                                    ? 'ON'
+                                    : 'OFF',
+                                style:
+                                    TextStyle(
+                                  fontSize: 20,
+                                  fontWeight:
+                                      FontWeight
+                                          .w900,
+                                  color: autoOn
+                                      ? Colors
+                                          .greenAccent
+                                      : Colors
+                                          .amberAccent,
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          LinearProgressIndicator(
+                            value:
+                                progress <= 0
+                                    ? 0
+                                    : progress /
+                                        100.0,
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '$stage • '
+                            '${summary['current_message'] ?? 'Waiting'}',
+                            textAlign:
+                                TextAlign.center,
+                          ),
+
+                          if (summary[
+                                  'current_candidate'] !=
+                              null)
+                            Text(
+                              'Current: '
+                              '${summary['current_candidate']}',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.tealAccent,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Watchers',
+                                '${summary['active_watchers'] ?? 0} / '
+                                '${summary['target_active_watchers'] ?? 3}',
+                              ),
+                              metric(
+                                'Open Trades',
+                                '${summary['open_trades'] ?? 0}',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Next Scan',
+                                formatEpochTime(
+                                  summary[
+                                      'next_scan_at'],
+                                ),
+                              ),
+                              metric(
+                                'Last Scan',
+                                formatEpochTime(
+                                  summary[
+                                      'last_scan_at'],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          if (forwardStats !=
+                              null)
+                            Row(
+                              children: [
+                                metric(
+                                  'Forward Trades',
+                                  '${forwardStats!['forward_trades'] ?? 0}',
+                                ),
+                                metric(
+                                  'Paper Balance',
+                                  '${forwardStats!['paper_balance'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          Row(
+                            children: [
+                              Expanded(
+                                child:
+                                    FilledButton.icon(
+                                  onPressed:
+                                      autoManagerBusy
+                                          ? null
+                                          : autoOn
+                                              ? stopAutoMode
+                                              : startAutoMode,
+                                  icon:
+                                      Icon(
+                                    autoOn
+                                        ? Icons.stop_circle
+                                        : Icons.play_circle,
+                                  ),
+                                  label:
+                                      Text(
+                                    autoOn
+                                        ? 'Stop Auto Mode'
+                                        : 'Start Auto Mode',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                autoManagerBusy
+                                    ? null
+                                    : runAutoManagerNow,
+                            icon:
+                                const Icon(
+                              Icons.bolt,
+                            ),
+                            label:
+                                const Text(
+                              'Run One Cycle Now',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                loadAutoDashboard,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Refresh Auto Dashboard',
+                            ),
+                          ),
+
+                          if (lifecycle
+                              .isNotEmpty) ...[
+                            const Divider(
+                              height: 28,
+                            ),
+
+                            const Text(
+                              'TRADE LIFECYCLE',
+                              style:
+                                  TextStyle(
+                                fontSize: 17,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+
+                            const SizedBox(
+                              height: 6,
+                            ),
+
+                            ...lifecycle
+                                .take(6)
+                                .whereType<Map>()
+                                .map(
+                                  (raw) {
+                                final watcher =
+                                    Map<String, dynamic>.from(
+                                  raw,
+                                );
+
+                                final status =
+                                    watcher['status']
+                                            ?.toString() ??
+                                        '-';
+
+                                return ListTile(
+                                  dense: true,
+                                  contentPadding:
+                                      EdgeInsets.zero,
+                                  leading:
+                                      Icon(
+                                    status ==
+                                            'WIN'
+                                        ? Icons
+                                            .check_circle
+                                        : status ==
+                                                'LOSS'
+                                            ? Icons
+                                                .cancel
+                                            : status ==
+                                                'OPEN'
+                                                ? Icons
+                                                    .show_chart
+                                                : Icons
+                                                    .visibility,
+                                    color:
+                                        watcherStatusColor(
+                                      status,
+                                    ),
+                                  ),
+                                  title:
+                                      Text(
+                                    '${watcher['market'] ?? watcher['symbol'] ?? '-'} '
+                                    '${watcher['direction'] ?? ''}',
+                                    style:
+                                        const TextStyle(
+                                      fontWeight:
+                                          FontWeight
+                                              .bold,
+                                    ),
+                                  ),
+                                  subtitle:
+                                      Text(
+                                    watcherLifecycleSubtitle(
+                                      watcher,
+                                    ),
+                                  ),
+                                  trailing:
+                                      Text(
+                                    status,
+                                    style:
+                                        TextStyle(
+                                      color:
+                                          watcherStatusColor(
+                                        status,
+                                      ),
+                                      fontWeight:
+                                          FontWeight
+                                              .bold,
+                                    ),
+                                  ),
+                                );
+                              }),
+                          ],
+
+                          const SizedBox(
+                            height: 6,
+                          ),
+
+                          const Text(
+                            'V6.1 remains PAPER/DEMO-only with LIVE hard-disabled. VERIFIED setups '
+                            'still require live confirmation and risk controls '
+                            'before an automatic paper entry is opened.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            // =================================================
+            // NETWORK RECOVERY UI
+            // =================================================
+
+            if (findingVerifiedTrade)
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const LinearProgressIndicator(),
+
+                      const SizedBox(
+                        height: 14,
+                      ),
+
+                      Text(
+                        currentValidationMarket ??
+                            'Working...',
+                        textAlign:
+                            TextAlign.center,
+                        style:
+                            const TextStyle(
+                          fontSize: 18,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+
+                      if (currentAttempt > 0) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        Text(
+                          'Attempt '
+                          '$currentAttempt/'
+                          '$maximumAttempts',
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.tealAccent,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
+                        ),
+                      ],
+
+                      if (networkStatus != null) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+
+                        Text(
+                          networkStatus!,
+                          textAlign:
+                              TextAlign.center,
+                        ),
+                      ],
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'Deep validation now runs as a '
+                        'background server job. The app checks '
+                        'the same job until it completes. '
+                        'A temporary network error will not be '
+                        'treated as a rejected trade.',
+                        textAlign:
+                            TextAlign.center,
+                        style:
+                            TextStyle(
+                          fontSize: 11,
+                          color:
+                              Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            if (busy &&
+                !findingVerifiedTrade &&
+                !scanningMarkets)
+              const Padding(
+                padding:
+                    EdgeInsets.all(
+                  16,
+                ),
+                child:
+                    Center(
+                  child:
+                      CircularProgressIndicator(),
+                ),
+              ),
+
+            if (error != null)
+              Padding(
+                padding:
+                    const EdgeInsets.only(
+                  top: 10,
+                ),
+                child: Text(
+                  error!,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.redAccent,
+                  ),
+                ),
+              ),
+
+            // =================================================
+            // VERIFIED TRADE
+            // =================================================
+
+            if (verifiedTrade != null) ...[
+              const SizedBox(
+                height: 20,
+              ),
+
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.verified,
+                        size: 54,
+                        color:
+                            Colors.greenAccent,
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'VERIFIED TRADE',
+                        style:
+                            TextStyle(
+                          color:
+                              Colors.greenAccent,
+                          fontSize: 18,
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      Row(
+                        mainAxisAlignment:
+                            MainAxisAlignment
+                                .center,
+                        children: [
+                          Text(
+                            '${verifiedTrade!['market']}',
+                            style:
+                                const TextStyle(
+                              fontSize: 34,
+                              fontWeight:
+                                  FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(
+                            width: 16,
+                          ),
+                          Text(
+                            '${verifiedTrade!['direction']}',
+                            style:
+                                TextStyle(
+                              fontSize: 30,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  decisionColor(
+                                verifiedTrade![
+                                        'direction']
+                                    .toString(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 14,
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Deep Score',
+                            formatNumber(
+                              verifiedTrade![
+                                  'deep_score'],
+                            ),
+                          ),
+                          metric(
+                            'Historical WR',
+                            '${formatPercent(
+                              verifiedTrade![
+                                  'win_rate'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Reliability',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'sample_reliability_pct'],
+                              decimals: 1,
+                            )}%',
+                          ),
+                          metric(
+                            'Conservative WR',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'wilson_lower_win_rate_pct'],
+                              decimals: 1,
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${verifiedTrade!['wins'] ?? '-'} / '
+                            '${verifiedTrade!['losses'] ?? '-'}',
+                          ),
+                          metric(
+                            'Trades',
+                            '${verifiedTrade!['trades'] ?? '-'}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Profit Factor',
+                            formatNumber(
+                              verifiedTrade![
+                                  'profit_factor'],
+                            ),
+                          ),
+                          metric(
+                            'Max DD',
+                            '${formatPercent(
+                              verifiedTrade![
+                                  'max_drawdown'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Backtest Return',
+                            '${formatPercent(
+                              verifiedTrade![
+                                  'return_pct'],
+                            )}%',
+                          ),
+                          metric(
+                            'Fast Score',
+                            '${formatNumber(
+                              verifiedTrade![
+                                  'fast_score'],
+                              decimals: 1,
+                            )}/100',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      Card(
+                        child: Padding(
+                          padding:
+                              const EdgeInsets.all(
+                            14,
+                          ),
+                          child: Column(
+                            children: [
+                              Text(
+                                'TIMEFRAME  '
+                                '${verifiedTrade!['interval'] ?? '-'}',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'HISTORICAL WINDOW  '
+                                '${verifiedTrade!['period'] ?? '-'}',
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'HOLDING WINDOW  '
+                                '${verifiedTrade!['holding_candles'] ?? '-'} candles',
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                'ENTRY THRESHOLD  '
+                                '${verifiedTrade!['threshold_pct'] ?? '-'}%',
                               ),
                             ],
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
+                      ),
+
+                      const SizedBox(
+                        height: 12,
+                      ),
+
+                      const Align(
+                        alignment:
+                            Alignment.centerLeft,
+                        child: Text(
+                          'Validation checks',
+                          style:
+                              TextStyle(
+                            fontWeight:
+                                FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 6,
+                      ),
+
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Sample size passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Historical win rate passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Profit factor passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Drawdown limit passed',
+                        ),
+                      ),
+                      const ListTile(
+                        dense: true,
+                        leading: Icon(
+                          Icons.check_circle,
+                          color:
+                              Colors.greenAccent,
+                        ),
+                        title: Text(
+                          'Validated sample passed',
+                        ),
+                      ),
+
+                      if (verifiedTrade![
+                              'explanation'] !=
+                          null) ...[
+                        const SizedBox(
+                          height: 8,
+                        ),
+                        Text(
+                          '${verifiedTrade!['explanation']}',
+                          textAlign:
+                              TextAlign.center,
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+
+                      const SizedBox(
+                        height: 14,
+                      ),
+
+                      FilledButton.icon(
+                        onPressed:
+                            busy
+                                ? null
+                                : analyseVerifiedTrade,
+                        icon:
+                            const Icon(
+                          Icons.psychology,
+                        ),
+                        label:
+                            const Text(
+                          'Check Live Entry',
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      OutlinedButton.icon(
+                        onPressed:
+                            busy ||
+                                    sig == null ||
+                                    ![
+                                      'BUY',
+                                      'SELL',
+                                    ].contains(
+                                      sig![
+                                              'decision']
+                                          ?.toString(),
+                                    )
+                                ? null
+                                : recordPaperTrade,
+                        icon:
+                            const Icon(
+                          Icons.edit_note,
+                        ),
+                        label:
+                            const Text(
+                          'Record Paper Trade',
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 10,
+                      ),
+
+                      const Text(
+                        'VERIFIED means the historical setup '
+                        'passed the configured validation rules. '
+                        'Historical win rate and scores are not '
+                        'guarantees of the next trade outcome.',
+                        textAlign:
+                            TextAlign.center,
+                        style:
+                            TextStyle(
+                          fontSize: 11,
+                          color:
+                              Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // =================================================
+            // V5.3 SERVER TRADE WATCHER
+            // =================================================
+
+            if (serverWatcher != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Builder(
+                builder: (context) {
+                  final watcher =
+                      serverWatcher!;
+
+                  final status =
+                      watcher['status']
+                              ?.toString() ??
+                          'WATCHING';
+
+                  final live =
+                      watcher['last_live_signal'];
+
+                  final riskDecision =
+                      watcher['risk_decision'];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            watcherStatusIcon(
+                              status,
+                            ),
+                            size: 52,
+                            color:
+                                watcherStatusColor(
+                              status,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          const Text(
+                            'V6.7 FORWARD WATCH PORTFOLIO',
+                            style:
+                                TextStyle(
+                              fontSize: 15,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 6,
+                          ),
+
+                          Text(
+                            '${serverWatchers.length} verified '
+                            '${serverWatchers.length == 1 ? 'candidate' : 'candidates'} '
+                            'in watcher history/portfolio',
+                            style:
+                                const TextStyle(
+                              fontSize: 12,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            status.replaceAll(
+                              '_',
+                              ' ',
+                            ),
+                            style:
+                                TextStyle(
+                              fontSize: 28,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  watcherStatusColor(
+                                status,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Text(
+                            '${watcher['market']}  '
+                            '${watcher['direction']}',
+                            style:
+                                const TextStyle(
+                              fontSize: 22,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '${watcher['last_reason'] ?? ''}',
+                            textAlign:
+                                TextAlign.center,
+                          ),
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Timeframe',
+                                '${watcher['interval'] ?? '-'}',
+                              ),
+                              metric(
+                                'Hold',
+                                '${watcher['holding_minutes'] ?? '-'} min',
+                              ),
+                            ],
+                          ),
+
+                          if (live is Map) ...[
+                            Row(
+                              children: [
+                                metric(
+                                  'Live Signal',
+                                  '${live['decision'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Confidence',
+                                  '${formatPercent(live['confidence'])}%',
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Live Price',
+                                  formatPrice(
+                                    live['price'],
+                                  ),
+                                ),
+                                metric(
+                                  'RSI',
+                                  formatNumber(
+                                    live['rsi'],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+
+                          if (riskDecision is Map) ...[
+                            const Divider(),
+                            const Text(
+                              'Risk Engine',
+                              style:
+                                  TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Paper Balance',
+                                  '${riskDecision['current_balance'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Dynamic Stake',
+                                  '${riskDecision['stake'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+                            Row(
+                              children: [
+                                metric(
+                                  'Daily P&L',
+                                  '${riskDecision['daily_pnl'] ?? '-'}',
+                                ),
+                                metric(
+                                  'Open Trades',
+                                  '${riskDecision['open_trades'] ?? '-'}',
+                                ),
+                              ],
+                            ),
+                          ],
+
+                          if (status == 'OPEN') ...[
+                            const Divider(),
+                            Text(
+                              'Paper trade #${watcher['trade_id']} OPEN',
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.greenAccent,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Entry: ${formatPrice(watcher['entry_price'])}',
+                            ),
+                            Text(
+                              'Target exit: '
+                              '${watcher['target_exit_at_iso'] ?? '-'}',
+                              textAlign:
+                                  TextAlign.center,
+                            ),
+                          ],
+
+                          if (status == 'WIN' ||
+                              status == 'LOSS') ...[
+                            const Divider(),
+                            Text(
+                              '$status • P&L ${watcher['pnl'] ?? '-'}',
+                              style:
+                                  TextStyle(
+                                color:
+                                    watcherStatusColor(
+                                  status,
+                                ),
+                                fontSize: 20,
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              'Entry ${formatPrice(watcher['entry_price'])} '
+                              '→ Exit ${formatPrice(watcher['exit_price'])}',
+                            ),
+                          ],
+
+                          const SizedBox(
+                            height: 12,
+                          ),
+
+                          FilledButton.icon(
+                            onPressed:
+                                watcherBusy
+                                    ? null
+                                    : checkServerWatcherNow,
+                            icon:
+                                const Icon(
+                              Icons.bolt,
+                            ),
+                            label:
+                                const Text(
+                              'Check Watcher Now',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                watcherBusy
+                                    ? null
+                                    : refreshServerWatcher,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Refresh Watcher',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          const Text(
+                            'V6.7 keeps multiple VERIFIED candidates under '
+                            'observation. A waiting or overextended market does '
+                            'not block another candidate from confirming. Paper '
+                            'entries still require live confirmation and risk controls.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+
+            // =================================================
+            // V6.9 SYSTEM HEALTH & OPERATIONS
+            // =================================================
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(
+                  18,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          systemStatusIcon(
+                            systemOverview?[
+                                        'overall']
+                                    ?['status']
+                                ?.toString() ??
+                                'GREY',
+                          ),
+                          size: 30,
+                          color:
+                              systemStatusColor(
+                            systemOverview?[
+                                        'overall']
+                                    ?['status']
+                                ?.toString() ??
+                                'GREY',
+                          ),
+                        ),
+                        const SizedBox(
+                          width: 10,
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'V6.9 SYSTEM HEALTH',
+                                style:
+                                    TextStyle(
+                                  fontSize: 18,
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                systemOverview?[
+                                            'overall']
+                                        ?['label']
+                                    ?.toString() ??
+                                    'Loading system status...',
+                                style:
+                                    TextStyle(
+                                  fontSize: 12,
+                                  fontWeight:
+                                      FontWeight.w700,
+                                  color:
+                                      systemStatusColor(
+                                    systemOverview?[
+                                                'overall']
+                                            ?['status']
+                                        ?.toString() ??
+                                        'GREY',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(
+                      height: 14,
+                    ),
+
+                    if (systemOverview == null)
+                      const LinearProgressIndicator()
+                    else ...[
+                      Row(
+                        children: [
+                          metric(
+                            'Backend',
+                            systemOverview![
+                                        'backend']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Auto Manager',
+                            systemOverview![
+                                        'auto_manager']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Search Stage',
+                            systemOverview![
+                                        'search']
+                                    ?['stage']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Progress',
+                            '${systemOverview!['search']?['percent'] ?? 0}%',
+                          ),
+                        ],
+                      ),
+
+                      if (systemOverview![
+                                  'search']
+                              ?['candidate'] !=
+                          null)
+                        Row(
                           children: [
-                            Text(direction, style: TextStyle(color: sideColor(direction), fontWeight: FontWeight.w900)),
-                            const SizedBox(height: 4),
-                            Text('$score', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                            metric(
+                              'Current Market',
+                              systemOverview![
+                                          'search']
+                                      ?['candidate']
+                                  ?.toString() ??
+                                  '-',
+                            ),
+                            metric(
+                              'Jobs',
+                              '${systemOverview!['search']?['queued_or_running_jobs'] ?? 0}',
+                            ),
+                          ],
+                        ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Next Scan',
+                            formatCountdownSeconds(
+                              systemOverview![
+                                          'auto_manager']
+                                      ?['next_scan_seconds'],
+                            ),
+                          ),
+                          metric(
+                            'Runs',
+                            '${systemOverview!['auto_manager']?['runs'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Watchers',
+                            '${systemOverview!['watchers']?['active'] ?? 0}'
+                            ' / '
+                            '${systemOverview!['watchers']?['target'] ?? 0}',
+                          ),
+                          metric(
+                            'Open Trades',
+                            '${systemOverview!['watchers']?['open_trades'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Settled Trades',
+                            '${systemOverview!['forward_performance']?['settled_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward WR',
+                            '${formatPercent(
+                              systemOverview![
+                                          'forward_performance']
+                                      ?['win_rate'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Calibration',
+                            systemOverview![
+                                        'calibration']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Qualified',
+                            '${systemOverview!['calibration']?['qualified_count'] ?? 0}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Market Data',
+                            systemOverview![
+                                        'market_data']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                          metric(
+                            'Copilot',
+                            systemOverview![
+                                        'copilot']
+                                    ?['status']
+                                ?.toString() ??
+                                '-',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          12,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            10,
+                          ),
+                          color:
+                              Colors.white10,
+                        ),
+                        child: Text(
+                          systemOverview![
+                                      'search']
+                                  ?['activity']
+                              ?.toString() ??
+                              'Waiting for system activity.',
+                          style:
+                              const TextStyle(
+                            fontSize: 12,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                      ),
+
+                      if ((systemOverview![
+                                      'issues']
+                                  as List?)
+                              ?.isNotEmpty ==
+                          true) ...[
+                        const SizedBox(
+                          height: 10,
+                        ),
+                        for (final rawIssue
+                            in (systemOverview![
+                                    'issues']
+                                as List))
+                          if (rawIssue
+                              is Map)
+                            Container(
+                              margin:
+                                  const EdgeInsets.only(
+                                bottom: 6,
+                              ),
+                              padding:
+                                  const EdgeInsets.all(
+                                10,
+                              ),
+                              decoration:
+                                  BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(
+                                  8,
+                                ),
+                                color:
+                                    systemStatusColor(
+                                  rawIssue[
+                                              'severity']
+                                          ?.toString() ??
+                                      'AMBER',
+                                ).withValues(
+                                  alpha:
+                                      0.08,
+                                ),
+                                border:
+                                    Border.all(
+                                  color:
+                                      systemStatusColor(
+                                    rawIssue[
+                                                'severity']
+                                            ?.toString() ??
+                                        'AMBER',
+                                  ).withValues(
+                                    alpha:
+                                        0.35,
+                                  ),
+                                ),
+                              ),
+                              child:
+                                  Text(
+                                '${rawIssue['component'] ?? 'SYSTEM'}: '
+                                '${rawIssue['message'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                      ],
+                    ],
+
+                    const SizedBox(
+                      height: 12,
+                    ),
+
+                    FilledButton.icon(
+                      onPressed:
+                          systemDiagnosticBusy
+                              ? null
+                              : runSystemDiagnostic,
+                      icon:
+                          const Icon(
+                        Icons.health_and_safety,
+                      ),
+                      label:
+                          Text(
+                        systemDiagnosticBusy
+                            ? 'Running Diagnostic...'
+                            : 'Run System Diagnostic',
+                      ),
+                    ),
+
+                    if (systemDiagnosticBusy) ...[
+                      const SizedBox(
+                        height: 10,
+                      ),
+                      const LinearProgressIndicator(),
+                    ],
+
+                    if (systemDiagnostic !=
+                        null) ...[
+                      const SizedBox(
+                        height: 12,
+                      ),
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          12,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            10,
+                          ),
+                          color:
+                              systemStatusColor(
+                            systemDiagnostic![
+                                        'status']
+                                    ?.toString() ??
+                                'GREY',
+                          ).withValues(
+                            alpha:
+                                0.08,
+                          ),
+                          border:
+                              Border.all(
+                            color:
+                                systemStatusColor(
+                              systemDiagnostic![
+                                          'status']
+                                      ?.toString() ??
+                                  'GREY',
+                            ).withValues(
+                              alpha:
+                                  0.35,
+                            ),
+                          ),
+                        ),
+                        child:
+                            Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              systemDiagnostic![
+                                          'label']
+                                      ?.toString() ??
+                                  'Diagnostic',
+                              style:
+                                  const TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(
+                              height: 8,
+                            ),
+                            for (final rawCheck
+                                in (systemDiagnostic![
+                                            'checks']
+                                        as List? ??
+                                    []))
+                              if (rawCheck
+                                  is Map)
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.only(
+                                    bottom: 5,
+                                  ),
+                                  child:
+                                      Text(
+                                    '${rawCheck['passed'] == true ? '✓' : '✕'} '
+                                    '${rawCheck['component'] ?? ''}: '
+                                    '${rawCheck['message'] ?? ''}',
+                                    style:
+                                        TextStyle(
+                                      fontSize:
+                                          11,
+                                      color:
+                                          rawCheck[
+                                                      'passed'] ==
+                                                  true
+                                              ? Colors
+                                                  .greenAccent
+                                              : Colors
+                                                  .amberAccent,
+                                    ),
+                                  ),
+                                ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height: 8,
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed:
+                          loadSystemOverview,
+                      icon:
+                          const Icon(
+                        Icons.refresh,
+                      ),
+                      label:
+                          const Text(
+                        'Refresh System Overview',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // =================================================
+            // V6.8 JASONG AI INTELLIGENCE COPILOT
+            // =================================================
+
+            const SizedBox(height: 18),
+
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.psychology_alt, size: 30),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'V6.8 JASONG AI COPILOT',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Ask about actual PAPER trades, losses, confidence buckets, '
+                      'watchers and forward performance. Advisory only — the copilot '
+                      'cannot execute trades.',
+                      style: TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: copilotController,
+                      minLines: 2,
+                      maxLines: 5,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Ask Jasong AI',
+                        hintText: 'Why did we lose the last trade?',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed: copilotBusy ? null : () => askJasongCopilot(),
+                      icon: const Icon(Icons.send),
+                      label: Text(copilotBusy ? 'Analysing...' : 'Ask Jasong AI'),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: copilotBusy ? null : runOvernightReview,
+                      icon: const Icon(Icons.nights_stay),
+                      label: const Text('Analyse Overnight Trades'),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ActionChip(
+                          label: const Text('Analyse losses'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Analyse our settled PAPER losses. What patterns repeat '
+                                'and what should we test next? Treat small samples cautiously.',
+                            mode: 'LOSS_ANALYSIS',
+                          ),
+                        ),
+                        ActionChip(
+                          label: const Text('Historical vs forward'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Compare historical calibration with genuine forward PAPER '
+                                'performance. Which edges are holding up or deteriorating?',
+                            mode: 'FORWARD_COMPARISON',
+                          ),
+                        ),
+                        ActionChip(
+                          label: const Text('Why no trade?'),
+                          onPressed: copilotBusy ? null : () => askJasongCopilot(
+                            presetQuestion:
+                                'Explain why current active watchers have or have not '
+                                'opened PAPER trades.',
+                            mode: 'WATCHER_EXPLANATION',
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (copilotBusy) ...[
+                      const SizedBox(height: 14),
+                      const LinearProgressIndicator(),
+                    ],
+                    if (copilotAnswer.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          color: Colors.white10,
+                        ),
+                        child: SelectableText(
+                          copilotAnswer,
+                          style: const TextStyle(height: 1.45),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+
+            // =================================================
+            // V6.7 LIVE PAPER TRADE LAB
+            // =================================================
+
+            const SizedBox(
+              height: 18,
+            ),
+
+            Card(
+              child: Padding(
+                padding:
+                    const EdgeInsets.all(
+                  18,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(
+                          Icons.science,
+                          size: 28,
+                        ),
+                        SizedBox(
+                          width: 10,
+                        ),
+                        Expanded(
+                          child: Text(
+                            'V6.7 LIVE PAPER TRADE LAB',
+                            style:
+                                TextStyle(
+                              fontSize: 18,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(
+                      height: 6,
+                    ),
+
+                    const Text(
+                      'These are actual forward PAPER entries opened by '
+                      'the autonomous engine — including losses. '
+                      'WATCHING candidates are not counted as trades.',
+                      style:
+                          TextStyle(
+                        fontSize: 11,
+                        color:
+                            Colors.white70,
+                      ),
+                    ),
+
+                    const SizedBox(
+                      height: 14,
+                    ),
+
+                    if (v66ForwardIntelligence != null) ...[
+                      Row(
+                        children: [
+                          metric(
+                            'Settled Trades',
+                            '${v66ForwardIntelligence!['forward_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Actual WR',
+                            '${formatPercent(
+                              v66ForwardIntelligence![
+                                  'win_rate'],
+                            )}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${v66ForwardIntelligence!['wins'] ?? 0} / '
+                            '${v66ForwardIntelligence!['losses'] ?? 0}',
+                          ),
+                          metric(
+                            'Actual PF',
+                            formatNumber(
+                              v66ForwardIntelligence![
+                                  'profit_factor'],
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Actual P&L',
+                            formatMoney(
+                              v66ForwardIntelligence![
+                                  'total_pnl'],
+                            ),
+                          ),
+                          metric(
+                            'Trades on Screen',
+                            '${paperTrades.length}',
+                          ),
+                        ],
+                      ),
+                    ],
+
+                    const SizedBox(
+                      height: 10,
+                    ),
+
+                    if (paperTrades.isEmpty)
+                      Container(
+                        padding:
+                            const EdgeInsets.all(
+                          16,
+                        ),
+                        decoration:
+                            BoxDecoration(
+                          borderRadius:
+                              BorderRadius.circular(
+                            12,
+                          ),
+                          color:
+                              Colors.white10,
+                        ),
+                        child:
+                            const Column(
+                          children: [
+                            Icon(
+                              Icons.hourglass_empty,
+                              size: 36,
+                              color:
+                                  Colors.white54,
+                            ),
+                            SizedBox(
+                              height: 8,
+                            ),
+                            Text(
+                              'No PAPER trades opened yet.',
+                              style:
+                                  TextStyle(
+                                fontWeight:
+                                    FontWeight.bold,
+                              ),
+                            ),
+                            SizedBox(
+                              height: 4,
+                            ),
+                            Text(
+                              'V6.6 will add a trade here only after '
+                              'a verified setup passes live confirmation, '
+                              'adaptive/normal confidence, forward trust, '
+                              'portfolio controls and the risk gateway.',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  TextStyle(
+                                fontSize: 11,
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      for (final trade
+                          in paperTrades.take(12)) ...[
+                        Builder(
+                          builder:
+                              (context) {
+                            final status =
+                                trade['status']
+                                        ?.toString()
+                                        .toUpperCase() ??
+                                    'OPEN';
+
+                            final confidence =
+                                trade[
+                                    'entry_confidence'];
+
+                            final entryPath =
+                                trade[
+                                            'entry_path']
+                                        ?.toString() ??
+                                    '-';
+
+                            final remaining =
+                                trade[
+                                    'remaining_minutes'];
+
+                            final pnl =
+                                trade['pnl'];
+
+                            return Container(
+                              margin:
+                                  const EdgeInsets.only(
+                                bottom: 10,
+                              ),
+                              padding:
+                                  const EdgeInsets.all(
+                                14,
+                              ),
+                              decoration:
+                                  BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(
+                                  14,
+                                ),
+                                border:
+                                    Border.all(
+                                  color:
+                                      paperTradeColor(
+                                    status,
+                                  ).withValues(
+                                    alpha:
+                                        0.45,
+                                  ),
+                                ),
+                                color:
+                                    paperTradeColor(
+                                  status,
+                                ).withValues(
+                                  alpha:
+                                      0.08,
+                                ),
+                              ),
+                              child:
+                                  Column(
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        paperTradeIcon(
+                                          status,
+                                        ),
+                                        color:
+                                            paperTradeColor(
+                                          status,
+                                        ),
+                                      ),
+                                      const SizedBox(
+                                        width: 8,
+                                      ),
+                                      Expanded(
+                                        child:
+                                            Text(
+                                          '${trade['market'] ?? '-'} '
+                                          '${trade['direction'] ?? '-'}',
+                                          style:
+                                              const TextStyle(
+                                            fontSize:
+                                                17,
+                                            fontWeight:
+                                                FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                      Text(
+                                        paperTradeHeadline(
+                                          status,
+                                        ),
+                                        style:
+                                            TextStyle(
+                                          fontWeight:
+                                              FontWeight.w900,
+                                          color:
+                                              paperTradeColor(
+                                            status,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  const SizedBox(
+                                    height: 10,
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Entry Confidence',
+                                        confidence == null
+                                            ? '-'
+                                            : '${formatPercent(confidence)}%',
+                                      ),
+                                      metric(
+                                        'Entry Path',
+                                        entryPath
+                                            .replaceAll(
+                                          '_',
+                                          ' ',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Entry',
+                                        formatPrice(
+                                          trade[
+                                              'entry_price'],
+                                        ),
+                                      ),
+                                      metric(
+                                        status ==
+                                                'OPEN'
+                                            ? 'Time Left'
+                                            : 'Exit',
+                                        status ==
+                                                'OPEN'
+                                            ? (
+                                                remaining ==
+                                                        null
+                                                    ? '-'
+                                                    : '${formatNumber(remaining)} min'
+                                              )
+                                            : formatPrice(
+                                                trade[
+                                                    'exit_price'],
+                                              ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  Row(
+                                    children: [
+                                      metric(
+                                        'Stake',
+                                        trade[
+                                                    'stake'] ==
+                                                null
+                                            ? '-'
+                                            : '${trade['stake']}',
+                                      ),
+                                      metric(
+                                        'P&L',
+                                        pnl ==
+                                                null
+                                            ? (
+                                                status ==
+                                                        'OPEN'
+                                                    ? 'Pending'
+                                                    : '-'
+                                              )
+                                            : formatMoney(
+                                                pnl,
+                                              ),
+                                      ),
+                                    ],
+                                  ),
+
+                                  if (trade[
+                                          'historical_win_rate'] !=
+                                      null)
+                                    Row(
+                                      children: [
+                                        metric(
+                                          'Historical WR',
+                                          '${formatPercent(
+                                            trade[
+                                                'historical_win_rate'],
+                                          )}%',
+                                        ),
+                                        metric(
+                                          'Historical PF',
+                                          formatNumber(
+                                            trade[
+                                                'historical_profit_factor'],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+
+                    const SizedBox(
+                      height: 4,
+                    ),
+
+                    OutlinedButton.icon(
+                      onPressed:
+                          loadAutoDashboard,
+                      icon:
+                          const Icon(
+                        Icons.refresh,
+                      ),
+                      label:
+                          const Text(
+                        'Refresh PAPER Trades',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // =================================================
+            // V6.7 FORWARD PERFORMANCE
+            // =================================================
+
+            if (forwardStats != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Text(
+                        'GENUINE FORWARD PERFORMANCE',
+                        style:
+                            TextStyle(
+                          fontSize: 18,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 10,
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Forward Trades',
+                            '${forwardStats!['forward_trades'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward WR',
+                            '${formatPercent(forwardStats!['win_rate'])}%',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Wins / Losses',
+                            '${forwardStats!['wins'] ?? 0} / '
+                            '${forwardStats!['losses'] ?? 0}',
+                          ),
+                          metric(
+                            'Forward PF',
+                            formatNumber(
+                              forwardStats!['profit_factor'],
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Paper Balance',
+                            '${forwardStats!['paper_balance'] ?? '-'}',
+                          ),
+                          metric(
+                            'Total P&L',
+                            '${forwardStats!['total_pnl'] ?? '-'}',
+                          ),
+                        ],
+                      ),
+
+                      Row(
+                        children: [
+                          metric(
+                            'Forward Return',
+                            '${formatPercent(forwardStats!['return_pct'])}%',
+                          ),
+                          metric(
+                            'Forward Max DD',
+                            '${formatPercent(forwardStats!['max_drawdown'])}%',
+                          ),
+                        ],
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      OutlinedButton.icon(
+                        onPressed:
+                            loadForwardStats,
+                        icon:
+                            const Icon(
+                          Icons.query_stats,
+                        ),
+                        label:
+                            const Text(
+                          'Refresh Forward Stats',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // =================================================
+            // V5.3 MANUAL LIVE ENTRY DIAGNOSTIC
+            // =================================================
+
+            if (liveEntryAssessment != null) ...[
+              const SizedBox(
+                height: 18,
+              ),
+
+              Builder(
+                builder: (context) {
+                  final assessment =
+                      liveEntryAssessment!;
+
+                  final status =
+                      assessment['status']
+                              ?.toString() ??
+                          'WAIT_CONFIRMATION';
+
+                  final reasons =
+                      (assessment['reasons']
+                                  as List?) ??
+                              const [];
+
+                  return Card(
+                    child: Padding(
+                      padding:
+                          const EdgeInsets.all(
+                        18,
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            liveEntryIcon(
+                              status,
+                            ),
+                            size: 52,
+                            color:
+                                liveEntryColor(
+                              status,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          const Text(
+                            'LIVE ENTRY CONFIRMATION',
+                            style:
+                                TextStyle(
+                              fontSize: 15,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          Text(
+                            '${assessment['headline']}',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 28,
+                              fontWeight:
+                                  FontWeight.w900,
+                              color:
+                                  liveEntryColor(
+                                status,
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 14,
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Verified',
+                                '${assessment['verified_direction']}',
+                              ),
+                              metric(
+                                'Live Signal',
+                                '${assessment['live_decision']}',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Live Confidence',
+                                '${formatPercent(
+                                  assessment[
+                                      'confidence'],
+                                )}%',
+                              ),
+                              metric(
+                                'AI Up',
+                                '${formatPercent(
+                                  assessment[
+                                      'ai_up_probability'],
+                                )}%',
+                              ),
+                            ],
+                          ),
+
+                          Row(
+                            children: [
+                              metric(
+                                'Live Price',
+                                formatPrice(
+                                  assessment[
+                                      'price'],
+                                ),
+                              ),
+                              metric(
+                                'RSI',
+                                formatNumber(
+                                  assessment[
+                                      'rsi'],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          for (final reason
+                              in reasons)
+                            ListTile(
+                              dense: true,
+                              leading:
+                                  Icon(
+                                status ==
+                                        'ENTER_NOW'
+                                    ? Icons
+                                        .check_circle
+                                    : Icons
+                                        .info_outline,
+                                color:
+                                    liveEntryColor(
+                                  status,
+                                ),
+                              ),
+                              title:
+                                  Text(
+                                reason
+                                    .toString(),
+                              ),
+                            ),
+
+                          if (assessment[
+                                  'signal_reason'] !=
+                              null) ...[
+                            const Divider(),
+                            Text(
+                              'Live model: '
+                              '${assessment['signal_reason']}',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                fontSize: 12,
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+                          ],
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          Text(
+                            'Recheck after approximately '
+                            '${assessment['recheck_minutes']} minutes '
+                            'if entry is not confirmed.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+
+                          if ((assessment[
+                                      'historical_holding_minutes'] ??
+                                  0) >
+                              0)
+                            Text(
+                              'Historical validated holding window: '
+                              '≈${assessment['historical_holding_minutes']} minutes.',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.white70,
+                              ),
+                            ),
+
+                          const SizedBox(
+                            height: 14,
+                          ),
+
+                          FilledButton.icon(
+                            onPressed:
+                                busy
+                                    ? null
+                                    : analyseVerifiedTrade,
+                            icon:
+                                const Icon(
+                              Icons.refresh,
+                            ),
+                            label:
+                                const Text(
+                              'Recheck Live Entry',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 8,
+                          ),
+
+                          OutlinedButton.icon(
+                            onPressed:
+                                busy ||
+                                        status !=
+                                            'ENTER_NOW' ||
+                                        sig == null ||
+                                        ![
+                                          'BUY',
+                                          'SELL',
+                                        ].contains(
+                                          sig![
+                                                  'decision']
+                                              ?.toString(),
+                                        )
+                                    ? null
+                                    : recordPaperTrade,
+                            icon:
+                                const Icon(
+                              Icons.edit_note,
+                            ),
+                            label:
+                                const Text(
+                              'Record Confirmed Paper Trade',
+                            ),
+                          ),
+
+                          const SizedBox(
+                            height: 10,
+                          ),
+
+                          const Text(
+                            'Live-entry confirmation is an additional '
+                            'filter, not a guarantee of profit. '
+                            'ENTER NOW means the configured live filters '
+                            'currently agree with the historically '
+                            'verified setup.',
+                            textAlign:
+                                TextAlign.center,
+                            style:
+                                TextStyle(
+                              fontSize: 11,
+                              color:
+                                  Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+
+
+            // =================================================
+            // NETWORK FAILURE
+            // =================================================
+
+            if (!findingVerifiedTrade &&
+                verifiedTrade == null &&
+                hasNetworkFailure)
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.wifi_off,
+                        size: 46,
+                        color:
+                            Colors.orangeAccent,
+                      ),
+
+                      const SizedBox(
+                        height: 10,
+                      ),
+
+                      const Text(
+                        'NETWORK VALIDATION ERROR',
+                        style:
+                            TextStyle(
+                          fontSize: 20,
+                          fontWeight:
+                              FontWeight.bold,
+                          color:
+                              Colors.orangeAccent,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'The trade was NOT rejected. '
+                        'The connection to the validation '
+                        'server failed after retries. '
+                        'Run Find Verified Trade again '
+                        'when the connection is stable.',
+                        textAlign:
+                            TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // =================================================
+            // BACKEND FAILURE
+            // =================================================
+
+            if (!findingVerifiedTrade &&
+                verifiedTrade == null &&
+                hasBackendFailure &&
+                !hasNetworkFailure)
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.error_outline,
+                        size: 46,
+                        color:
+                            Colors.redAccent,
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'VALIDATION ERROR',
+                        style:
+                            TextStyle(
+                          color:
+                              Colors.redAccent,
+                          fontSize: 20,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'Deep validation encountered '
+                        'an application error. '
+                        'See the details below.',
+                        textAlign:
+                            TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // =================================================
+            // NO VERIFIED TRADE
+            // =================================================
+
+            if (!findingVerifiedTrade &&
+                verifiedTrade == null &&
+                validationHistory.isNotEmpty &&
+                !hasNetworkFailure &&
+                !hasBackendFailure)
+              Card(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.all(
+                    18,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.hourglass_empty,
+                        size: 44,
+                        color:
+                            Colors.amberAccent,
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'NO VERIFIED TRADE',
+                        style:
+                            TextStyle(
+                          fontSize: 21,
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+
+                      const SizedBox(
+                        height: 8,
+                      ),
+
+                      const Text(
+                        'The tested candidates did '
+                        'not satisfy deep-validation '
+                        'requirements.',
+                        textAlign:
+                            TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // =================================================
+            // VALIDATION HISTORY
+            // =================================================
+
+            if (validationHistory.isNotEmpty) ...[
+              const SizedBox(
+                height: 20,
+              ),
+
+              const Text(
+                'Deep Validation History',
+                style:
+                    TextStyle(
+                  fontSize: 22,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(
+                height: 8,
+              ),
+
+              for (final item
+                  in validationHistory)
+                validationCard(
+                  item,
+                ),
+            ],
+
+            // =================================================
+            // FAST SCANNER
+            // =================================================
+
+            if (fastScan != null) ...[
+              const SizedBox(
+                height: 24,
+              ),
+
+              const Divider(),
+
+              const SizedBox(
+                height: 12,
+              ),
+
+              const Text(
+                '⚡ Fast Market Scanner',
+                style:
+                    TextStyle(
+                  fontSize: 23,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(
+                height: 12,
+              ),
+
+              Row(
+                children: [
+                  metric(
+                    'Scanned',
+                    '${fastScan!['markets_tested'] ?? 0}',
+                  ),
+
+                  metric(
+                    'Successful',
+                    '${fastScan!['markets_successful'] ?? 0}',
+                  ),
+                ],
+              ),
+
+              Row(
+                children: [
+                  metric(
+                    'Candidates',
+                    '${fastScan!['candidates_found'] ?? 0}',
+                  ),
+
+                  metric(
+                    'Failures',
+                    '${fastScan!['markets_failed'] ?? 0}',
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 16,
+              ),
+
+              const Text(
+                'Top 3 Markets',
+                style:
+                    TextStyle(
+                  fontSize: 21,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+
+              for (
+                int i = 0;
+                i < topCandidates.length;
+                i++
+              )
+                fastMarketCard(
+                  Map<String, dynamic>.from(
+                    topCandidates[i],
+                  ),
+                  i + 1,
+                ),
+
+              if (ranking.isNotEmpty)
+                ExpansionTile(
+                  title:
+                      const Text(
+                    'Full Market Ranking',
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                  children: [
+                    for (
+                      int i = 0;
+                      i < ranking.length;
+                      i++
+                    )
+                      ListTile(
+                        leading:
+                            Text(
+                          '#${i + 1}',
+                        ),
+
+                        title:
+                            Text(
+                          '${ranking[i]['market']}',
+                        ),
+
+                        subtitle:
+                            Text(
+                          '${ranking[i]['direction']}'
+                          ' • '
+                          '${ranking[i]['status']}',
+                        ),
+
+                        trailing:
+                            Text(
+                          '${ranking[i]['fast_score']}',
+                        ),
+                      ),
+                  ],
+                ),
+            ],
+
+            // =================================================
+            // BACKTEST
+            // =================================================
+
+            if (bt != null) ...[
+              const SizedBox(
+                height: 24,
+              ),
+
+              const Text(
+                'Backtest',
+                style:
+                    TextStyle(
+                  fontSize: 21,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+
+              Row(
+                children: [
+                  metric(
+                    'Trades',
+                    '${bt!['trades']}',
+                  ),
+
+                  metric(
+                    'Win rate',
+                    '${formatPercent(
+                      bt!['win_rate'],
+                    )}%',
+                  ),
+                ],
+              ),
+
+              Row(
+                children: [
+                  metric(
+                    'Return',
+                    '${formatPercent(
+                      bt!['return_pct'],
+                    )}%',
+                  ),
+
+                  metric(
+                    'Max DD',
+                    '${formatPercent(
+                      bt!['max_drawdown'],
+                    )}%',
+                  ),
+                ],
+              ),
+
+              if (curve.isNotEmpty)
+                SizedBox(
+                  height: 220,
+                  child:
+                      LineChart(
+                    LineChartData(
+                      titlesData:
+                          const FlTitlesData(
+                        show:
+                            false,
+                      ),
+
+                      borderData:
+                          FlBorderData(
+                        show:
+                            true,
+                      ),
+
+                      lineBarsData: [
+                        LineChartBarData(
+                          isCurved:
+                              true,
+
+                          dotData:
+                              const FlDotData(
+                            show:
+                                false,
+                          ),
+
+                          spots: [
+                            for (
+                              int i = 0;
+                              i < curve.length;
+                              i++
+                            )
+                              FlSpot(
+                                i.toDouble(),
+                                ((curve[i]
+                                                as Map)[
+                                            'balance']
+                                        as num)
+                                    .toDouble(),
+                              ),
                           ],
                         ),
                       ],
                     ),
                   ),
                 ),
-              );
-            }),
-          ],
-          if (ranking.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            sectionTitle('Full ranking'),
-            glassCard(
-              child: Column(
-                children: ranking.take(20).whereType<Map>().toList().asMap().entries.map((entry) {
-                  final item = Map<String, dynamic>.from(entry.value);
-                  final market = item['market']?.toString() ?? item['symbol']?.toString() ?? '-';
-                  final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
-                  final score = item['smart_fast_score'] ?? item['score'] ?? item['fast_score'] ?? '-';
-                  return Column(
-                    children: [
-                      if (entry.key > 0) const Divider(height: 18),
-                      Row(
-                        children: [
-                          SizedBox(width: 30, child: Text('#${entry.key + 1}', style: const TextStyle(color: Colors.white38))),
-                          Expanded(child: Text(market, style: const TextStyle(fontWeight: FontWeight.w800))),
-                          Text(direction, style: TextStyle(color: sideColor(direction), fontWeight: FontWeight.w800)),
-                          const SizedBox(width: 12),
-                          SizedBox(width: 48, child: Text('$score', textAlign: TextAlign.right, style: const TextStyle(color: Colors.white60))),
-                        ],
-                      ),
-                    ],
-                  );
-                }).toList(),
-              ),
-            ),
-          ],
-          if (validationHistory.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            sectionTitle('Deep validation history'),
-            ...validationHistory.take(8).map((item) {
-              final ok = item['verified'] == true;
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: glassCard(
-                  glow: ok ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
-                  child: Row(
-                    children: [
-                      Icon(ok ? Icons.verified_rounded : Icons.manage_search_rounded, color: ok ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(item['market']?.toString() ?? '-', style: const TextStyle(fontWeight: FontWeight.w900)),
-                            const SizedBox(height: 3),
-                            Text(item['deep_status']?.toString() ?? '-', style: const TextStyle(color: Colors.white54, fontSize: 11)),
-                          ],
-                        ),
-                      ),
-                      if (item['win_rate'] != null)
-                        Text('${formatPercent(item['win_rate'])}%', style: const TextStyle(fontWeight: FontWeight.w800)),
-                    ],
-                  ),
-                ),
-              );
-            }),
-          ],
-        ],
-      );
-    }
-
-    Widget tradesPage() {
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-        children: [
-          sectionTitle('PAPER performance', subtitle: 'Genuine forward entries only'),
-          Row(
-            children: [
-              statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
-              const SizedBox(width: 10),
-              statTile('Forward WR', '${formatPercent(forwardWr)}%', Icons.percent_rounded),
             ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              statTile('Total P&L', formatMoney(totalPnl), Icons.payments_outlined, valueColor: (double.tryParse('$totalPnl') ?? 0) >= 0 ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75)),
-              const SizedBox(width: 10),
-              statTile('Balance', '$paperBalance', Icons.account_balance_wallet_outlined),
-            ],
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('Trade journal'),
-          if (paperTrades.isEmpty)
-            glassCard(
-              child: const Column(
-                children: [
-                  Icon(Icons.hourglass_empty_rounded, size: 38, color: Colors.white30),
-                  SizedBox(height: 10),
-                  Text('No PAPER trades opened yet.', style: TextStyle(fontWeight: FontWeight.w800)),
-                  SizedBox(height: 4),
-                  Text('Trades will appear here when V6.5 passes its live entry path.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
-                ],
-              ),
-            )
-          else
-            ...paperTrades.take(30).map((trade) {
-              final status = trade['status']?.toString().toUpperCase() ?? '-';
-              final market = trade['market']?.toString() ?? trade['symbol']?.toString() ?? '-';
-              final direction = trade['direction']?.toString().toUpperCase() ?? '-';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: glassCard(
-                  glow: paperTradeColor(status),
-                  child: Row(
-                    children: [
-                      Icon(paperTradeIcon(status), color: paperTradeColor(status)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('$market  $direction', style: const TextStyle(fontWeight: FontWeight.w900)),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${paperTradeHeadline(status)} • ${trade['entry_class'] ?? trade['entry_path'] ?? '-'}',
-                              style: const TextStyle(color: Colors.white54, fontSize: 11),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Text(formatMoney(trade['pnl']), style: TextStyle(color: paperTradeColor(status), fontWeight: FontWeight.w900)),
-                    ],
-                  ),
-                ),
-              );
-            }),
-          const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: loadForwardStats,
-            icon: const Icon(Icons.refresh_rounded),
-            label: const Text('Refresh performance'),
-          ),
-        ],
-      );
-    }
 
-    Widget aiPage() {
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-        children: [
-          sectionTitle('Jasong AI Copilot', subtitle: 'Advisory analysis of PAPER performance and risk evidence'),
-          glassCard(
-            glow: cs.secondary,
-            child: Column(
-              children: [
-                TextField(
-                  controller: copilotController,
-                  minLines: 3,
-                  maxLines: 5,
-                  decoration: const InputDecoration(
-                    hintText: 'Ask Jasong AI about trades, watchers, losses or confidence buckets...',
-                    prefixIcon: Icon(Icons.psychology_alt_rounded),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: copilotBusy ? null : () => askJasongCopilot(),
-                    icon: copilotBusy
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.auto_awesome_rounded),
-                    label: Text(copilotBusy ? 'Analysing...' : 'Ask Jasong AI'),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: copilotBusy ? null : runOvernightReview,
-                    icon: const Icon(Icons.nights_stay_rounded),
-                    label: const Text('Analyse overnight performance'),
-                  ),
-                ),
-              ],
+            const SizedBox(
+              height: 20,
             ),
-          ),
-          if (copilotAnswer.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            glassCard(
-              child: SelectableText(
-                copilotAnswer,
-                style: const TextStyle(color: Colors.white70, height: 1.45),
-              ),
-            ),
-          ],
-          const SizedBox(height: 20),
-          sectionTitle('Learning thresholds', subtitle: 'Experimental PAPER eligibility — not win probabilities'),
-          glassCard(
-            child: const Column(
-              children: [
-                _MidnightRuleRow('N30 normal path', '30%', 'Quantitative confidence floor'),
-                Divider(height: 24),
-                _MidnightRuleRow('AI40 path', '40%', 'AI confidence + approve + direction agreement'),
-                Divider(height: 24),
-                _MidnightRuleRow('DUAL', 'N30 + AI40', 'Both paths agree at the same observation'),
-                Divider(height: 24),
-                _MidnightRuleRow('SHADOW', 'ON', 'Rejected opportunities remain counterfactual evidence'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('Live observation portfolio'),
-          if (serverWatchers.isEmpty)
-            glassCard(child: const Text('No active watchers loaded.', style: TextStyle(color: Colors.white54)))
-          else
-            ...serverWatchers.take(6).map((w) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: watcherCard(w),
-                )),
-        ],
-      );
-    }
 
-    Widget settingsPage() {
-      final overviewStatus = systemOverview?['status']?.toString() ??
-          systemOverview?['overall_status']?.toString() ??
-          (autoDashboard != null ? 'ONLINE' : 'CHECKING');
-      return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
-        children: [
-          sectionTitle('Trading preferences'),
-          glassCard(
-            child: Column(
-              children: [
-                TextField(
-                  controller: symbol,
-                  decoration: const InputDecoration(
-                    labelText: 'Market symbol',
-                    prefixIcon: Icon(Icons.currency_exchange_rounded),
-                  ),
+            const Card(
+              child: Padding(
+                padding:
+                    EdgeInsets.all(
+                  14,
                 ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: balance,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Paper balance',
-                    prefixIcon: Icon(Icons.account_balance_wallet_outlined),
-                  ),
+                child: Text(
+                  'Safety: Jasong AI Trader is for '
+                  'AI-assisted analysis and paper trading. '
+                  'Fast Score is a ranking score, not a win probability. '
+                  'VERIFIED refers to historical validation; the V5.4 watch portfolio '
+                  'opens paper trades only after live confirmation and risk controls. '
+                  'No historical or forward result guarantees profit.',
                 ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  value: risk,
-                  decoration: const InputDecoration(
-                    labelText: 'Risk mode',
-                    prefixIcon: Icon(Icons.shield_outlined),
-                  ),
-                  items: ['Conservative', 'Balanced', 'Aggressive']
-                      .map((value) => DropdownMenuItem<String>(value: value, child: Text(value)))
-                      .toList(),
-                  onChanged: busy
-                      ? null
-                      : (value) => setState(() => risk = value ?? 'Balanced'),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.tonalIcon(
-                    onPressed: busy ? null : refreshSignal,
-                    icon: const Icon(Icons.refresh_rounded),
-                    label: const Text('Refresh current signal'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('Auto Manager'),
-          glassCard(
-            glow: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Icon(autoOn ? Icons.bolt_rounded : Icons.pause_circle_outline, color: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(autoOn ? 'Auto Manager is running' : 'Auto Manager is stopped', style: const TextStyle(fontWeight: FontWeight.w900)),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: autoManagerBusy ? null : (autoOn ? stopAutoMode : startAutoMode),
-                    icon: Icon(autoOn ? Icons.stop_circle_outlined : Icons.play_circle_outline),
-                    label: Text(autoOn ? 'Stop Auto Mode' : 'Start Auto Mode'),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: autoManagerBusy ? null : runAutoManagerNow,
-                    icon: const Icon(Icons.bolt_rounded),
-                    label: const Text('Run one cycle now'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          sectionTitle('System health'),
-          glassCard(
-            child: Column(
-              children: [
-                _MidnightSystemRow('Backend', overviewStatus),
-                const Divider(height: 24),
-                _MidnightSystemRow('API endpoint', apiBase.replaceFirst('https://', '')),
-                const Divider(height: 24),
-                const _MidnightSystemRow('Execution', 'PAPER ONLY'),
-                const Divider(height: 24),
-                const _MidnightSystemRow('Live broker execution', 'OFF'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: systemDiagnosticBusy ? null : runSystemDiagnostic,
-              icon: systemDiagnosticBusy
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.health_and_safety_outlined),
-              label: Text(systemDiagnosticBusy ? 'Running diagnostic...' : 'Run system diagnostic'),
-            ),
-          ),
-          if (systemDiagnostic != null) ...[
-            const SizedBox(height: 12),
-            glassCard(
-              child: SelectableText(
-                const JsonEncoder.withIndent('  ').convert(systemDiagnostic),
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white60),
               ),
             ),
-          ],
-        ],
-      );
-    }
 
-    final pages = <Widget>[
-      dashboardPage(),
-      marketsPage(),
-      tradesPage(),
-      aiPage(),
-      settingsPage(),
-    ];
-
-    return Scaffold(
-      extendBody: true,
-      appBar: AppBar(
-        toolbarHeight: 76,
-        titleSpacing: 16,
-        title: Row(
-          children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [cs.primary, cs.secondary]),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF041014)),
-            ),
-            const SizedBox(width: 11),
-            const Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                  SizedBox(height: 2),
-                  Text('V6.5 • Midnight Glass', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
-                ],
-              ),
+            const SizedBox(
+              height: 30,
             ),
           ],
         ),
-        actions: [
-          IconButton.filledTonal(
-            tooltip: 'Refresh dashboard',
-            onPressed: () async {
-              await loadAutoDashboard();
-              await loadSystemOverview();
-              await refreshServerWatchers();
-            },
-            icon: const Icon(Icons.refresh_rounded),
-          ),
-          const SizedBox(width: 10),
-        ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          await loadAutoDashboard();
-          await loadSystemOverview();
-          await refreshServerWatchers();
-          if (selectedTab == 0) {
-            await refreshSignal();
-          }
-        },
-        child: SafeArea(
-          top: false,
-          child: pages[selectedTab],
-        ),
-      ),
-      bottomNavigationBar: NavigationBar(
-        height: 72,
-        selectedIndex: selectedTab,
-        onDestinationSelected: (index) => setState(() => selectedTab = index),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard_rounded), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
-          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
-          NavigationDestination(icon: Icon(Icons.psychology_alt_outlined), selectedIcon: Icon(Icons.psychology_alt_rounded), label: 'AI'),
-          NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune_rounded), label: 'Settings'),
-        ],
-      ),
-    );
-  }
-
-}
-
-
-class _MidnightValue extends StatelessWidget {
-  final String label;
-  final String value;
-
-  const _MidnightValue(this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.035),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.05)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 10,
-              color: Colors.white45,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontWeight: FontWeight.w900,
-              fontSize: 15,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-Widget _midnightValue(String label, String value) {
-  return _MidnightValue(label, value);
-}
-
-class _MidnightRuleRow extends StatelessWidget {
-  final String title;
-  final String value;
-  final String subtitle;
-
-  const _MidnightRuleRow(this.title, this.value, this.subtitle);
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primary.withOpacity(.10),
-            borderRadius: BorderRadius.circular(11),
-          ),
-          child: Icon(
-            Icons.auto_awesome_rounded,
-            size: 17,
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
-        const SizedBox(width: 11),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
-              const SizedBox(height: 2),
-              Text(subtitle, style: const TextStyle(color: Colors.white54, fontSize: 11, height: 1.25)),
-            ],
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15)),
-      ],
-    );
-  }
-}
-
-class _MidnightSystemRow extends StatelessWidget {
-  final String label;
-  final String value;
-
-  const _MidnightSystemRow(this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) {
-    final good = !value.toUpperCase().contains('OFFLINE') &&
-        !value.toUpperCase().contains('ERROR') &&
-        !value.toUpperCase().contains('FAILED');
-    return Row(
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: good ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
-        const SizedBox(width: 8),
-        Flexible(
-          child: Text(
-            value,
-            textAlign: TextAlign.right,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
-          ),
-        ),
-      ],
     );
   }
 }
