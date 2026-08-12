@@ -326,23 +326,9 @@ jobs:
       # ============================================================
       # 15. BUILD RELEASE APK
       # ============================================================
-      - name: Build release APK
-  working-directory: mobile
-  shell: bash
-  run: |
-    set -euo pipefail
-
-    - name: Build release APK
-  working-directory: mobile
-  shell: bash
-  env:
-    ORG_GRADLE_PROJECT_android_vcs_version_retrieval: "false"
-  run: |
-    set -euo pipefail
-    
-    flutter build apk \
-      --release \
-      --verbose
+          - name: Build release APK
+        working-directory: mobile
+        run: flutter build apk --release
 
       # ============================================================
       # 16. VERIFY APK
