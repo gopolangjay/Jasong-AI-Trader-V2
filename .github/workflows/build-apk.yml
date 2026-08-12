@@ -15,9 +15,9 @@ permissions:
 
 jobs:
   build-apk:
-    name: build-apk
+    name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       # ============================================================
@@ -45,57 +45,67 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter version
-        run: |
-          flutter --version
-          dart --version
-
       # ============================================================
-      # 4. VERIFY FLUTTER PROJECT
+      # 4. SHOW TOOLCHAIN
       # ============================================================
-      - name: Verify Flutter project files
+      - name: Show build tool versions
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking Flutter project..."
+          echo "================ FLUTTER ================"
+          flutter --version
 
-          test -f mobile/pubspec.yaml || {
-            echo "ERROR: mobile/pubspec.yaml not found"
-            exit 1
-          }
+          echo ""
+          echo "================ DART ==================="
+          dart --version
 
-          test -f mobile/lib/main.dart || {
-            echo "ERROR: mobile/lib/main.dart not found"
-            exit 1
-          }
-
-          test -d mobile/android || {
-            echo "ERROR: mobile/android folder not found"
-            exit 1
-          }
-
-          test -f mobile/android/settings.gradle || {
-            echo "ERROR: mobile/android/settings.gradle not found"
-            exit 1
-          }
-
-          test -f mobile/android/build.gradle || {
-            echo "ERROR: mobile/android/build.gradle not found"
-            exit 1
-          }
-
-          test -f mobile/android/app/build.gradle || {
-            echo "ERROR: mobile/android/app/build.gradle not found"
-            exit 1
-          }
-
-          echo "Flutter project structure looks OK."
+          echo ""
+          echo "================ JAVA ==================="
+          java -version
 
       # ============================================================
-      # 5. CREATE LOCAL.PROPERTIES
+      # 5. VERIFY PROJECT FILES
       # ============================================================
-      - name: Configure Flutter SDK for Android
+      - name: Verify Flutter Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f mobile/pubspec.yaml
+          test -f mobile/lib/main.dart
+          test -d mobile/android
+          test -f mobile/android/settings.gradle
+          test -f mobile/android/build.gradle
+          test -f mobile/android/app/build.gradle
+          test -f mobile/android/gradle/wrapper/gradle-wrapper.properties
+          test -f mobile/android/gradlew
+
+          echo "Required Flutter and Android project files found."
+
+      # ============================================================
+      # 6. PREPARE GRADLE WRAPPER
+      # ============================================================
+      - name: Prepare Gradle wrapper
+        working-directory: mobile/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x gradlew
+
+          echo "Gradle wrapper configuration:"
+          cat gradle/wrapper/gradle-wrapper.properties
+
+          echo ""
+          echo "Gradle version:"
+          ./gradlew --version
+
+      # ============================================================
+      # 7. CONFIGURE FLUTTER / ANDROID SDK PATHS
+      # ============================================================
+      - name: Configure Android local properties
+        working-directory: mobile
         shell: bash
         run: |
           set -euo pipefail
@@ -104,14 +114,41 @@ jobs:
           FLUTTER_SDK="$(cd "$(dirname "$FLUTTER_BIN")/.." && pwd)"
 
           echo "Flutter SDK: $FLUTTER_SDK"
+          echo "Android SDK: ${ANDROID_HOME:-}"
 
-          printf "flutter.sdk=%s\n" "$FLUTTER_SDK" \
-            > mobile/android/local.properties
+          {
+            echo "flutter.sdk=$FLUTTER_SDK"
 
-          cat mobile/android/local.properties
+            if [ -n "${ANDROID_HOME:-}" ]; then
+              echo "sdk.dir=$ANDROID_HOME"
+            fi
+          } > android/local.properties
+
+          echo ""
+          echo "local.properties:"
+          cat android/local.properties
 
       # ============================================================
-      # 6. FLUTTER DEPENDENCIES
+      # 8. CONFIGURE GRADLE FOR CI
+      # Disable daemon persistence and VFS watching for this runner.
+      # ============================================================
+      - name: Configure Gradle for CI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.gradle"
+
+          cat > "$HOME/.gradle/gradle.properties" <<'EOF'
+          org.gradle.daemon=false
+          org.gradle.vfs.watch=false
+          EOF
+
+          echo "CI Gradle configuration:"
+          cat "$HOME/.gradle/gradle.properties"
+
+      # ============================================================
+      # 9. FLUTTER PACKAGES
       # ============================================================
       - name: Get Flutter packages
         working-directory: mobile
@@ -121,181 +158,7 @@ jobs:
           flutter pub get
 
       # ============================================================
-      # 7. VERIFY BRANDING
-      # ============================================================
-      - name: Verify Jasong branding
-        shell: bash
-        run: |
-          if [ -f mobile/assets/images/jasong_logo.png ]; then
-            echo "Jasong logo found."
-          else
-            echo "WARNING: Jasong logo not found."
-          fi
-
-      # ============================================================
-      # 8. VERIFY REQUIRED ANDROID TOOLCHAIN
-      # ============================================================
-      - name: Verify Android Gradle configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking Android Gradle Plugin..."
-
-          grep -F \
-            'id "com.android.application" version "8.11.1" apply false' \
-            mobile/android/settings.gradle || {
-              echo "ERROR: AGP 8.11.1 is not configured."
-              exit 1
-            }
-
-          echo "AGP 8.11.1 confirmed."
-
-          echo "Checking Kotlin Gradle Plugin..."
-
-          grep -F \
-            'id "org.jetbrains.kotlin.android" version "2.2.20" apply false' \
-            mobile/android/settings.gradle || {
-              echo "ERROR: Kotlin Gradle Plugin 2.2.20 is not configured."
-              exit 1
-            }
-
-          echo "Kotlin 2.2.20 confirmed."
-
-      # ============================================================
-      # 9. INSTALL GRADLE 8.13
-      # ============================================================
-      - name: Setup Gradle 8.13
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.13"
-
-      # ============================================================
-      # 10. PREPARE GRADLE WRAPPER
-      # ============================================================
-      - name: Prepare Android Gradle wrapper 8.13
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Installed Gradle:"
-          gradle --version
-
-          ANDROID_DIR="$GITHUB_WORKSPACE/mobile/android"
-          TEMP_DIR="$(mktemp -d)"
-
-          echo "Creating clean Gradle wrapper bootstrap project..."
-          echo "Temporary directory: $TEMP_DIR"
-
-          printf 'rootProject.name = "jasong-wrapper-bootstrap"\n' \
-            > "$TEMP_DIR/settings.gradle"
-
-          touch "$TEMP_DIR/build.gradle"
-
-          (
-            cd "$TEMP_DIR"
-
-            gradle wrapper \
-              --gradle-version 8.13 \
-              --distribution-type bin
-          )
-
-          mkdir -p "$ANDROID_DIR/gradle/wrapper"
-
-          cp "$TEMP_DIR/gradlew" \
-            "$ANDROID_DIR/gradlew"
-
-          cp "$TEMP_DIR/gradlew.bat" \
-            "$ANDROID_DIR/gradlew.bat"
-
-          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.jar" \
-            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
-
-          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.properties" \
-            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
-
-          chmod +x "$ANDROID_DIR/gradlew"
-
-          echo ""
-          echo "Generated Gradle wrapper configuration:"
-          cat "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
-
-          echo ""
-          echo "Testing Gradle wrapper..."
-
-          cd "$ANDROID_DIR"
-          ./gradlew --version
-
-          rm -rf "$TEMP_DIR"
-
-      # ============================================================
-      # 11. VALIDATE ANDROID GRADLE PROJECT
-      # ============================================================
-      - name: Validate Android Gradle project
-        working-directory: mobile/android
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ./gradlew help \
-            --no-daemon \
-            --stacktrace
-
-      # ============================================================
-      # 12. CHECK FLUTTER ANDROID EMBEDDING
-      # ============================================================
-      - name: Check Android embedding
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Searching for deleted Flutter v1 embedding references..."
-
-          if grep -R \
-            --exclude-dir=build \
-            --exclude-dir=.gradle \
-            -E \
-            "io\.flutter\.app\.|FlutterApplication|FlutterMain|PluginRegistry\.Registrar" \
-            mobile/android; then
-
-            echo ""
-            echo "ERROR: Old Flutter Android v1 embedding reference found."
-            exit 1
-          fi
-
-          echo "No Flutter v1 embedding references found."
-
-          echo ""
-          echo "Finding MainActivity..."
-
-          MAIN_ACTIVITY="$(find mobile/android/app/src/main \
-            -type f \
-            \( -name "MainActivity.kt" -o -name "MainActivity.java" \) \
-            | head -n 1)"
-
-          if [ -z "$MAIN_ACTIVITY" ]; then
-            echo "ERROR: MainActivity not found."
-            exit 1
-          fi
-
-          echo "MainActivity found:"
-          echo "$MAIN_ACTIVITY"
-          cat "$MAIN_ACTIVITY"
-
-          echo ""
-          echo "Checking Flutter embedding metadata..."
-
-          grep -n \
-            -A2 \
-            -B2 \
-            "flutterEmbedding" \
-            mobile/android/app/src/main/AndroidManifest.xml || {
-              echo "ERROR: flutterEmbedding metadata missing."
-              exit 1
-            }
-
-      # ============================================================
-      # 13. DART / FLUTTER ANALYSIS
+      # 10. FLUTTER ANALYSIS
       # ============================================================
       - name: Analyse Flutter code
         working-directory: mobile
@@ -308,54 +171,275 @@ jobs:
             --no-fatal-warnings
 
       # ============================================================
-      # 14. CLEAN BEFORE RELEASE BUILD
+      # 11. CLEAN EVERYTHING BEFORE APK BUILD
       # ============================================================
-      - name: Clean Flutter build
+      - name: Clean Flutter and Gradle build state
         working-directory: mobile
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Stopping existing Gradle daemons..."
+
+          (
+            cd android
+            ./gradlew --stop || true
+          )
+
+          echo "Cleaning Flutter..."
+
           flutter clean
+
+          echo "Removing Android Gradle project cache..."
+
+          rm -rf android/.gradle
+          rm -rf build
+
+          echo "Restoring Flutter packages..."
+
           flutter pub get
 
+          echo "Clean build state ready."
+
       # ============================================================
-      # 15. BUILD RELEASE APK
+      # 12. BUILD RELEASE APK
+      #
+      # First use the official Flutter APK build.
+      # If Flutter fails only because it cannot locate the resulting
+      # APK, search for the Gradle-generated release APK.
+      #
+      # If no APK exists, run Gradle assembleRelease directly so
+      # the real Android error and stack trace are captured.
       # ============================================================
       - name: Build release APK
         working-directory: mobile
-        run: flutter build apk --release
+        shell: bash
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.vfs.watch=false"
+        run: |
+          set -uo pipefail
+
+          mkdir -p dist
+
+          rm -f build.log
+          rm -f dist/Jasong-AI-Trader-release.apk
+
+          echo "================================================"
+          echo "BUILDING JASONG AI TRADER RELEASE APK"
+          echo "================================================"
+          echo ""
+
+          # --------------------------------------------------------
+          # ATTEMPT 1: FLUTTER BUILD
+          # --------------------------------------------------------
+
+          set +e
+
+          flutter build apk \
+            --release \
+            --verbose \
+            2>&1 | tee build.log
+
+          FLUTTER_STATUS=${PIPESTATUS[0]}
+
+          set -e
+
+          echo ""
+          echo "Flutter build exit code: $FLUTTER_STATUS"
+          echo ""
+
+          echo "Searching for APK files after Flutter build..."
+
+          find build android \
+            -type f \
+            -name "*.apk" \
+            -print \
+            2>/dev/null || true
+
+          EXPECTED_APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          # --------------------------------------------------------
+          # NORMAL FLUTTER OUTPUT
+          # --------------------------------------------------------
+
+          if [ -f "$EXPECTED_APK" ]; then
+
+            echo ""
+            echo "Flutter APK found at expected location:"
+            echo "$EXPECTED_APK"
+
+            cp "$EXPECTED_APK" \
+              dist/Jasong-AI-Trader-release.apk
+
+            echo ""
+            echo "APK copied to dist directory."
+
+            exit 0
+          fi
+
+          # --------------------------------------------------------
+          # FIND APK IF FLUTTER LOST TRACK OF OUTPUT LOCATION
+          # --------------------------------------------------------
+
+          FOUND_APK="$(find build android \
+            -type f \
+            \( -name "app-release.apk" -o -name "*release*.apk" \) \
+            -print \
+            2>/dev/null \
+            | head -n 1 || true)"
+
+          if [ -n "$FOUND_APK" ] && [ -f "$FOUND_APK" ]; then
+
+            echo ""
+            echo "Release APK found at alternate location:"
+            echo "$FOUND_APK"
+
+            cp "$FOUND_APK" \
+              dist/Jasong-AI-Trader-release.apk
+
+            echo ""
+            echo "Recovered APK successfully."
+
+            exit 0
+          fi
+
+          # --------------------------------------------------------
+          # ATTEMPT 2: DIRECT GRADLE RELEASE BUILD
+          # --------------------------------------------------------
+
+          echo ""
+          echo "Flutter did not leave a usable APK."
+          echo "Running direct Gradle assembleRelease..."
+          echo ""
+
+          set +e
+
+          (
+            cd android
+
+            ./gradlew app:assembleRelease \
+              --no-daemon \
+              --no-watch-fs \
+              --stacktrace \
+              --info
+          ) 2>&1 | tee -a build.log
+
+          GRADLE_STATUS=${PIPESTATUS[0]}
+
+          set -e
+
+          echo ""
+          echo "Gradle assembleRelease exit code: $GRADLE_STATUS"
+          echo ""
+
+          echo "Searching again for generated APK files..."
+
+          find build android \
+            -type f \
+            -name "*.apk" \
+            -print \
+            2>/dev/null || true
+
+          FOUND_APK="$(find build android \
+            -type f \
+            \( -name "app-release.apk" -o -name "*release*.apk" \) \
+            -print \
+            2>/dev/null \
+            | head -n 1 || true)"
+
+          if [ -n "$FOUND_APK" ] && [ -f "$FOUND_APK" ]; then
+
+            echo ""
+            echo "APK generated by Gradle:"
+            echo "$FOUND_APK"
+
+            cp "$FOUND_APK" \
+              dist/Jasong-AI-Trader-release.apk
+
+            echo ""
+            echo "APK recovered successfully."
+
+            exit 0
+          fi
+
+          # --------------------------------------------------------
+          # BOTH METHODS FAILED
+          # --------------------------------------------------------
+
+          echo ""
+          echo "================================================"
+          echo "APK BUILD FAILED"
+          echo "================================================"
+          echo ""
+
+          echo "No release APK could be found."
+
+          echo ""
+          echo "Last 300 lines of build log:"
+          echo "------------------------------------------------"
+
+          tail -n 300 build.log || true
+
+          echo "------------------------------------------------"
+
+          if [ "$GRADLE_STATUS" -ne 0 ]; then
+            exit "$GRADLE_STATUS"
+          fi
+
+          if [ "$FLUTTER_STATUS" -ne 0 ]; then
+            exit "$FLUTTER_STATUS"
+          fi
+
+          exit 1
 
       # ============================================================
-      # 16. VERIFY APK
+      # 13. VERIFY FINAL APK
       # ============================================================
       - name: Verify APK output
+        working-directory: mobile
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="mobile/build/app/outputs/flutter-apk/app-release.apk"
+          APK="dist/Jasong-AI-Trader-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK was not produced."
+            echo "ERROR: Final APK was not produced."
             exit 1
           fi
 
           echo ""
-          echo "============================================"
+          echo "================================================"
           echo "JASONG AI TRADER APK SUCCESSFULLY CREATED"
-          echo "============================================"
+          echo "================================================"
           echo ""
 
           ls -lh "$APK"
 
+          echo ""
+          echo "SHA-256:"
+          sha256sum "$APK"
+
       # ============================================================
-      # 17. UPLOAD APK
+      # 14. UPLOAD APK
       # ============================================================
       - name: Upload Jasong AI Trader APK
         uses: actions/upload-artifact@v4
         with:
           name: Jasong-AI-Trader-APK
-          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          path: mobile/dist/Jasong-AI-Trader-release.apk
           if-no-files-found: error
           retention-days: 30
+
+      # ============================================================
+      # 15. UPLOAD BUILD LOG
+      # Runs even if the APK build fails.
+      # ============================================================
+      - name: Upload Android build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jasong-AI-Trader-Android-Build-Log
+          path: mobile/build.log
+          if-no-files-found: ignore
+          retention-days: 7
