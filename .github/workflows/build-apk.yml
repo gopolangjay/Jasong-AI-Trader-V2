@@ -2,6 +2,7 @@ name: Build Jasong AI Trader APK
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
@@ -9,9 +10,14 @@ on:
       - "mobile/**"
       - ".github/workflows/build-apk.yml"
 
+permissions:
+  contents: read
+
 jobs:
   build-apk:
+    name: build-apk
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       # ============================================================
@@ -21,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # 2. JAVA
+      # 2. JAVA 17
       # ============================================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -31,21 +37,29 @@ jobs:
 
       # ============================================================
       # 3. FLUTTER
+      # Pin Flutter so future stable updates do not unexpectedly
+      # change the Android build requirements.
       # ============================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.44.7"
           channel: stable
           cache: true
 
       - name: Flutter version
-        run: flutter --version
+        run: |
+          flutter --version
+          dart --version
 
       # ============================================================
-      # 4. VERIFY PROJECT
+      # 4. VERIFY FLUTTER PROJECT
       # ============================================================
       - name: Verify Flutter project files
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "Checking Flutter project..."
 
           test -f mobile/pubspec.yaml || {
@@ -81,16 +95,35 @@ jobs:
           echo "Flutter project structure looks OK."
 
       # ============================================================
-      # 5. FLUTTER DEPENDENCIES
+      # 5. CREATE LOCAL.PROPERTIES
+      # ============================================================
+      - name: Configure Flutter SDK for Android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FLUTTER_BIN="$(command -v flutter)"
+          FLUTTER_SDK="$(cd "$(dirname "$FLUTTER_BIN")/.." && pwd)"
+
+          echo "Flutter SDK: $FLUTTER_SDK"
+
+          printf "flutter.sdk=%s\n" "$FLUTTER_SDK" \
+            > mobile/android/local.properties
+
+          cat mobile/android/local.properties
+
+      # ============================================================
+      # 6. FLUTTER DEPENDENCIES
       # ============================================================
       - name: Get Flutter packages
         working-directory: mobile
         run: flutter pub get
 
       # ============================================================
-      # 6. VERIFY BRANDING ASSET
+      # 7. VERIFY BRANDING
       # ============================================================
       - name: Verify Jasong branding
+        shell: bash
         run: |
           if [ -f mobile/assets/images/jasong_logo.png ]; then
             echo "Jasong logo found."
@@ -99,36 +132,127 @@ jobs:
           fi
 
       # ============================================================
-      # 7. GENERATE GRADLE WRAPPER
+      # 8. VERIFY REQUIRED ANDROID TOOLCHAIN
+      # ============================================================
+      - name: Verify Android Gradle configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking Android Gradle Plugin..."
+
+          grep -F \
+            'id "com.android.application" version "8.11.1" apply false' \
+            mobile/android/settings.gradle || {
+              echo "ERROR: AGP 8.11.1 is not configured."
+              exit 1
+            }
+
+          echo "AGP 8.11.1 confirmed."
+
+          echo "Checking Kotlin Gradle Plugin..."
+
+          grep -F \
+            'id "org.jetbrains.kotlin.android" version "2.2.20" apply false' \
+            mobile/android/settings.gradle || {
+              echo "ERROR: Kotlin Gradle Plugin 2.2.20 is not configured."
+              exit 1
+            }
+
+          echo "Kotlin 2.2.20 confirmed."
+
+      # ============================================================
+      # 9. INSTALL GRADLE 8.13
       # ============================================================
       - name: Setup Gradle 8.13
-  uses: gradle/actions/setup-gradle@v6
-  with:
-    gradle-version: '8.13'
-
-- name: Generate Android Gradle wrapper
-  working-directory: mobile/android
-  shell: bash
-  run: |
-    set -euxo pipefail
-
-    echo "System Gradle:"
-    gradle --version
-
-    gradle wrapper \
-      --gradle-version 8.13 \
-      --distribution-type bin
-
-    chmod +x gradlew
-
-    echo "Wrapper Gradle:"
-    ./gradlew --version
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.13"
 
       # ============================================================
-      # 8. CHECK FOR DELETED FLUTTER V1 EMBEDDING
+      # 10. BUILD GRADLE WRAPPER SAFELY
+      #
+      # IMPORTANT:
+      # Generate the wrapper inside a temporary empty Gradle project.
+      # This prevents the Android Gradle Plugin from being loaded
+      # before the wrapper exists.
+      # ============================================================
+      - name: Prepare Android Gradle wrapper 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Installed Gradle:"
+          gradle --version
+
+          ANDROID_DIR="$GITHUB_WORKSPACE/mobile/android"
+          TEMP_DIR="$(mktemp -d)"
+
+          echo "Creating clean wrapper bootstrap project in:"
+          echo "$TEMP_DIR"
+
+          printf 'rootProject.name = "jasong-wrapper-bootstrap"\n' \
+            > "$TEMP_DIR/settings.gradle"
+
+          touch "$TEMP_DIR/build.gradle"
+
+          (
+            cd "$TEMP_DIR"
+
+            gradle wrapper \
+              --gradle-version 8.13 \
+              --distribution-type bin
+          )
+
+          mkdir -p "$ANDROID_DIR/gradle/wrapper"
+
+          cp "$TEMP_DIR/gradlew" \
+            "$ANDROID_DIR/gradlew"
+
+          cp "$TEMP_DIR/gradlew.bat" \
+            "$ANDROID_DIR/gradlew.bat"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.jar" \
+            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.properties" \
+            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          chmod +x "$ANDROID_DIR/gradlew"
+
+          echo ""
+          echo "Generated wrapper configuration:"
+          cat "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          echo ""
+          echo "Testing Gradle wrapper..."
+
+          cd "$ANDROID_DIR"
+          ./gradlew --version
+
+          rm -rf "$TEMP_DIR"
+
+      # ============================================================
+      # 11. VALIDATE ANDROID PROJECT WITH THE NEW WRAPPER
+      # ============================================================
+      - name: Validate Android Gradle project
+        working-directory: mobile/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew help \
+            --no-daemon \
+            --stacktrace
+
+      # ============================================================
+      # 12. CHECK FOR OLD FLUTTER V1 EMBEDDING
       # ============================================================
       - name: Check Android embedding
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "Searching for deleted Flutter v1 embedding references..."
 
           if grep -R \
@@ -141,23 +265,29 @@ jobs:
             echo ""
             echo "ERROR: Old Flutter Android v1 embedding reference found."
             exit 1
-
-          else
-            echo "No deleted Flutter v1 embedding references found."
           fi
 
-          echo ""
-          echo "Checking MainActivity..."
+          echo "No Flutter v1 embedding references found."
 
-          if [ -f mobile/android/app/src/main/kotlin/com/jasong/ai/trader/MainActivity.kt ]; then
-            cat mobile/android/app/src/main/kotlin/com/jasong/ai/trader/MainActivity.kt
-          else
-            echo "ERROR: MainActivity.kt not found."
+          echo ""
+          echo "Finding MainActivity..."
+
+          MAIN_ACTIVITY="$(find mobile/android/app/src/main \
+            -type f \
+            \( -name "MainActivity.kt" -o -name "MainActivity.java" \) \
+            | head -n 1)"
+
+          if [ -z "$MAIN_ACTIVITY" ]; then
+            echo "ERROR: MainActivity not found."
             exit 1
           fi
 
+          echo "MainActivity found:"
+          echo "$MAIN_ACTIVITY"
+          cat "$MAIN_ACTIVITY"
+
           echo ""
-          echo "Checking flutterEmbedding metadata..."
+          echo "Checking Flutter embedding metadata..."
 
           grep -n \
             -A2 \
@@ -169,39 +299,51 @@ jobs:
             }
 
       # ============================================================
-      # 9. DART ANALYSIS
+      # 13. DART / FLUTTER ANALYSIS
       # ============================================================
       - name: Analyse Flutter code
         working-directory: mobile
+        shell: bash
         run: |
+          set -euo pipefail
+
           flutter analyze \
             --no-fatal-infos \
             --no-fatal-warnings
 
       # ============================================================
-      # 10. CLEAN OLD BUILD
+      # 14. CLEAN BEFORE RELEASE BUILD
       # ============================================================
       - name: Clean Flutter build
         working-directory: mobile
+        shell: bash
         run: |
+          set -euo pipefail
+
           flutter clean
           flutter pub get
 
       # ============================================================
-      # 11. BUILD RELEASE APK
+      # 15. BUILD RELEASE APK
       # ============================================================
       - name: Build release APK
         working-directory: mobile
+        shell: bash
         run: |
+          set -euo pipefail
+
           flutter build apk \
             --release \
             --verbose
 
       # ============================================================
-      # 12. VERIFY APK
+      # 16. VERIFY APK
       # ============================================================
       - name: Verify APK output
+        shell: bash
         run: |
+          set -euo pipefail
+
           APK="mobile/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
@@ -209,16 +351,21 @@ jobs:
             exit 1
           fi
 
-          echo "APK successfully created:"
+          echo ""
+          echo "============================================"
+          echo "JASONG AI TRADER APK SUCCESSFULLY CREATED"
+          echo "============================================"
+          echo ""
+
           ls -lh "$APK"
 
       # ============================================================
-      # 13. UPLOAD APK
+      # 17. UPLOAD APK
       # ============================================================
       - name: Upload Jasong AI Trader APK
         uses: actions/upload-artifact@v4
         with:
-          name: Jasong-AI-Trader-V6.5.2-APK
+          name: Jasong-AI-Trader-APK
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 30
