@@ -333,9 +333,10 @@ jobs:
     set -euo pipefail
 
     flutter build apk \
-      --release \
-      --verbose \
-      -- --no-watch-fs
+  --release \
+  --verbose \
+  -- \
+  --no-watch-fs
 
       # ============================================================
       # 16. VERIFY APK
