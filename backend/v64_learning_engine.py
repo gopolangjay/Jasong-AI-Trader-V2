@@ -28,10 +28,10 @@ class V64LearningTradeEngine:
     No broker credentials are accepted and no live order is sent.
     """
 
-    VERSION = "6.5.2"
+    VERSION = "6.6.0"
     NAMESPACE = "v64_learning_engine"
 
-    # V6.5.2 PAPER-learning entry thresholds.
+    # V6.6 PAPER-learning entry thresholds.
     # Experimental only: broker execution remains disabled.
     NORMAL_MIN_CONFIDENCE = 0.30
     AI_MIN_CONFIDENCE = 0.40
@@ -162,6 +162,8 @@ class V64LearningTradeEngine:
 
         verified = bool(validated.get("verified", False))
         deep_status = str(validated.get("status") or "NOT_VALIDATED").upper()
+        experimental = (not verified) and deep_status in {"WATCH", "NEAR_VERIFIED"}
+        trade_eligible = verified or experimental
         holding_candles = int(validated.get("holding_candles") or item.get("holding_candles") or 4)
         holding_candles = max(1, min(holding_candles, 24))
 
@@ -176,6 +178,8 @@ class V64LearningTradeEngine:
             "direction": direction,
             "risk_mode": risk_mode,
             "verified": verified,
+            "experimental": experimental,
+            "trade_eligible": trade_eligible,
             "deep_status": deep_status,
             "holding_candles": holding_candles,
             "payout": float(payout),
@@ -186,7 +190,7 @@ class V64LearningTradeEngine:
             "last_quant_confidence": None,
             "last_signal": None,
             "last_ai": None,
-            "status": "WATCHING" if verified else "SHADOW_WATCH",
+            "status": "WATCHING" if trade_eligible else "SHADOW_WATCH",
             "expires_at": now + 12 * 3600,
         }
 
@@ -359,7 +363,7 @@ class V64LearningTradeEngine:
         live: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        V6.5.2 PAPER-only entry policy.
+        V6.6 PAPER-only adaptive entry policy.
 
         A VERIFIED watcher may enter when live direction matches and either:
         - normal quantitative confidence >= 30%, or
@@ -379,11 +383,13 @@ class V64LearningTradeEngine:
         model_ai = self._directional_model_ai_confidence(live, wanted)
 
         verified = bool(watcher.get("verified"))
+        experimental = bool(watcher.get("experimental"))
+        trade_eligible = bool(watcher.get("trade_eligible", verified or experimental))
         direction_match = live_direction == wanted
         normal_pass = quant >= self.NORMAL_MIN_CONFIDENCE
         ai_pass = model_ai >= self.AI_MIN_CONFIDENCE
 
-        if not verified:
+        if not trade_eligible:
             return {
                 "class": "S",
                 "enter": False,
@@ -393,7 +399,7 @@ class V64LearningTradeEngine:
                 "normal_pass": normal_pass,
                 "ai_pass": ai_pass,
                 "direction_match": direction_match,
-                "reason": "Shadow only: setup has not passed deep verification",
+                "reason": "Shadow only: deep status is below WATCH/NEAR_VERIFIED quality",
             }
 
         if not direction_match:
@@ -414,7 +420,7 @@ class V64LearningTradeEngine:
 
         if normal_pass and ai_pass:
             return {
-                "class": "D",
+                "class": "ED" if experimental else "D",
                 "enter": True,
                 "quant": quant,
                 "model_ai_confidence": model_ai,
@@ -422,12 +428,12 @@ class V64LearningTradeEngine:
                 "normal_pass": True,
                 "ai_pass": True,
                 "direction_match": True,
-                "reason": "V6.5.2 BOTH path: normal >=30% and model-AI >=40%",
+                "reason": "V6.6 BOTH path: normal >=30% and model-AI >=40%",
             }
 
         if normal_pass:
             return {
-                "class": "N",
+                "class": "EN" if experimental else "N",
                 "enter": True,
                 "quant": quant,
                 "model_ai_confidence": model_ai,
@@ -435,12 +441,12 @@ class V64LearningTradeEngine:
                 "normal_pass": True,
                 "ai_pass": False,
                 "direction_match": True,
-                "reason": "V6.5.2 NORMAL path: quantitative confidence >=30%",
+                "reason": "V6.6 NORMAL path: quantitative confidence >=30%",
             }
 
         if ai_pass:
             return {
-                "class": "M",
+                "class": "EM" if experimental else "M",
                 "enter": True,
                 "quant": quant,
                 "model_ai_confidence": model_ai,
@@ -448,7 +454,7 @@ class V64LearningTradeEngine:
                 "normal_pass": False,
                 "ai_pass": True,
                 "direction_match": True,
-                "reason": "V6.5.2 MODEL_AI path: directional model-AI >=40%",
+                "reason": "V6.6 MODEL_AI path: directional model-AI >=40%",
             }
 
         return {
@@ -460,7 +466,7 @@ class V64LearningTradeEngine:
             "normal_pass": False,
             "ai_pass": False,
             "direction_match": True,
-            "reason": "Below V6.5.2 PAPER thresholds: normal <30% and model-AI <40%",
+            "reason": "Below V6.6 PAPER thresholds: normal <30% and model-AI <40%",
         }
 
     def _open_trade(
@@ -488,6 +494,7 @@ class V64LearningTradeEngine:
         trade = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": decision["class"],
+            "historical_grade": "VERIFIED" if watcher.get("verified") else ("EXPERIMENTAL" if watcher.get("experimental") else "SHADOW"),
             "symbol": symbol,
             "market": watcher.get("market"),
             "direction": direction,
@@ -688,7 +695,7 @@ class V64LearningTradeEngine:
             watchers = list(state.get("watchers", []))
 
         classes = {}
-        for cls in ["A", "B", "C"]:
+        for cls in ["D", "N", "M", "ED", "EN", "EM"]:
             classes[cls] = self._stats_for([t for t in actual if t.get("entry_class") == cls])
 
         # Shadow P&L is deliberately zero, so calculate only outcome frequency.
@@ -740,6 +747,21 @@ class V64LearningTradeEngine:
             "by_entry_class": classes,
             "shadow": shadow_stats,
             "confidence_buckets": buckets,
+        }
+
+    def trades(self, limit: int = 200) -> Dict[str, Any]:
+        """Return actual PAPER learning trades for the mobile Trade Lab."""
+        with self._lock:
+            opened = [dict(x) for x in self._state.get("open_trades", [])]
+            settled = [dict(x) for x in self._state.get("settled_trades", [])]
+        rows = settled + opened
+        rows.sort(key=lambda x: float(x.get("opened_at") or 0.0), reverse=True)
+        return {
+            "version": self.VERSION,
+            "trades": rows[:max(1, min(int(limit), 2000))],
+            "open": len([x for x in opened if x.get("status") == "OPEN"]),
+            "settled": len([x for x in settled if x.get("status") == "CLOSED"]),
+            "live_execution": False,
         }
 
     def journal(self, limit: int = 200) -> Dict[str, Any]:
