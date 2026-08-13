@@ -4747,34 +4747,104 @@ def _ai_learning_candidate_score(candidate: dict) -> float:
     return 0.0
 
 
+def _ai_learning_call_with_timeout(
+    func,
+    *args,
+    timeout_seconds: float = 25.0,
+):
+    """Run a read/analysis function with a hard request-side timeout.
+
+    The worker is daemonised. A timeout does not open or mutate a trade;
+    it only abandons that market evaluation so /ai-learning/run-now can
+    always release its lock and return a diagnostic response.
+    """
+    box = {
+        "done": False,
+        "result": None,
+        "error": None,
+    }
+
+    def worker():
+        try:
+            box["result"] = func(*args)
+        except Exception as exc:
+            box["error"] = exc
+        finally:
+            box["done"] = True
+
+    thread = threading.Thread(
+        target=worker,
+        name="jasong-ai-learning-eval",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=max(1.0, float(timeout_seconds)))
+
+    if thread.is_alive():
+        return {
+            "ok": False,
+            "timeout": True,
+            "result": None,
+            "error": (
+                f"Timed out after {timeout_seconds:.0f}s"
+            ),
+        }
+
+    if box["error"] is not None:
+        exc = box["error"]
+        return {
+            "ok": False,
+            "timeout": False,
+            "result": None,
+            "error": (
+                f"{type(exc).__name__}: {exc}"
+            ),
+        }
+
+    return {
+        "ok": True,
+        "timeout": False,
+        "result": box["result"],
+        "error": None,
+    }
+
+
 def _v66_ai_learning_cycle() -> dict:
     """
-    One autonomous PAPER-only AI40 cycle.
+    Immediate autonomous PAPER-only AI40 evaluation of the learning watchers.
 
-    This bypasses the strict deep-validation watcher funnel for the
-    experimental AI-learning path only.
-
-    Requirements:
-    - ranked candidate from fast scan
-    - BUY/SELL candidate direction
-    - live direction must agree
-    - directional model-AI confidence >= 40%
-    - max 1 open AI-learning PAPER trade
-    - no broker/live execution
+    V6.6.1 FIX:
+    - Uses the existing V64 learning watchers already being fed by Auto Manager.
+    - Does NOT run another full FX discovery scan inside this request.
+    - Does NOT call V64.tick() synchronously.
+    - Each live-signal evaluation has a hard timeout.
+    - Opens at most one PAPER trade.
+    - Normal/N30 path remains disabled for this AI-learning experiment.
+    - Broker/live execution remains disabled.
     """
+
+    cycle_started_at = time.time()
 
     if not _AI_LEARNING_RUN_LOCK.acquire(blocking=False):
         return {
             "status": "AI_LEARNING_BUSY",
             "paper_only": True,
             "live_execution": False,
+            "message": (
+                "Another bounded AI-learning evaluation is still running. "
+                "This version will release automatically after its watcher "
+                "evaluations finish or time out."
+            ),
         }
 
     try:
         V64_LEARNING_ENGINE.enable()
 
         current = V64_LEARNING_ENGINE.status()
-        open_count = int(current.get("open_trades", 0) or 0)
+        open_count = int(
+            current.get("open_trades", 0)
+            or 0
+        )
 
         if open_count >= 1:
             return {
@@ -4790,59 +4860,104 @@ def _v66_ai_learning_cycle() -> dict:
             or 10000.0
         )
 
-        candidates = _v55_scan_candidates(
-            top_n=9,
-            payout=0.80,
+        watcher_payload = V64_LEARNING_ENGINE.watchers()
+        watchers = (
+            watcher_payload.get("watchers", [])
+            if isinstance(watcher_payload, dict)
+            else []
         )
+
+        watchers = [
+            dict(item)
+            for item in watchers
+            if isinstance(item, dict)
+        ][:6]
+
+        if not watchers:
+            return {
+                "status": "NO_LEARNING_WATCHERS",
+                "paper_only": True,
+                "live_execution": False,
+                "watchers": 0,
+                "message": (
+                    "Auto Manager has not supplied a candidate to the "
+                    "AI-learning engine yet."
+                ),
+                "learning": current,
+            }
 
         evaluated = []
         qualified = []
 
-        for rank, raw in enumerate(candidates[:9], start=1):
-            candidate = dict(raw or {})
-            symbol = str(candidate.get("symbol") or "").strip()
-            market = str(candidate.get("market") or symbol).strip()
-            wanted = _ai_learning_candidate_direction(candidate)
+        for rank, watcher in enumerate(watchers, start=1):
+            symbol = str(
+                watcher.get("symbol")
+                or ""
+            ).strip()
+
+            market = str(
+                watcher.get("market")
+                or symbol
+            ).strip()
+
+            wanted = str(
+                watcher.get("direction")
+                or ""
+            ).upper().strip()
 
             row = {
                 "rank": rank,
+                "watcher_id": watcher.get("watcher_id"),
                 "market": market,
                 "symbol": symbol,
                 "candidate_direction": wanted,
-                "fast_score": _ai_learning_candidate_score(candidate),
+                "deep_status": watcher.get("deep_status"),
+                "verified": bool(watcher.get("verified")),
+                "experimental": bool(watcher.get("experimental")),
                 "live_direction": None,
                 "quant_confidence_pct": None,
                 "model_ai_directional_confidence_pct": None,
                 "direction_match": False,
                 "ai40_pass": False,
+                "entry_class": None,
                 "passed": False,
+                "timed_out": False,
                 "reason": None,
             }
 
-            if not symbol:
-                row["reason"] = "Missing symbol"
+            if not symbol or wanted not in {"BUY", "SELL"}:
+                row["reason"] = "Watcher has no valid BUY/SELL symbol."
                 evaluated.append(row)
                 continue
 
-            if wanted not in {"BUY", "SELL"}:
-                row["reason"] = "Candidate is not BUY/SELL"
-                evaluated.append(row)
-                continue
+            live_result = _ai_learning_call_with_timeout(
+                _v63_adaptive_live_signal,
+                symbol,
+                watcher.get("risk_mode", "Balanced"),
+                balance,
+                timeout_seconds=25.0,
+            )
 
-            try:
-                live = _v63_adaptive_live_signal(
-                    symbol,
-                    "Balanced",
-                    balance,
+            if not live_result["ok"]:
+                row["timed_out"] = bool(
+                    live_result["timeout"]
                 )
-            except Exception as exc:
                 row["reason"] = (
-                    f"Signal error: {type(exc).__name__}: {exc}"
+                    "Live signal timeout"
+                    if live_result["timeout"]
+                    else f"Live signal error: {live_result['error']}"
                 )
                 evaluated.append(row)
                 continue
 
-            live_direction = _ai_learning_live_direction(live)
+            live = dict(
+                live_result["result"]
+                or {}
+            )
+
+            live_direction = _ai_learning_live_direction(
+                live
+            )
 
             quant = V64_LEARNING_ENGINE._confidence01(
                 live.get("confidence")
@@ -4856,57 +4971,61 @@ def _v66_ai_learning_cycle() -> dict:
                 )
             )
 
-            direction_match = live_direction == wanted
-            ai40_pass = model_ai >= PAPER_AI_MIN_CONFIDENCE
+            # Use V64's own entry classifier so this decision is identical
+            # to the learning engine's PAPER logic.
+            decision = V64_LEARNING_ENGINE._entry_class(
+                watcher,
+                live,
+            )
 
-            try:
-                price = float(live.get("price") or 0.0)
-            except (TypeError, ValueError):
-                price = 0.0
+            direction_match = (
+                live_direction == wanted
+            )
+            ai40_pass = (
+                model_ai
+                >= PAPER_AI_MIN_CONFIDENCE
+            )
 
-            passed = (
-                direction_match
+            entry_class = str(
+                decision.get("class")
+                or "S"
+            ).upper()
+
+            # AI-learning test accepts only M/EM.
+            passed = bool(
+                decision.get("enter")
+                and entry_class in {"M", "EM"}
+                and direction_match
                 and ai40_pass
-                and price > 0.0
             )
 
             row.update({
                 "live_direction": live_direction,
-                "quant_confidence_pct": round(quant * 100.0, 2),
+                "quant_confidence_pct": round(
+                    quant * 100.0,
+                    2,
+                ),
                 "model_ai_directional_confidence_pct": round(
                     model_ai * 100.0,
                     2,
                 ),
                 "direction_match": direction_match,
                 "ai40_pass": ai40_pass,
+                "entry_class": entry_class,
                 "passed": passed,
+                "reason": decision.get("reason"),
             })
-
-            if not direction_match:
-                row["reason"] = (
-                    f"Live direction {live_direction} "
-                    f"does not match {wanted}"
-                )
-            elif not ai40_pass:
-                row["reason"] = (
-                    f"AI confidence {model_ai * 100.0:.2f}% "
-                    f"is below 40%"
-                )
-            elif price <= 0:
-                row["reason"] = "No valid live price"
-            else:
-                row["reason"] = "Passed direction agreement + AI40"
 
             evaluated.append(row)
 
             if passed:
                 qualified.append({
-                    "candidate": candidate,
+                    "watcher": watcher,
                     "live": live,
+                    "decision": decision,
                     "row": row,
-                    "quant": quant,
                     "model_ai": model_ai,
-                    "score": row["fast_score"],
+                    "quant": quant,
                 })
 
         if not qualified:
@@ -4914,15 +5033,18 @@ def _v66_ai_learning_cycle() -> dict:
                 "status": "NO_AI40_SETUP",
                 "paper_only": True,
                 "live_execution": False,
-                "scanned": len(candidates),
+                "watchers_evaluated": len(evaluated),
                 "qualified": 0,
+                "elapsed_seconds": round(
+                    time.time() - cycle_started_at,
+                    2,
+                ),
                 "evaluated": evaluated,
                 "learning": V64_LEARNING_ENGINE.status(),
             }
 
         qualified.sort(
             key=lambda item: (
-                float(item["score"]),
                 float(item["model_ai"]),
                 float(item["quant"]),
             ),
@@ -4930,50 +5052,13 @@ def _v66_ai_learning_cycle() -> dict:
         )
 
         selected = qualified[0]
-        row = dict(selected["row"])
-        candidate = dict(selected["candidate"])
+        watcher = selected["watcher"]
+        live = selected["live"]
+        decision = selected["decision"]
 
-        try:
-            holding_candles = int(
-                candidate.get("holding_candles", 4) or 4
-            )
-        except (TypeError, ValueError):
-            holding_candles = 4
-
-        holding_candles = max(1, min(holding_candles, 24))
-
-        validated = {
-            "symbol": row["symbol"],
-            "market": row["market"],
-            "direction": row["candidate_direction"],
-            "verified": False,
-            "status": "WATCH",
-            "holding_candles": holding_candles,
-            "source": "AI_LEARNING",
-            "entry_path": "AI40",
-            "model_ai_confidence": selected["model_ai"],
-            "quant_confidence": selected["quant"],
-        }
-
-        submitted = V64_LEARNING_ENGINE.submit_candidate(
-            candidate,
-            validated,
-            risk_mode="Balanced",
-            starting_balance=balance,
-            payout=0.80,
+        before = V64_LEARNING_ENGINE.trades(
+            limit=200
         )
-
-        if not bool(submitted.get("accepted", False)):
-            return {
-                "status": "CANDIDATE_SUBMIT_REJECTED",
-                "paper_only": True,
-                "live_execution": False,
-                "selected": row,
-                "submitted": submitted,
-                "evaluated": evaluated,
-            }
-
-        before = V64_LEARNING_ENGINE.trades(limit=200)
         before_rows = (
             before.get("trades", [])
             if isinstance(before, dict)
@@ -4986,9 +5071,19 @@ def _v66_ai_learning_cycle() -> dict:
             and item.get("trade_id") is not None
         }
 
-        learning_after = V64_LEARNING_ENGINE.tick()
+        # Open directly through the existing PAPER engine. This preserves
+        # its stake sizing, duplicate protection, max-open limit, journal
+        # and settlement format without invoking another market-data tick.
+        V64_LEARNING_ENGINE._open_trade(
+            watcher,
+            live,
+            decision,
+        )
+        V64_LEARNING_ENGINE._persist()
 
-        after = V64_LEARNING_ENGINE.trades(limit=200)
+        after = V64_LEARNING_ENGINE.trades(
+            limit=200
+        )
         after_rows = (
             after.get("trades", [])
             if isinstance(after, dict)
@@ -5005,7 +5100,10 @@ def _v66_ai_learning_cycle() -> dict:
         ai_trades = [
             item
             for item in new_trades
-            if str(item.get("entry_class") or "").upper()
+            if str(
+                item.get("entry_class")
+                or ""
+            ).upper()
             in {"M", "EM"}
         ]
 
@@ -5014,24 +5112,32 @@ def _v66_ai_learning_cycle() -> dict:
                 "status": "PAPER_TRADE_OPENED",
                 "paper_only": True,
                 "live_execution": False,
-                "selected": row,
+                "selected": selected["row"],
                 "trade": ai_trades[0],
+                "elapsed_seconds": round(
+                    time.time() - cycle_started_at,
+                    2,
+                ),
                 "evaluated": evaluated,
-                "learning": learning_after,
+                "learning": V64_LEARNING_ENGINE.status(),
             }
 
         return {
-            "status": "AI40_WATCHER_SUBMITTED_NO_ENTRY",
+            "status": "ENTRY_NOT_CREATED",
             "paper_only": True,
             "live_execution": False,
-            "selected": row,
-            "submitted": submitted,
-            "evaluated": evaluated,
-            "learning": learning_after,
-            "message": (
-                "Candidate passed pre-check, but the fresh V64 tick "
-                "did not open an AI40 PAPER trade."
+            "selected": selected["row"],
+            "elapsed_seconds": round(
+                time.time() - cycle_started_at,
+                2,
             ),
+            "evaluated": evaluated,
+            "message": (
+                "The watcher passed AI40 but the V64 PAPER engine did not "
+                "create a new trade, usually because of duplicate/open-limit "
+                "protection."
+            ),
+            "learning": V64_LEARNING_ENGINE.status(),
         }
 
     except Exception as exc:
@@ -5039,7 +5145,13 @@ def _v66_ai_learning_cycle() -> dict:
             "status": "ERROR",
             "paper_only": True,
             "live_execution": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_seconds": round(
+                time.time() - cycle_started_at,
+                2,
+            ),
+            "error": (
+                f"{type(exc).__name__}: {exc}"
+            ),
         }
 
     finally:
@@ -5049,7 +5161,7 @@ def _v66_ai_learning_cycle() -> dict:
 @app.get("/ai-learning/status")
 def ai_learning_status():
     return {
-        "mode": "DIRECT_AI40_AUTONOMOUS_PAPER",
+        "mode": "DIRECT_AI40_WATCHER_EVAL_V661",
         "paper_only": True,
         "broker_execution_enabled": False,
         "normal_path_disabled_for_ai_learning": True,
