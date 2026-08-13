@@ -60,6 +60,8 @@ from confidence_replay import ConfidenceReplayEngine
 from confidence_wr_analyzer import ConfidenceWinRateAnalyzer
 from persistent_state import PersistentStateStore
 from v64_learning_engine import V64LearningTradeEngine
+from ig_demo_broker import IGDemoBroker, IGDemoError
+from ig_demo_bridge import IGDemoMirror
 
 from database import (
     SessionLocal,
@@ -3539,6 +3541,20 @@ V64_LEARNING_ENGINE.start()
 V64_LEARNING_ENGINE.NORMAL_MIN_CONFIDENCE = 1.01
 V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = PAPER_AI_MIN_CONFIDENCE
 
+# ============================================================
+# IG DEMO BROKER EXECUTION BRIDGE
+# ============================================================
+# Strictly demo-only. The broker class hard-codes demo-api.ig.com
+# and has no production IG URL.
+IG_DEMO_BROKER = IGDemoBroker()
+IG_DEMO_MIRROR = IGDemoMirror(
+    broker=IG_DEMO_BROKER,
+    trade_source=lambda: V64_LEARNING_ENGINE.trades(
+        limit=200,
+    ),
+)
+IG_DEMO_MIRROR.start()
+
 
 
 V55_AUTO_MANAGER = AutomatedTradeManager(
@@ -4930,6 +4946,24 @@ def _v66_ai_learning_cycle() -> dict:
                 evaluated.append(row)
                 continue
 
+            # When IG DEMO autotrade is enabled, broker availability becomes
+            # a hard execution preflight. This prevents the AI from opening
+            # an internal learning trade that cannot be mirrored to IG DEMO.
+            ig_preflight = IG_DEMO_MIRROR.preflight_symbol(
+                symbol
+            )
+            row["ig_demo_preflight"] = ig_preflight
+            if (
+                ig_preflight.get("required")
+                and not ig_preflight.get("ok")
+            ):
+                row["reason"] = (
+                    "IG DEMO market unavailable: "
+                    f"{ig_preflight.get('reason')}"
+                )
+                evaluated.append(row)
+                continue
+
             live_result = _ai_learning_call_with_timeout(
                 _v63_adaptive_live_signal,
                 symbol,
@@ -5277,6 +5311,155 @@ def _v66_ai_learning_cycle() -> dict:
         _AI_LEARNING_RUN_LOCK.release()
 
 
+
+# ============================================================
+# IG DEMO BROKER API
+# ============================================================
+
+@app.get("/ig-demo/status")
+def ig_demo_status():
+    return IG_DEMO_MIRROR.status()
+
+
+@app.post("/ig-demo/connect")
+def ig_demo_connect():
+    try:
+        broker = IG_DEMO_BROKER.connect()
+        mirror = IG_DEMO_MIRROR.sync_once()
+        return {
+            "status": "IG_DEMO_CONNECTED",
+            "broker": broker,
+            "mirror": mirror,
+            "live_money_execution": False,
+        }
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+@app.post("/ig-demo/autotrade")
+def ig_demo_set_autotrade(
+    enabled: bool = True,
+):
+    state = IG_DEMO_MIRROR.set_enabled(
+        enabled
+    )
+    if enabled:
+        IG_DEMO_MIRROR.start()
+    return {
+        "status": (
+            "IG_DEMO_AUTOTRADE_ENABLED"
+            if enabled
+            else "IG_DEMO_AUTOTRADE_DISABLED"
+        ),
+        "mirror": state,
+        "live_money_execution": False,
+    }
+
+
+@app.post("/ig-demo/sync-now")
+def ig_demo_sync_now():
+    try:
+        return IG_DEMO_MIRROR.sync_once()
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+@app.get("/ig-demo/accounts")
+def ig_demo_accounts():
+    try:
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "accounts": IG_DEMO_BROKER.accounts(),
+            "live_money_execution": False,
+        }
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+@app.get("/ig-demo/market")
+def ig_demo_market(
+    symbol: str,
+):
+    try:
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "market":
+                IG_DEMO_BROKER.resolve_market(
+                    symbol,
+                    require_tradeable=False,
+                ),
+            "live_money_execution": False,
+        }
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+
+@app.get("/ig-demo/positions")
+def ig_demo_positions():
+    try:
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "positions":
+                IG_DEMO_BROKER.positions(),
+            "live_money_execution": False,
+        }
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+@app.post("/ig-demo/open-test")
+def ig_demo_open_test(
+    symbol: str,
+    direction: str,
+    size: float | None = None,
+):
+    """Manual IG DEMO smoke-test order only; never targets IG live."""
+    try:
+        return IG_DEMO_BROKER.open_market_position(
+            symbol=symbol,
+            direction=direction,
+            size=size,
+        )
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
+@app.post("/ig-demo/close/{deal_id}")
+def ig_demo_close(
+    deal_id: str,
+):
+    try:
+        return IG_DEMO_BROKER.close_position(
+            deal_id
+        )
+    except IGDemoError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        )
+
+
 @app.get("/ai-learning/status")
 def ai_learning_status():
     return {
@@ -5285,6 +5468,7 @@ def ai_learning_status():
         "broker_execution_enabled": False,
         "normal_path_disabled_for_ai_learning": True,
         "shadow_promotion_for_ai_learning": True,
+        "ig_demo": IG_DEMO_MIRROR.status(),
         "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
         "ai_min_confidence_pct":
             PAPER_AI_MIN_CONFIDENCE * 100.0,
