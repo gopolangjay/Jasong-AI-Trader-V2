@@ -61,7 +61,7 @@ class JasongApp extends StatelessWidget {
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: const Color(0xFF0B17),
+          fillColor: const Color(0xFF0B1720),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
             borderSide: const BorderSide(color: Color(0xFF24404B)),
@@ -174,7 +174,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<Map<String, dynamic>> getJson(
     Uri uri, {
-    int timeoutSeconds = 1,
+    int timeoutSeconds = 120,
   }) async {
     final client = http.Client();
 
@@ -888,7 +888,7 @@ class _HomePageState extends State<HomePage> {
       queryParameters: {
         'period': '5d',
         'interval': '15m',
-        'top_n': '20',
+        'top_n': '9',
       },
     );
 
@@ -1302,7 +1302,7 @@ class _HomePageState extends State<HomePage> {
             ),
           );
 
-      if (response.statusCode != 0) {
+      if (response.statusCode != 200) {
         throw Exception(
           'HTTP ${response.statusCode}: '
           '${response.body}',
@@ -1352,7 +1352,7 @@ class _HomePageState extends State<HomePage> {
             ),
           );
 
-      if (response.statusCode != 0) {
+      if (response.statusCode != 200) {
         throw Exception(
           'HTTP ${response.statusCode}: '
           '${response.body}',
@@ -1401,7 +1401,7 @@ class _HomePageState extends State<HomePage> {
             ),
           );
 
-      if (response.statusCode != 0) {
+      if (response.statusCode != 200) {
         throw Exception(
           'HTTP ${response.statusCode}: '
           '${response.body}',
@@ -1585,7 +1585,7 @@ class _HomePageState extends State<HomePage> {
     watcherPollTimer =
         Timer.periodic(
       const Duration(
-        seconds: ,
+        seconds: 20,
       ),
       (_) {
         refreshServerWatchers();
@@ -1626,7 +1626,7 @@ class _HomePageState extends State<HomePage> {
         case 'EXPIRED':
           return 30;
         case 'INVALIDATED':
-          return ;
+          return 20;
         case 'SUPERSEDED':
           return 10;
         default:
@@ -1734,11 +1734,11 @@ class _HomePageState extends State<HomePage> {
           .post(uri)
           .timeout(
             const Duration(
-              seconds: 1,
+              seconds: 120,
             ),
           );
 
-      if (response.statusCode != 0) {
+      if (response.statusCode != 200) {
         throw Exception(
           'HTTP ${response.statusCode}: ${response.body}',
         );
@@ -2047,7 +2047,7 @@ class _HomePageState extends State<HomePage> {
 
       final result = await getJson(
         uri,
-        timeoutSeconds: 1,
+        timeoutSeconds: 120,
       );
 
       final verifiedDirection =
@@ -2398,7 +2398,7 @@ class _HomePageState extends State<HomePage> {
                 ),
               );
 
-      if (response.statusCode != 0) {
+      if (response.statusCode != 200) {
         throw Exception(
           response.body,
         );
@@ -2677,7 +2677,7 @@ class _HomePageState extends State<HomePage> {
                     '${item['market']}',
                     style:
                         const TextStyle(
-                      fontSize: ,
+                      fontSize: 20,
                       fontWeight:
                           FontWeight.bold,
                     ),
@@ -2902,7 +2902,7 @@ class _HomePageState extends State<HomePage> {
                       '#$rank $marketName',
                       style:
                           const TextStyle(
-                        fontSize: ,
+                        fontSize: 20,
                         fontWeight:
                             FontWeight.bold,
                       ),
@@ -3167,7 +3167,7 @@ class _HomePageState extends State<HomePage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(icon, color: cs.primary, size: ),
+              Icon(icon, color: cs.primary, size: 20),
               const SizedBox(height: 14),
               Text(
                 value,
@@ -3204,7 +3204,7 @@ class _HomePageState extends State<HomePage> {
         decoration: BoxDecoration(
           color: c.withValues(alpha: .12),
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: c.withValues(alpha: .)),
+          border: Border.all(color: c.withValues(alpha: .20)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -3310,7 +3310,7 @@ class _HomePageState extends State<HomePage> {
     Widget dashboardPage() {
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 1),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           glassCard(
             child: Column(
@@ -3350,7 +3350,7 @@ class _HomePageState extends State<HomePage> {
                 colors: [
                   cs.primary.withValues(alpha: .22),
                   const Color(0xFF0D2630),
-                  const Color(0xFF0B16),
+                  const Color(0xFF0B1620),
                 ],
               ),
               border: Border.all(color: cs.primary.withValues(alpha: .25)),
@@ -3447,7 +3447,7 @@ class _HomePageState extends State<HomePage> {
               statTile('Forward trades', '$forwardTrades', Icons.show_chart_rounded),
             ],
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Live intelligence', subtitle: 'Auto-refreshes every 30 seconds • ${symbol.text.trim()}'),
           glassCard(
             glow: sideColor(liveDecision),
@@ -3506,7 +3506,7 @@ class _HomePageState extends State<HomePage> {
               ),
             ],
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Active watchers', subtitle: 'Verified setups under live observation'),
           if (serverWatchers.isEmpty)
             glassCard(
@@ -3569,7 +3569,7 @@ class _HomePageState extends State<HomePage> {
 
     Widget marketsPage() {
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 1),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           sectionTitle('Market scanner', subtitle: 'Fast ranking across the configured FX universe'),
           Row(
@@ -3653,7 +3653,7 @@ class _HomePageState extends State<HomePage> {
             sectionTitle('Full ranking'),
             glassCard(
               child: Column(
-                children: ranking.take().whereType<Map>().toList().asMap().entries.map((entry) {
+                children: ranking.take(20).whereType<Map>().toList().asMap().entries.map((entry) {
                   final item = Map<String, dynamic>.from(entry.value);
                   final market = item['market']?.toString() ?? item['symbol']?.toString() ?? '-';
                   final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
@@ -3677,7 +3677,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
           if (validationHistory.isNotEmpty) ...[
-            const SizedBox(height: ),
+            const SizedBox(height: 20),
             sectionTitle('Deep validation history'),
             ...validationHistory.take(8).map((item) {
               final ok = item['verified'] == true;
@@ -3713,7 +3713,7 @@ class _HomePageState extends State<HomePage> {
 
     Widget tradesPage() {
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 1),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           sectionTitle('PAPER performance', subtitle: 'Genuine forward entries only'),
           Row(
@@ -3731,7 +3731,7 @@ class _HomePageState extends State<HomePage> {
               statTile('Balance', '$paperBalance', Icons.account_balance_wallet_outlined),
             ],
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Trade journal'),
           if (paperTrades.isEmpty)
             glassCard(
@@ -3789,7 +3789,7 @@ class _HomePageState extends State<HomePage> {
 
     Widget aiPage() {
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 1),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           sectionTitle('Jasong AI Copilot', subtitle: 'Advisory analysis of PAPER performance and risk evidence'),
           glassCard(
@@ -3837,7 +3837,7 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ],
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Learning thresholds', subtitle: 'Experimental PAPER eligibility — not win probabilities'),
           glassCard(
             child: const Column(
@@ -3852,7 +3852,7 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Live observation portfolio'),
           if (serverWatchers.isEmpty)
             glassCard(child: const Text('No active watchers loaded.', style: TextStyle(color: Colors.white54)))
@@ -3870,7 +3870,7 @@ class _HomePageState extends State<HomePage> {
           systemOverview?['overall_status']?.toString() ??
           (autoDashboard != null ? 'ONLINE' : 'CHECKING');
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 1),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           sectionTitle('Trading preferences'),
           glassCard(
@@ -3918,7 +3918,7 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('Auto Manager'),
           glassCard(
             glow: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
@@ -3954,7 +3954,7 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
-          const SizedBox(height: ),
+          const SizedBox(height: 20),
           sectionTitle('System health'),
           glassCard(
             child: Column(
