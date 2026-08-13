@@ -1,4 +1,3 @@
-
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -81,6 +80,97 @@ PROFILES = {
     name: replace(profile, min_confidence=PAPER_NORMAL_MIN_CONFIDENCE)
     for name, profile in PROFILES.items()
 }
+
+
+# ============================================================
+# V6.6 AI40-ONLY AUTONOMOUS PAPER LEARNING POLICY
+# ============================================================
+class AI40OnlyLearningTradeEngine(V64LearningTradeEngine):
+    """PAPER-only learning engine that requires the AI40 path to enter.
+
+    The inherited V6.6 learning engine already handles candidate watchers,
+    paper stake sizing, timed settlement, P&L, persistence, shadow evidence
+    and learning statistics. This override changes only entry eligibility:
+
+      * BUY/SELL live direction must match the candidate direction.
+      * Directional model-AI confidence must be at least 40%.
+      * Normal N30 confidence alone can no longer open an AI-learning trade.
+
+    No broker execution is enabled.
+    """
+
+    def _entry_class(
+        self,
+        watcher: Dict[str, object],
+        live: Dict[str, object],
+    ) -> Dict[str, object]:
+        decision = super()._entry_class(
+            watcher,
+            live,
+        )
+
+        verified = bool(
+            watcher.get("verified")
+        )
+        experimental = bool(
+            watcher.get("experimental")
+        )
+        trade_eligible = bool(
+            watcher.get(
+                "trade_eligible",
+                verified or experimental,
+            )
+        )
+
+        direction_match = bool(
+            decision.get("direction_match")
+        )
+        ai_pass = bool(
+            decision.get("ai_pass")
+        )
+
+        if (
+            trade_eligible
+            and direction_match
+            and ai_pass
+        ):
+            return {
+                **decision,
+                "class": (
+                    "EM"
+                    if experimental
+                    else "M"
+                ),
+                "enter": True,
+                "reason": (
+                    "AI40 autonomous PAPER path: "
+                    "live direction agrees and directional "
+                    "model-AI confidence is >=40%"
+                ),
+            }
+
+        reason = str(
+            decision.get("reason")
+            or "AI40 entry requirements not met"
+        )
+
+        if (
+            trade_eligible
+            and direction_match
+            and not ai_pass
+        ):
+            reason = (
+                "AI40 autonomous PAPER path rejected: "
+                "direction agrees but directional model-AI "
+                "confidence is below 40%"
+            )
+
+        return {
+            **decision,
+            "class": "S",
+            "enter": False,
+            "reason": reason,
+        }
 
 # ============================================================
 # JASONG AI TRADER V6.5
@@ -3430,12 +3520,12 @@ def _v55_validate_candidate(
     }
 
 
-V64_LEARNING_ENGINE = V64LearningTradeEngine(
+V64_LEARNING_ENGINE = AI40OnlyLearningTradeEngine(
     signal_func=_v63_adaptive_live_signal,
     price_func=_v53_latest_price,
     state_store=V61_STATE_STORE,
     max_watchers=6,
-    max_open_trades=3,
+    max_open_trades=1,
     watcher_refresh_seconds=30,
     starting_balance=10000.0,
     payout=0.80,
@@ -3477,7 +3567,7 @@ def _v62_ensure_auto_manager() -> None:
             payout=float(state.get("payout", 0.80) or 0.80),
             scan_interval_minutes=2,
             target_active_watchers=6,
-            scan_top_n=20,
+            scan_top_n=9,
         )
         V55_AUTO_MANAGER.start_thread()
 
@@ -3630,7 +3720,7 @@ def start_auto_manager(
     payout: float = 0.80,
     scan_interval_minutes: int = 3,
     target_active_watchers: int = 6,
-    scan_top_n: int = 20,
+    scan_top_n: int = 9,
 ):
     validate_risk_mode(
         risk_mode
@@ -4605,6 +4695,118 @@ def v64_learning_enable():
 @app.post("/v64/learning/pause")
 def v64_learning_pause():
     return V64_LEARNING_ENGINE.pause()
+
+
+# ============================================================
+# V6.6 AI40 AUTONOMOUS PAPER LEARNING API
+# ============================================================
+@app.get("/ai-learning/status")
+def ai_learning_status():
+    return {
+        "mode": "AI40_AUTONOMOUS_PAPER",
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "learning": V64_LEARNING_ENGINE.status(),
+        "manager": V55_AUTO_MANAGER.status(),
+    }
+
+
+@app.get("/ai-learning/trades")
+def ai_learning_trades(
+    limit: int = 100,
+):
+    return V64_LEARNING_ENGINE.trades(
+        limit=limit
+    )
+
+
+@app.post("/ai-learning/start")
+def ai_learning_start():
+    learning = V64_LEARNING_ENGINE.enable()
+
+    manager = V55_AUTO_MANAGER.status()
+
+    if not bool(
+        manager.get("enabled", False)
+    ):
+        V55_AUTO_MANAGER.enable(
+            risk_mode=str(
+                manager.get(
+                    "risk_mode",
+                    "Balanced",
+                )
+            ),
+            starting_balance=float(
+                manager.get(
+                    "starting_balance",
+                    10000.0,
+                )
+                or 10000.0
+            ),
+            payout=float(
+                manager.get(
+                    "payout",
+                    0.80,
+                )
+                or 0.80
+            ),
+            scan_interval_minutes=2,
+            target_active_watchers=6,
+            scan_top_n=9,
+        )
+
+    V55_AUTO_MANAGER.start_thread()
+    V64_LEARNING_ENGINE.start()
+
+    return {
+        "status": "AI_LEARNING_ENABLED",
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "learning": V64_LEARNING_ENGINE.status(),
+        "manager": V55_AUTO_MANAGER.status(),
+    }
+
+
+@app.post("/ai-learning/run-now")
+def ai_learning_run_now():
+    # Queue a fresh Auto Manager discovery/validation cycle. Completed
+    # validations are automatically submitted to V64_LEARNING_ENGINE.
+    queued = V55_AUTO_MANAGER.queue_run(
+        source="ai_learning",
+    )
+
+    # Also evaluate any learning watchers already available right now.
+    learning = V64_LEARNING_ENGINE.tick()
+
+    return {
+        "status": (
+            "AI_LEARNING_RUN_QUEUED"
+            if queued.get("accepted")
+            else "AI_LEARNING_SCAN_ALREADY_RUNNING"
+        ),
+        "accepted": bool(
+            queued.get("accepted", False)
+        ),
+        "job_id": queued.get("job_id"),
+        "job": queued.get("job"),
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "learning": learning,
+        "manager": V55_AUTO_MANAGER.status(),
+    }
+
+
+@app.post("/ai-learning/stop")
+def ai_learning_stop():
+    learning = V64_LEARNING_ENGINE.pause()
+
+    return {
+        "status": "AI_LEARNING_PAUSED",
+        "paper_only": True,
+        "broker_execution_enabled": False,
+        "learning": learning,
+        "manager": V55_AUTO_MANAGER.status(),
+    }
 
 
 @app.get("/v64/learning-universe")
