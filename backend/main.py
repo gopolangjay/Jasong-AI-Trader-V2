@@ -5319,6 +5319,200 @@ def _v66_ai_learning_cycle() -> dict:
 
 
 # ============================================================
+# V6.6.4 OVERNIGHT IG DEMO CONTROL
+# ============================================================
+
+def _v664_overnight_demo_snapshot() -> dict:
+    """Combined mobile control-plane status for DEMO-only overnight learning."""
+    manager = V55_AUTO_MANAGER.status()
+    learning = V64_LEARNING_ENGINE.status()
+    ig_demo = IG_DEMO_MIRROR.status()
+    broker = dict(ig_demo.get("broker") or {})
+
+    environment = str(broker.get("environment") or "").upper()
+    demo_only = bool(
+        environment == "DEMO"
+        and broker.get("demo_execution") is True
+        and broker.get("live_money_execution") is not True
+        and ig_demo.get("live_money_execution") is not True
+        and learning.get("live_execution") is not True
+    )
+
+    manager_enabled = bool(manager.get("enabled"))
+    learning_enabled = bool(learning.get("enabled"))
+    mirror_enabled = bool(ig_demo.get("enabled"))
+    phase_complete = bool(ig_demo.get("phase_complete"))
+    internal_open = int(learning.get("open_trades") or 0)
+    broker_open = int(ig_demo.get("open_broker_positions") or 0)
+
+    if phase_complete:
+        run_state = "PHASE_COMPLETE"
+    elif demo_only and manager_enabled and learning_enabled and mirror_enabled:
+        run_state = "ACTIVE"
+    elif (not manager_enabled) and (internal_open > 0 or broker_open > 0):
+        run_state = "DRAINING"
+    else:
+        run_state = "PAUSED"
+
+    trade_payload = V64_LEARNING_ENGINE.trades(limit=50)
+    trade_rows = [
+        dict(item)
+        for item in trade_payload.get("trades", [])
+        if isinstance(item, dict)
+    ]
+    current_trade = next(
+        (
+            item for item in trade_rows
+            if str(item.get("status") or "").upper() == "OPEN"
+        ),
+        None,
+    )
+    latest_settled = next(
+        (
+            item for item in trade_rows
+            if str(item.get("status") or "").upper() == "CLOSED"
+        ),
+        None,
+    )
+
+    return {
+        "version": "6.6.4-OVERNIGHT-DEMO",
+        "status": run_state,
+        "demo_only": demo_only,
+        "safe_to_run": bool(
+            demo_only
+            and broker.get("configured") is True
+            and broker.get("connected") is True
+        ),
+        "scanner_universe": "CURATED_LEARNING_FX",
+        "risk_mode": str(manager.get("risk_mode") or "Balanced"),
+        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
+        "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
+        "summary": {
+            "phase_target": int(ig_demo.get("phase_target") or 10),
+            "phase_accepted_trades": int(ig_demo.get("phase_accepted_trades") or 0),
+            "phase_remaining": int(ig_demo.get("phase_remaining") or 0),
+            "phase_complete": phase_complete,
+            "active_watchers": int(learning.get("active_watchers") or 0),
+            "max_watchers": int(learning.get("max_watchers") or 0),
+            "internal_open_trades": internal_open,
+            "max_internal_open_trades": int(learning.get("max_open_trades") or 0),
+            "open_broker_positions": broker_open,
+            "max_broker_positions": int(ig_demo.get("max_open_positions") or 0),
+            "paper_balance": float(learning.get("paper_balance") or 0.0),
+            "wins": int((learning.get("actual") or {}).get("wins") or 0),
+            "losses": int((learning.get("actual") or {}).get("losses") or 0),
+            "win_rate_pct": float((learning.get("actual") or {}).get("win_rate_pct") or 0.0),
+            "total_pnl": float((learning.get("actual") or {}).get("total_pnl") or 0.0),
+        },
+        "current_trade": current_trade,
+        "latest_settled_trade": latest_settled,
+        "manager": manager,
+        "learning": learning,
+        "ig_demo": ig_demo,
+        "environment": "DEMO",
+        "live_money_execution": False,
+    }
+
+
+@app.get("/overnight-demo/status")
+def overnight_demo_status():
+    return _v664_overnight_demo_snapshot()
+
+
+@app.post("/overnight-demo/start")
+def overnight_demo_start(
+    risk_mode: str = "Balanced",
+    starting_balance: float = 10000.0,
+    payout: float = 0.80,
+):
+    """Start the autonomous Phase-1 workflow, hard locked to IG DEMO."""
+    validate_risk_mode(risk_mode)
+    validate_balance(starting_balance)
+
+    try:
+        broker = IG_DEMO_BROKER.connect()
+    except IGDemoError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if (
+        str(broker.get("environment") or "").upper() != "DEMO"
+        or broker.get("demo_execution") is not True
+        or broker.get("live_money_execution") is True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Overnight mode refused: broker is not hard-locked to IG DEMO.",
+        )
+
+    V64_LEARNING_ENGINE.enable()
+    V64_LEARNING_ENGINE.start()
+
+    V55_AUTO_MANAGER.enable(
+        risk_mode=risk_mode,
+        starting_balance=starting_balance,
+        payout=payout,
+        scan_interval_minutes=2,
+        target_active_watchers=6,
+        scan_top_n=9,
+    )
+    V55_AUTO_MANAGER.start_thread()
+
+    IG_DEMO_MIRROR.set_enabled(True)
+    IG_DEMO_MIRROR.start()
+
+    queued = V55_AUTO_MANAGER.queue_run(
+        source="overnight-demo",
+    )
+
+    result = _v664_overnight_demo_snapshot()
+    result["launch_job"] = queued
+    result["message"] = (
+        "Overnight IG DEMO mode started. The backend will keep scanning, "
+        "validating, learning and mirroring qualifying trades while the app is closed."
+    )
+    return result
+
+
+@app.post("/overnight-demo/stop")
+def overnight_demo_stop():
+    """Stop NEW overnight entries while allowing any current DEMO trade to settle."""
+    V55_AUTO_MANAGER.disable()
+
+    # Remove learning watchers so no new internal entry can be opened while
+    # an already-open learning/IG DEMO position is allowed to settle safely.
+    try:
+        with V64_LEARNING_ENGINE._lock:
+            V64_LEARNING_ENGINE._state["watchers"] = []
+        V64_LEARNING_ENGINE._persist()
+    except Exception:
+        pass
+
+    learning = V64_LEARNING_ENGINE.status()
+    ig_demo = IG_DEMO_MIRROR.status()
+    internal_open = int(learning.get("open_trades") or 0)
+    broker_open = int(ig_demo.get("open_broker_positions") or 0)
+
+    if internal_open == 0 and broker_open == 0:
+        V64_LEARNING_ENGINE.pause()
+        IG_DEMO_MIRROR.set_enabled(False)
+        message = "Overnight IG DEMO mode stopped. No positions are open."
+    else:
+        # Keep learning + mirror alive only to settle/close current DEMO trades.
+        V64_LEARNING_ENGINE.enable()
+        IG_DEMO_MIRROR.set_enabled(True)
+        IG_DEMO_MIRROR.start()
+        message = (
+            "New overnight entries stopped. Existing DEMO positions will be "
+            "allowed to settle and close automatically."
+        )
+
+    result = _v664_overnight_demo_snapshot()
+    result["message"] = message
+    return result
+
+
+# ============================================================
 # IG DEMO BROKER API
 # ============================================================
 
