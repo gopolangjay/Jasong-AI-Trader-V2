@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 import os
 import threading
 import time
@@ -59,6 +60,26 @@ class IGDemoBroker:
             minimum=3.0,
         )
 
+        # IG documents a per-account non-trading REST allowance. Keep our
+        # own ceiling below IG's default so scans + market lookups cannot
+        # starve broker execution with HTTP 403 account-allowance errors.
+        self.nontrading_rpm = int(
+            max(
+                5,
+                min(
+                    25,
+                    float(
+                        os.getenv(
+                            "IG_DEMO_NONTRADING_RPM",
+                            "20",
+                        )
+                    ),
+                ),
+            )
+        )
+        self._nontrading_times = deque()
+        self._rate_lock = threading.RLock()
+
         self._lock = threading.RLock()
         self._session: Optional[_Session] = None
         self._market_cache: Dict[str, Dict[str, Any]] = {}
@@ -115,10 +136,37 @@ class IGDemoBroker:
                     else None
                 ),
                 "default_size": self.default_size,
+                "nontrading_rpm_guard": self.nontrading_rpm,
                 "last_error": self._last_error,
                 "live_money_execution": False,
                 "demo_execution": True,
             }
+
+    def _wait_for_nontrading_slot(self) -> None:
+        """Throttle authenticated GET traffic below IG's account allowance."""
+        while True:
+            now = time.time()
+            wait_for = 0.0
+
+            with self._rate_lock:
+                while (
+                    self._nontrading_times
+                    and now - self._nontrading_times[0] >= 60.0
+                ):
+                    self._nontrading_times.popleft()
+
+                if len(self._nontrading_times) < self.nontrading_rpm:
+                    self._nontrading_times.append(now)
+                    return
+
+                wait_for = max(
+                    0.25,
+                    60.0 - (
+                        now - self._nontrading_times[0]
+                    ) + 0.15,
+                )
+
+            time.sleep(wait_for)
 
     def _base_headers(
         self,
@@ -131,7 +179,7 @@ class IGDemoBroker:
             "Content-Type": "application/json",
             "Accept": "application/json; charset=UTF-8",
             "Version": str(version),
-            "User-Agent": "Jasong-AI-Trader/6.6.IG-DEMO",
+            "User-Agent": "Jasong-AI-Trader/6.6.6-IG-DEMO",
         }
 
         if authenticated:
@@ -179,11 +227,16 @@ class IGDemoBroker:
         if extra_headers:
             headers.update(extra_headers)
 
+        clean_method = method.upper()
+
+        if authenticated and clean_method == "GET":
+            self._wait_for_nontrading_slot()
+
         req = urlrequest.Request(
             url=url,
             data=self._json_bytes(payload),
             headers=headers,
-            method=method.upper(),
+            method=clean_method,
         )
 
         try:
@@ -464,6 +517,10 @@ class IGDemoBroker:
         if cached and now - cached_at < self._market_cache_ttl:
             return dict(cached)
 
+        # Start with the exact human FX pair. IG market search is fuzzy, and
+        # querying three variants for every scan caused unnecessary REST bursts.
+        # Only fall back to compact/spaced forms when the exact query returns
+        # nothing usable.
         search_terms = [
             f"{base}/{quote}",
             clean,
@@ -472,7 +529,7 @@ class IGDemoBroker:
 
         rows = []
         seen_epics = set()
-        for term in search_terms:
+        for term_index, term in enumerate(search_terms):
             response = self._request(
                 "GET",
                 "/markets",
@@ -486,6 +543,11 @@ class IGDemoBroker:
                 if epic and epic not in seen_epics:
                     rows.append(dict(row))
                     seen_epics.add(epic)
+
+            # The exact slash query normally returns the correct FX family.
+            # Avoid two more account-allowance-consuming calls when it does.
+            if rows and term_index == 0:
+                break
 
         if not rows:
             raise IGDemoError(
