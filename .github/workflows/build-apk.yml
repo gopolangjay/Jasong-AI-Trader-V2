@@ -91,13 +91,16 @@ jobs:
 
       # ============================================================
       # 5. VERIFY PROJECT STRUCTURE
+      #
+      # Do NOT require gradlew here.
+      # The wrapper is generated later in this workflow.
       # ============================================================
       - name: Verify Flutter Android project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Checking required project files..."
+          echo "Checking required Flutter/Android project files..."
 
           test -f mobile/pubspec.yaml || {
             echo "ERROR: mobile/pubspec.yaml missing"
@@ -129,18 +132,14 @@ jobs:
             exit 1
           }
 
-          test -f mobile/android/gradlew || {
-            echo "ERROR: mobile/android/gradlew missing"
-            exit 1
-          }
-
-          test -f mobile/android/gradle/wrapper/gradle-wrapper.properties || {
-            echo "ERROR: Gradle wrapper properties missing"
+          test -f mobile/android/gradle.properties || {
+            echo "ERROR: mobile/android/gradle.properties missing"
             exit 1
           }
 
           echo ""
-          echo "Project structure verified."
+          echo "Base Android project structure verified."
+          echo "Gradle wrapper will be generated next."
 
       # ============================================================
       # 6. CONFIGURE LOCAL.PROPERTIES
@@ -149,17 +148,13 @@ jobs:
         working-directory: mobile
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           FLUTTER_BIN="$(command -v flutter)"
           FLUTTER_SDK="$(cd "$(dirname "$FLUTTER_BIN")/.." && pwd)"
 
-          echo "Flutter SDK:"
-          echo "$FLUTTER_SDK"
-
-          echo ""
-          echo "Android SDK:"
-          echo "${ANDROID_HOME:-}"
+          echo "Flutter SDK: $FLUTTER_SDK"
+          echo "Android SDK: ${ANDROID_HOME:-not-set}"
 
           {
             echo "flutter.sdk=$FLUTTER_SDK"
@@ -170,36 +165,188 @@ jobs:
           } > android/local.properties
 
           echo ""
-          echo "local.properties created:"
+          echo "local.properties:"
           cat android/local.properties
 
       # ============================================================
-      # 7. PREPARE GRADLE WRAPPER
+      # 7. INSTALL GRADLE 8.13
+      #
+      # This provides the standalone Gradle command used to create
+      # the missing Gradle wrapper.
       # ============================================================
-      - name: Prepare Gradle wrapper
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.13"
+          cache-provider: basic
+
+      # ============================================================
+      # 8. GENERATE GRADLE 8.13 WRAPPER
+      #
+      # Generate the wrapper inside a clean temporary Gradle project
+      # instead of configuring the Android project before the wrapper
+      # exists.
+      # ============================================================
+      - name: Generate Android Gradle 8.13 wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ANDROID_DIR="$GITHUB_WORKSPACE/mobile/android"
+          TEMP_DIR="$(mktemp -d)"
+
+          cleanup() {
+            rm -rf "$TEMP_DIR"
+          }
+
+          trap cleanup EXIT
+
+          echo "============================================"
+          echo "GENERATING GRADLE 8.13 WRAPPER"
+          echo "============================================"
+          echo ""
+
+          echo "Installed Gradle:"
+          gradle --version
+
+          echo ""
+          echo "Android directory:"
+          echo "$ANDROID_DIR"
+
+          echo ""
+          echo "Temporary wrapper project:"
+          echo "$TEMP_DIR"
+
+          # ----------------------------------------------------------
+          # Create a completely empty Gradle bootstrap project.
+          # This avoids loading the Android Gradle Plugin while the
+          # wrapper itself is still missing.
+          # ----------------------------------------------------------
+
+          printf 'rootProject.name = "jasong-wrapper-bootstrap"\n' \
+            > "$TEMP_DIR/settings.gradle"
+
+          touch "$TEMP_DIR/build.gradle"
+
+          echo ""
+          echo "Generating wrapper..."
+
+          (
+            cd "$TEMP_DIR"
+
+            gradle wrapper \
+              --gradle-version 8.13 \
+              --distribution-type bin
+          )
+
+          # ----------------------------------------------------------
+          # Copy generated wrapper into Flutter Android project.
+          # ----------------------------------------------------------
+
+          echo ""
+          echo "Installing wrapper into Android project..."
+
+          mkdir -p "$ANDROID_DIR/gradle/wrapper"
+
+          cp "$TEMP_DIR/gradlew" \
+            "$ANDROID_DIR/gradlew"
+
+          cp "$TEMP_DIR/gradlew.bat" \
+            "$ANDROID_DIR/gradlew.bat"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.jar" \
+            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar"
+
+          cp "$TEMP_DIR/gradle/wrapper/gradle-wrapper.properties" \
+            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          chmod +x "$ANDROID_DIR/gradlew"
+
+          # ----------------------------------------------------------
+          # Verify every required wrapper file now exists.
+          # ----------------------------------------------------------
+
+          echo ""
+          echo "Verifying generated wrapper files..."
+
+          test -f "$ANDROID_DIR/gradlew" || {
+            echo "ERROR: gradlew was not generated."
+            exit 1
+          }
+
+          test -f "$ANDROID_DIR/gradlew.bat" || {
+            echo "ERROR: gradlew.bat was not generated."
+            exit 1
+          }
+
+          test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.jar" || {
+            echo "ERROR: gradle-wrapper.jar was not generated."
+            exit 1
+          }
+
+          test -f "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties" || {
+            echo "ERROR: gradle-wrapper.properties was not generated."
+            exit 1
+          }
+
+          echo ""
+          echo "All Gradle wrapper files generated successfully."
+
+          echo ""
+          echo "Wrapper configuration:"
+          cat "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          # ----------------------------------------------------------
+          # Confirm wrapper is explicitly using Gradle 8.13.
+          # ----------------------------------------------------------
+
+          grep -F \
+            "gradle-8.13-bin.zip" \
+            "$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties" || {
+              echo "ERROR: Wrapper is not configured for Gradle 8.13."
+              exit 1
+            }
+
+          echo ""
+          echo "Gradle 8.13 wrapper configuration confirmed."
+
+          # ----------------------------------------------------------
+          # Execute generated wrapper.
+          # ----------------------------------------------------------
+
+          echo ""
+          echo "Testing generated Gradle wrapper..."
+
+          cd "$ANDROID_DIR"
+
+          ./gradlew --version
+
+          echo ""
+          echo "============================================"
+          echo "GRADLE 8.13 WRAPPER READY"
+          echo "============================================"
+
+      # ============================================================
+      # 9. VALIDATE ANDROID GRADLE PROJECT
+      # ============================================================
+      - name: Validate Android Gradle project
         working-directory: mobile/android
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          chmod +x gradlew
-
-          echo "Gradle wrapper configuration:"
-          cat gradle/wrapper/gradle-wrapper.properties
-
-          echo ""
-          echo "Gradle version:"
-          ./gradlew --version
+          ./gradlew help \
+            --no-daemon \
+            --no-watch-fs \
+            --stacktrace
 
       # ============================================================
-      # 8. CONFIGURE GRADLE FOR GITHUB ACTIONS
-      #
-      # Disable persistent daemon and file-system watching.
+      # 10. CONFIGURE GRADLE FOR GITHUB ACTIONS
       # ============================================================
       - name: Configure Gradle for CI
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p "$HOME/.gradle"
 
@@ -212,7 +359,7 @@ jobs:
           cat "$HOME/.gradle/gradle.properties"
 
       # ============================================================
-      # 9. GET FLUTTER DEPENDENCIES
+      # 11. GET FLUTTER DEPENDENCIES
       # ============================================================
       - name: Get Flutter packages
         working-directory: mobile
@@ -222,7 +369,7 @@ jobs:
           flutter pub get
 
       # ============================================================
-      # 10. ANALYSE FLUTTER CODE
+      # 12 ANALYSE FLUTTER CODE
       # ============================================================
       - name: Analyse Flutter code
         working-directory: mobile
@@ -233,7 +380,7 @@ jobs:
             --no-fatal-warnings
 
       # ============================================================
-      # 11. CLEAN OLD BUILD STATE
+      # 13. CLEAN OLD BUILD STATE
       # ============================================================
       - name: Clean Flutter and Gradle build state
         working-directory: mobile
@@ -268,7 +415,7 @@ jobs:
           echo "Clean build state ready."
 
       # ============================================================
-      # 12. BUILD APK WITH FLUTTER
+      # 14. BUILD APK WITH FLUTTER
       #
       # Do not fail the whole workflow immediately.
       # We first inspect whether Flutter/Gradle created the APK.
@@ -292,7 +439,7 @@ jobs:
             2>&1 | tee flutter-build.log
 
       # ============================================================
-      # 13. SEARCH FOR FLUTTER APK
+      # 15. SEARCH FOR FLUTTER APK
       # ============================================================
       - name: Find Flutter APK
         id: find_flutter_apk
@@ -361,7 +508,7 @@ jobs:
           fi
 
       # ============================================================
-      # 14. DIRECT GRADLE FALLBACK
+      # 16. DIRECT GRADLE FALLBACK
       #
       # If Flutter does not produce/find an APK, run the Android
       # release task directly with full diagnostics.
@@ -392,7 +539,7 @@ jobs:
             2>&1 | tee ../gradle-build.log
 
       # ============================================================
-      # 15. RECOVER APK FROM GRADLE OUTPUT
+      # 17. RECOVER APK FROM GRADLE OUTPUT
       # ============================================================
       - name: Recover Gradle APK
         if: steps.find_flutter_apk.outputs.flutter_apk_found != 'true'
@@ -459,7 +606,7 @@ jobs:
           echo "APK successfully recovered from Gradle output."
 
       # ============================================================
-      # 16. VERIFY FINAL APK
+      # 18. VERIFY FINAL APK
       # ============================================================
       - name: Verify APK output
         working-directory: mobile
@@ -492,7 +639,7 @@ jobs:
           sha256sum "$APK"
 
       # ============================================================
-      # 17. UPLOAD APK
+      # 19. UPLOAD APK
       # ============================================================
       - name: Upload Jasong AI Trader APK
         uses: actions/upload-artifact@v4
@@ -503,7 +650,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 18. UPLOAD FLUTTER BUILD LOG
+      # 20. UPLOAD FLUTTER BUILD LOG
       #
       # Upload even when the APK build fails.
       # ============================================================
@@ -517,7 +664,7 @@ jobs:
           retention-days: 7
 
       # ============================================================
-      # 19. UPLOAD GRADLE BUILD LOG
+      # 21. UPLOAD GRADLE BUILD LOG
       #
       # Only exists if the fallback Gradle build was needed.
       # ============================================================
