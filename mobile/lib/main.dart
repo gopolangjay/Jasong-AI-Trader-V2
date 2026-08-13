@@ -140,6 +140,10 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? aiLearningLastRun;
   bool aiLearningBusy = false;
 
+  // V6.6.4 mobile control plane for server-side IG DEMO overnight runs.
+  Map<String, dynamic>? overnightDemoStatus;
+  bool overnightDemoBusy = false;
+
   final TextEditingController copilotController = TextEditingController();
   bool copilotBusy = false;
   String copilotAnswer = '';
@@ -1639,6 +1643,140 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> loadOvernightDemoStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/overnight-demo/status',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+      });
+    } catch (_) {
+      // Keep the last server-side overnight snapshot visible.
+    }
+  }
+
+  Future<void> startOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
+    }
+
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/overnight-demo/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+        },
+      );
+
+      final response = await postJsonOnce(
+        uri,
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+        networkStatus =
+            'Overnight IG DEMO is running on the server.';
+      });
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not start Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
+    }
+
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
+
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/overnight-demo/stop',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+        networkStatus = response['message']
+                ?.toString() ??
+            'Overnight DEMO stopped.';
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not stop Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
   Future<void> loadAiLearningStatus() async {
     try {
       final response = await getJson(
@@ -1846,6 +1984,7 @@ class _HomePageState extends State<HomePage> {
         loadAutoDashboard();
         loadSystemOverview();
         loadAiLearningStatus();
+        loadOvernightDemoStatus();
       },
     );
 
@@ -1859,6 +1998,10 @@ class _HomePageState extends State<HomePage> {
 
     Future.microtask(
       loadAiLearningStatus,
+    );
+
+    Future.microtask(
+      loadOvernightDemoStatus,
     );
   }
 
@@ -4379,6 +4522,68 @@ class _HomePageState extends State<HomePage> {
       final learningBalance =
           learning['paper_balance'] ?? 10000;
 
+      final overnight =
+          overnightDemoStatus ??
+              <String, dynamic>{};
+
+      final overnightSummary =
+          overnight['summary'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['summary'],
+                )
+              : <String, dynamic>{};
+
+      final overnightState =
+          overnight['status']
+                  ?.toString()
+                  .toUpperCase() ??
+              'PAUSED';
+
+      final overnightActive =
+          overnightState == 'ACTIVE';
+
+      final overnightDraining =
+          overnightState == 'DRAINING';
+
+      final overnightComplete =
+          overnightState ==
+              'PHASE_COMPLETE';
+
+      final phaseAccepted =
+          overnightSummary[
+                  'phase_accepted_trades'] ??
+              0;
+
+      final phaseTarget =
+          overnightSummary['phase_target'] ??
+              10;
+
+      final phaseRemaining =
+          overnightSummary[
+                  'phase_remaining'] ??
+              phaseTarget;
+
+      final brokerPositions =
+          overnightSummary[
+                  'open_broker_positions'] ??
+              0;
+
+      final maxBrokerPositions =
+          overnightSummary[
+                  'max_broker_positions'] ??
+              3;
+
+      final overnightWins =
+          overnightSummary['wins'] ?? 0;
+
+      final overnightLosses =
+          overnightSummary['losses'] ?? 0;
+
+      final overnightWinRate =
+          overnightSummary[
+                  'win_rate_pct'] ??
+              0.0;
+
       final aiTrades = paperTrades
           .where(
             (trade) =>
@@ -4668,6 +4873,269 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
+      Widget overnightDemoCard() {
+        Color stateColor;
+        IconData stateIcon;
+
+        if (overnightComplete) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.flag_circle_rounded;
+        } else if (overnightActive) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.nightlight_round;
+        } else if (overnightDraining) {
+          stateColor = Colors.amberAccent;
+          stateIcon = Icons.hourglass_bottom_rounded;
+        } else {
+          stateColor = Colors.white54;
+          stateIcon = Icons.bedtime_outlined;
+        }
+
+        final manager =
+            overnight['manager'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['manager'],
+                  )
+                : <String, dynamic>{};
+
+        final progressMessage =
+            manager['progress_message']
+                    ?.toString() ??
+                'Waiting for the next scan';
+
+        final currentTrade =
+            overnight['current_trade'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['current_trade'],
+                  )
+                : null;
+
+        return glassCard(
+          glow: stateColor,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: stateColor.withValues(
+                        alpha: .10,
+                      ),
+                      borderRadius:
+                          BorderRadius.circular(15),
+                    ),
+                    child: Icon(
+                      stateIcon,
+                      color: stateColor,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'OVERNIGHT IG DEMO',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          overnightActive
+                              ? 'Server-side autonomous demo trading is active'
+                              : overnightDraining
+                                  ? 'New entries stopped • current demo trade is settling'
+                                  : overnightComplete
+                                      ? 'Phase target reached • no more demo entries required'
+                                      : 'Ready for a server-side overnight run',
+                          style: const TextStyle(
+                            color:
+                                Colors.white60,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  pill(
+                    overnightState,
+                    color: stateColor,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  statTile(
+                    'Phase',
+                    '$phaseAccepted / $phaseTarget',
+                    Icons.flag_outlined,
+                    valueColor:
+                        overnightComplete
+                            ? Colors.greenAccent
+                            : Colors.white,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'IG positions',
+                    '$brokerPositions / $maxBrokerPositions',
+                    Icons.swap_horiz_rounded,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'W / L',
+                    '$overnightWins / $overnightLosses',
+                    Icons.fact_check_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Win rate',
+                    '${formatNumber(overnightWinRate, decimals: 1)}%',
+                    Icons.insights_rounded,
+                    valueColor:
+                        overnightWins > 0
+                            ? Colors.greenAccent
+                            : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(
+                    alpha: .035,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color:
+                        Colors.white.withValues(
+                      alpha: .05,
+                    ),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Scanner: ${overnight['scanner_universe'] ?? 'CURATED_LEARNING_FX'}',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w700,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      progressMessage,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Remaining Phase-1 entries: $phaseRemaining • AI floor ${formatNumber(overnight['ai_min_confidence_pct'] ?? aiFloor, decimals: 0)}%',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (currentTrade != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Current: ${currentTrade['symbol'] ?? currentTrade['market'] ?? '-'} '
+                  '${currentTrade['direction'] ?? ''} • '
+                  'closes in ${formatEpochCountdown(currentTrade['scheduled_close_at'] ?? currentTrade['settlement_due_at'])}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: overnightDemoBusy ||
+                              overnightComplete
+                          ? null
+                          : overnightActive ||
+                                  overnightDraining
+                              ? stopOvernightDemo
+                              : startOvernightDemo,
+                      icon: overnightDemoBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : Icon(
+                              overnightActive ||
+                                      overnightDraining
+                                  ? Icons.stop_circle_outlined
+                                  : Icons.play_circle_fill_rounded,
+                            ),
+                      label: Text(
+                        overnightDemoBusy
+                            ? 'Please wait...'
+                            : overnightActive ||
+                                    overnightDraining
+                                ? 'Stop new overnight entries'
+                                : 'START OVERNIGHT DEMO',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip:
+                        'Refresh overnight status',
+                    onPressed:
+                        loadOvernightDemoStatus,
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'DEMO ONLY • Live-money execution remains disabled. '
+                'The Render backend keeps running after the app is closed or the phone is locked.',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 10,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
       return ListView(
         padding:
             const EdgeInsets.fromLTRB(
@@ -4677,6 +5145,13 @@ class _HomePageState extends State<HomePage> {
           120,
         ),
         children: [
+          sectionTitle(
+            'Overnight Demo Mode',
+            subtitle:
+                'One-tap server-side IG DEMO learning • phone can be locked or closed',
+          ),
+          overnightDemoCard(),
+          const SizedBox(height: 22),
           sectionTitle(
             'Autonomous AI PAPER Learning',
             subtitle:
@@ -5275,7 +5750,7 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.5 • Midnight Glass', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.6.4 • Overnight DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -5288,6 +5763,7 @@ class _HomePageState extends State<HomePage> {
               await loadAutoDashboard();
               await loadSystemOverview();
               await loadAiLearningStatus();
+              await loadOvernightDemoStatus();
               await refreshServerWatchers();
             },
             icon: const Icon(Icons.refresh_rounded),
@@ -5300,6 +5776,7 @@ class _HomePageState extends State<HomePage> {
           await loadAutoDashboard();
           await loadSystemOverview();
           await loadAiLearningStatus();
+          await loadOvernightDemoStatus();
           await refreshServerWatchers();
           if (selectedTab == 0) {
             await refreshSignal();
