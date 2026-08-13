@@ -492,17 +492,22 @@ class IGDemoBroker:
                 f"IG DEMO has no market matching {base}/{quote}"
             )
 
+        def _letters(value: Any) -> str:
+            return "".join(
+                ch for ch in str(value or "").upper()
+                if ch.isalpha()
+            )
+
         def score(row: Dict[str, Any]) -> tuple:
             name = self._market_name(row)
             market_type = self._market_type(row)
             status = str(row.get("marketStatus") or "").upper()
+            epic = str(row.get("epic") or "").upper()
+            name_letters = _letters(name)
+            epic_letters = _letters(epic)
             exact_pair = (
-                f"{base}/{quote}" in name
-                or f"{base}{quote}" in name.replace(" ", "")
-                or (
-                    base in name
-                    and quote in name
-                )
+                name_letters.startswith(clean)
+                or clean in epic_letters
             )
             is_currency = (
                 "CURRENC" in market_type
@@ -512,9 +517,9 @@ class IGDemoBroker:
             is_tradeable = status == "TRADEABLE"
             is_dfb = str(row.get("expiry") or "").upper() in {"-", "DFB"}
             return (
+                int(exact_pair),
                 int(is_tradeable),
                 int(is_currency),
-                int(exact_pair),
                 int(is_dfb),
             )
 
@@ -549,6 +554,32 @@ class IGDemoBroker:
             if instrument_type and "CURRENC" not in instrument_type:
                 continue
 
+            # CRITICAL SAFETY CHECK:
+            # IG /markets search is fuzzy. Never execute a returned market
+            # unless its actual instrument metadata matches the requested FX pair.
+            instrument_name = str(
+                instrument.get("name")
+                or candidate.get("instrumentName")
+                or candidate.get("name")
+                or ""
+            )
+            market_id = str(instrument.get("marketId") or "")
+            chart_code = str(instrument.get("chartCode") or "")
+
+            name_letters = _letters(instrument_name)
+            market_id_letters = _letters(market_id)
+            chart_code_letters = _letters(chart_code)
+            epic_letters = _letters(epic)
+
+            exact_instrument_match = (
+                name_letters.startswith(clean)
+                or market_id_letters == clean
+                or chart_code_letters == clean
+                or clean in epic_letters
+            )
+            if not exact_instrument_match:
+                continue
+
             resolved = {
                 "symbol": f"{base}/{quote}",
                 "epic": epic,
@@ -557,13 +588,12 @@ class IGDemoBroker:
                     or candidate.get("expiry")
                     or "-"
                 ),
-                "name": (
-                    instrument.get("name")
-                    or candidate.get("instrumentName")
-                    or candidate.get("name")
-                ),
+                "name": instrument_name,
                 "instrument_type": instrument_type,
                 "market_status": status,
+                "ig_market_id": market_id or None,
+                "ig_chart_code": chart_code or None,
+                "exact_pair_match": True,
                 "details": details,
             }
             self._market_cache[cache_key] = resolved
@@ -571,7 +601,8 @@ class IGDemoBroker:
             return dict(resolved)
 
         raise IGDemoError(
-            f"IG DEMO market {base}/{quote} is not currently tradeable"
+            f"IG DEMO has no exact tradeable market for {base}/{quote}; "
+            "fuzzy market matches were rejected"
         )
 
     def market_details(self, epic: str) -> Dict[str, Any]:
@@ -768,7 +799,7 @@ class IGDemoBroker:
             if original_direction == "BUY"
             else "BUY"
         )
-        size = float(position.get("dealSize") or 0.0)
+        size = float(position.get("size") or position.get("dealSize") or 0.0)
         if size <= 0:
             raise IGDemoError(
                 f"Invalid IG DEMO open size for deal {deal_id}"
