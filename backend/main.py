@@ -3357,12 +3357,18 @@ V53_WATCHER_ENGINE.start()
 def _v62_next_fx_batch(
     batch_size: int = FX_DISCOVERY_BATCH_SIZE,
 ) -> dict[str, str]:
-    """Return the next rotating slice of the discovered FX universe."""
+    """Return the next rotating slice of the curated learning FX universe.
+
+    V6.6.4 IG-DEMO learning fix: use the existing curated learning universe
+    instead of the full provider universe. This removes unsupported exotic
+    currencies such as AED before expensive deep validation, while the IG
+    exact-market preflight remains the final execution gate.
+    """
 
     global _FX_DISCOVERY_OFFSET
 
     with _FX_DISCOVERY_LOCK:
-        universe = get_forex_universe()
+        universe = get_learning_universe()
 
         if not universe:
             return dict(CORE_MARKETS)
@@ -3443,12 +3449,12 @@ def _v55_scan_candidates(
     )
 
     universe_size = len(
-        get_forex_universe()
+        get_learning_universe()
     )
 
     for candidate in ranked:
         candidate["discovery_version"] = (
-            "V6.2_DYNAMIC_FX"
+            "V6.6.4_CURATED_IG_DEMO_FX"
         )
         candidate["discovery_universe_size"] = (
             universe_size
