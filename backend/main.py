@@ -4971,10 +4971,102 @@ def _v66_ai_learning_cycle() -> dict:
                 )
             )
 
-            # Use V64's own entry classifier so this decision is identical
-            # to the learning engine's PAPER logic.
+            # ---------------------------------------------------------
+            # V6.6.2 AI-LEARNING SHADOW PROMOTION
+            #
+            # Normal production logic intentionally keeps NO_TRADE
+            # candidates as SHADOW_WATCH and trade_eligible=False.
+            #
+            # For the PAPER-ONLY AI-learning experiment we allow a
+            # high-quality Auto Manager shadow candidate to be evaluated
+            # as an EXPERIMENTAL watcher, but only inside this request.
+            #
+            # The stored production watcher is NOT mutated and the normal
+            # verified/watch pipeline is NOT weakened.
+            # ---------------------------------------------------------
+            candidate_meta = (
+                watcher.get("candidate")
+                if isinstance(
+                    watcher.get("candidate"),
+                    dict,
+                )
+                else {}
+            )
+
+            smart_score = _ai_learning_candidate_score(
+                candidate_meta
+            )
+
+            quality_tier = str(
+                candidate_meta.get("quality_tier")
+                or ""
+            ).upper().strip()
+
+            quarantined = bool(
+                candidate_meta.get(
+                    "strategy_quarantined",
+                    False,
+                )
+            )
+
+            source_trade_eligible = bool(
+                watcher.get(
+                    "trade_eligible",
+                    False,
+                )
+            )
+
+            source_deep_status = str(
+                watcher.get(
+                    "deep_status"
+                )
+                or ""
+            ).upper().strip()
+
+            shadow_promotable = bool(
+                (not source_trade_eligible)
+                and (not quarantined)
+                and source_deep_status
+                    in {
+                        "NO_TRADE",
+                        "NOT_VERIFIED",
+                        "WATCH",
+                        "NEAR_VERIFIED",
+                    }
+                and (
+                    quality_tier
+                    in {
+                        "A+",
+                        "A",
+                    }
+                    or smart_score
+                    >= 90.0
+                )
+            )
+
+            evaluation_watcher = dict(
+                watcher
+            )
+
+            if shadow_promotable:
+                evaluation_watcher[
+                    "experimental"
+                ] = True
+                evaluation_watcher[
+                    "trade_eligible"
+                ] = True
+                evaluation_watcher[
+                    "deep_status"
+                ] = (
+                    "AI_LEARNING_SHADOW_PROMOTION"
+                )
+
+            # Use V64's own classifier. NORMAL_MIN_CONFIDENCE is
+            # deliberately disabled for this AI-learning engine, so a
+            # promoted shadow can open only through model-AI >= 40%
+            # with matching live direction. That produces EM.
             decision = V64_LEARNING_ENGINE._entry_class(
-                watcher,
+                evaluation_watcher,
                 live,
             )
 
@@ -4991,7 +5083,7 @@ def _v66_ai_learning_cycle() -> dict:
                 or "S"
             ).upper()
 
-            # AI-learning test accepts only M/EM.
+            # AI-learning experiment accepts only M/EM.
             passed = bool(
                 decision.get("enter")
                 and entry_class in {"M", "EM"}
@@ -5012,6 +5104,25 @@ def _v66_ai_learning_cycle() -> dict:
                 "direction_match": direction_match,
                 "ai40_pass": ai40_pass,
                 "entry_class": entry_class,
+                "source_trade_eligible":
+                    source_trade_eligible,
+                "source_deep_status":
+                    source_deep_status,
+                "quality_tier":
+                    quality_tier,
+                "smart_fast_score":
+                    smart_score,
+                "shadow_promotable":
+                    shadow_promotable,
+                "shadow_promoted_for_ai_learning":
+                    bool(
+                        shadow_promotable
+                        and entry_class
+                        in {
+                            "EM",
+                            "M",
+                        }
+                    ),
                 "passed": passed,
                 "reason": decision.get("reason"),
             })
@@ -5020,12 +5131,20 @@ def _v66_ai_learning_cycle() -> dict:
 
             if passed:
                 qualified.append({
-                    "watcher": watcher,
-                    "live": live,
-                    "decision": decision,
-                    "row": row,
-                    "model_ai": model_ai,
-                    "quant": quant,
+                    "watcher":
+                        evaluation_watcher,
+                    "source_watcher":
+                        watcher,
+                    "live":
+                        live,
+                    "decision":
+                        decision,
+                    "row":
+                        row,
+                    "model_ai":
+                        model_ai,
+                    "quant":
+                        quant,
                 })
 
         if not qualified:
@@ -5161,10 +5280,11 @@ def _v66_ai_learning_cycle() -> dict:
 @app.get("/ai-learning/status")
 def ai_learning_status():
     return {
-        "mode": "DIRECT_AI40_WATCHER_EVAL_V661",
+        "mode": "DIRECT_AI40_SHADOW_PROMOTION_V662",
         "paper_only": True,
         "broker_execution_enabled": False,
         "normal_path_disabled_for_ai_learning": True,
+        "shadow_promotion_for_ai_learning": True,
         "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
         "ai_min_confidence_pct":
             PAPER_AI_MIN_CONFIDENCE * 100.0,
