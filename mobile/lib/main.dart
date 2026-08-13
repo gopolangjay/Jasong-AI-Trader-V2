@@ -47,7 +47,7 @@ class JasongApp extends StatelessWidget {
         ),
         navigationBarTheme: NavigationBarThemeData(
           backgroundColor: const Color(0xFF0A151E),
-          indicatorColor: const Color(0xFF65E6D3).withOpacity(.16),
+          indicatorColor: const Color(0xFF65E6D3).withValues(alpha: .16),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             return TextStyle(
               fontSize: 11,
@@ -3689,14 +3689,14 @@ class _HomePageState extends State<HomePage> {
       return Container(
         padding: padding,
         decoration: BoxDecoration(
-          color: const Color(0xFF0E1A24).withOpacity(.94),
+          color: const Color(0xFF0E1A24).withValues(alpha: .94),
           borderRadius: BorderRadius.circular(22),
           border: Border.all(
-            color: glow?.withOpacity(.28) ?? const Color(0xFF18313C),
+            color: glow?.withValues(alpha: .28) ?? const Color(0xFF18313C),
           ),
           boxShadow: [
             BoxShadow(
-              color: (glow ?? Colors.black).withOpacity(.08),
+              color: (glow ?? Colors.black).withValues(alpha: .08),
               blurRadius: 26,
               offset: const Offset(0, 12),
             ),
@@ -3789,9 +3789,9 @@ class _HomePageState extends State<HomePage> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(
-          color: c.withOpacity(.12),
+          color: c.withValues(alpha: .12),
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: c.withOpacity(.20)),
+          border: Border.all(color: c.withValues(alpha: .20)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -3829,7 +3829,7 @@ class _HomePageState extends State<HomePage> {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: sideColor(direction).withOpacity(.12),
+                color: sideColor(direction).withValues(alpha: .12),
                 borderRadius: BorderRadius.circular(15),
               ),
               child: Icon(Icons.currency_exchange_rounded, color: sideColor(direction)),
@@ -3907,12 +3907,12 @@ class _HomePageState extends State<HomePage> {
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  cs.primary.withOpacity(.22),
+                  cs.primary.withValues(alpha: .22),
                   const Color(0xFF0D2630),
                   const Color(0xFF0B1620),
                 ],
               ),
-              border: Border.all(color: cs.primary.withOpacity(.25)),
+              border: Border.all(color: cs.primary.withValues(alpha: .25)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -5339,9 +5339,9 @@ class _MidnightValue extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.035),
+        color: Colors.white.withValues(alpha: .035),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: .05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5350,7 +5350,7 @@ class _MidnightValue extends StatelessWidget {
             label,
             style: const TextStyle(
               fontSize: 10,
-              color: Colors.white45,
+              color: Color(0x73FFFFFF),
             ),
           ),
           const SizedBox(height: 4),
@@ -5389,7 +5389,7 @@ class _MidnightRuleRow extends StatelessWidget {
           width: 34,
           height: 34,
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primary.withOpacity(.10),
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: .10),
             borderRadius: BorderRadius.circular(11),
           ),
           child: Icon(
