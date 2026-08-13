@@ -612,6 +612,64 @@ class IGDemoBroker:
             version=4,
         )
 
+    def historical_prices(
+        self,
+        symbol: str,
+        *,
+        resolution: str = "MINUTE_15",
+        num_points: int = 160,
+    ) -> Dict[str, Any]:
+        """Return IG DEMO historical candles for an exact FX pair.
+
+        Uses IG's DEMO-only /prices endpoint. Market resolution still goes
+        through the exact-pair safety check before any price request is made.
+        """
+        market = self.resolve_market(
+            symbol,
+            require_tradeable=False,
+        )
+
+        points = max(
+            1,
+            min(
+                int(num_points),
+                500,
+            ),
+        )
+
+        epic = str(
+            market.get("epic")
+            or ""
+        ).strip()
+
+        if not epic:
+            raise IGDemoError(
+                f"IG DEMO market has no EPIC for {symbol}"
+            )
+
+        response = self._request(
+            "GET",
+            (
+                f"/prices/"
+                f"{urlparse.quote(epic, safe='')}/"
+                f"{urlparse.quote(str(resolution), safe='')}/"
+                f"{points}"
+            ),
+            version=2,
+        )
+
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "symbol": market.get("symbol"),
+            "epic": epic,
+            "resolution": str(resolution),
+            "requested_points": points,
+            "prices": response.get("prices") or [],
+            "metadata": response.get("metadata") or {},
+            "live_money_execution": False,
+        }
+
     @staticmethod
     def _default_currency(instrument: Dict[str, Any]) -> str:
         currencies = instrument.get("currencies") or []
@@ -799,7 +857,7 @@ class IGDemoBroker:
             if original_direction == "BUY"
             else "BUY"
         )
-        size = float(position.get("size") or position.get("dealSize") or 0.0)
+        size = float(position.get("dealSize") or 0.0)
         if size <= 0:
             raise IGDemoError(
                 f"Invalid IG DEMO open size for deal {deal_id}"
