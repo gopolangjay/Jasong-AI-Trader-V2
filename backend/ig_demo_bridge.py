@@ -52,6 +52,18 @@ class IGDemoMirror:
             minimum=5,
             maximum=300,
         )
+        self.retry_seconds = self._int_env(
+            "IG_DEMO_RETRY_SECONDS",
+            65,
+            minimum=15,
+            maximum=300,
+        )
+        self.max_open_retries = self._int_env(
+            "IG_DEMO_MAX_OPEN_RETRIES",
+            8,
+            minimum=1,
+            maximum=20,
+        )
 
         default_state = (
             "/var/data/jasong_ig_demo_mirror.json"
@@ -69,7 +81,7 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.6.3-IG-DEMO",
+            "version": "6.6.6-IG-DEMO",
             "mirrors": {},
             "last_sync_at": None,
             "last_error": None,
@@ -225,7 +237,7 @@ class IGDemoMirror:
                 reverse=True,
             )
             return {
-                "version": "6.6.3-IG-DEMO",
+                "version": "6.6.6-IG-DEMO",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -240,6 +252,8 @@ class IGDemoMirror:
                 "max_open_positions": self.max_open_positions,
                 "open_broker_positions": self._open_count(),
                 "poll_seconds": self.poll_seconds,
+                "retry_seconds": self.retry_seconds,
+                "max_open_retries": self.max_open_retries,
                 "last_sync_at": self._state.get("last_sync_at"),
                 "last_error": self._state.get("last_error"),
                 "mirrors": mirrors[:50],
@@ -318,6 +332,117 @@ class IGDemoMirror:
             and time.time() >= due
         )
 
+    @staticmethod
+    def _retryable_open_error(message: str) -> bool:
+        clean = str(message or "").lower()
+        return any(
+            token in clean
+            for token in (
+                "exceeded-account-allowance",
+                "exceeded-api-key-allowance",
+                "http 429",
+                "http 500",
+                "http 502",
+                "http 503",
+                "http 504",
+                "network error",
+                "timeout",
+            )
+        )
+
+    def _submit_open(
+        self,
+        trade: Dict[str, Any],
+        mirror: Dict[str, Any],
+    ) -> None:
+        trade_id = str(
+            trade.get("trade_id")
+            or mirror.get("trade_id")
+            or ""
+        )
+        symbol = str(
+            trade.get("symbol")
+            or trade.get("market")
+            or mirror.get("symbol")
+            or ""
+        )
+        direction = str(
+            trade.get("direction")
+            or mirror.get("direction")
+            or ""
+        ).upper()
+
+        mirror["broker_status"] = "SUBMITTING"
+        mirror["last_attempt_at"] = time.time()
+        mirror["open_attempts"] = int(
+            mirror.get("open_attempts")
+            or 0
+        ) + 1
+        self._persist()
+
+        try:
+            result = self.broker.open_market_position(
+                symbol=symbol,
+                direction=direction,
+                deal_reference=(
+                    f"JASONG_{trade_id.replace('-', '')[:20]}"
+                ),
+            )
+
+            mirror["open_result"] = result
+            mirror["ig_deal_id"] = result.get(
+                "dealId"
+            )
+            mirror["ig_deal_reference"] = result.get(
+                "dealReference"
+            )
+            mirror["ig_epic"] = result.get("epic")
+            mirror["ig_size"] = result.get("size")
+            mirror["broker_entry_level"] = result.get(
+                "level"
+            )
+            mirror["broker_status"] = (
+                "OPEN"
+                if result.get("dealStatus") != "REJECTED"
+                else "REJECTED"
+            )
+            mirror["opened_at"] = time.time()
+            mirror["last_error"] = None
+            mirror["next_retry_at"] = None
+
+        except Exception as exc:
+            message = (
+                f"open: {type(exc).__name__}: {exc}"
+            )
+            mirror["last_error"] = message
+
+            attempts = int(
+                mirror.get("open_attempts")
+                or 0
+            )
+            retryable = self._retryable_open_error(
+                message
+            )
+
+            if (
+                retryable
+                and attempts < self.max_open_retries
+                and str(
+                    trade.get("status")
+                    or ""
+                ).upper() == "OPEN"
+            ):
+                mirror["broker_status"] = "RETRY_WAIT"
+                mirror["next_retry_at"] = (
+                    time.time()
+                    + self.retry_seconds
+                )
+            else:
+                mirror["broker_status"] = "ERROR"
+                mirror["next_retry_at"] = None
+
+        self._persist()
+
     def sync_once(self) -> Dict[str, Any]:
         with self._lock:
             self._state["last_sync_at"] = time.time()
@@ -381,6 +506,9 @@ class IGDemoMirror:
                     )
 
         # 2. Mirror newly opened Jasong AI learning trades.
+        #    Existing transient errors are retried automatically. This is
+        #    important because an IG account-allowance 403 is temporary and
+        #    must not permanently strand an otherwise-valid AI trade.
         if not self.phase_complete():
             for trade in trades:
                 if self.phase_complete():
@@ -389,13 +517,79 @@ class IGDemoMirror:
                     break
 
                 trade_id = str(
-                    trade.get("trade_id") or ""
+                    trade.get("trade_id")
+                    or ""
                 )
                 if not trade_id:
                     continue
-                if trade_id in self._mirrors():
+
+                trade_status = str(
+                    trade.get("status")
+                    or ""
+                ).upper()
+                if trade_status != "OPEN":
                     continue
-                if str(trade.get("status") or "").upper() != "OPEN":
+
+                existing = self._mirrors().get(
+                    trade_id
+                )
+
+                if existing is not None:
+                    broker_status = str(
+                        existing.get("broker_status")
+                        or ""
+                    ).upper()
+
+                    if broker_status in {
+                        "OPEN",
+                        "CLOSED",
+                        "REJECTED",
+                        "SUBMITTING",
+                    }:
+                        continue
+
+                    # Upgrade old persisted ERROR records from V6.6.5 when
+                    # their failure was the temporary IG allowance condition.
+                    last_error = str(
+                        existing.get("last_error")
+                        or ""
+                    )
+                    attempts = int(
+                        existing.get("open_attempts")
+                        or 0
+                    )
+
+                    if (
+                        broker_status == "ERROR"
+                        and self._retryable_open_error(
+                            last_error
+                        )
+                        and attempts < self.max_open_retries
+                    ):
+                        existing["broker_status"] = "RETRY_WAIT"
+                        existing["next_retry_at"] = time.time()
+
+                    if str(
+                        existing.get("broker_status")
+                        or ""
+                    ).upper() != "RETRY_WAIT":
+                        continue
+
+                    try:
+                        next_retry = float(
+                            existing.get("next_retry_at")
+                            or 0.0
+                        )
+                    except Exception:
+                        next_retry = 0.0
+
+                    if time.time() < next_retry:
+                        continue
+
+                    self._submit_open(
+                        trade,
+                        existing,
+                    )
                     continue
 
                 symbol = str(
@@ -412,7 +606,9 @@ class IGDemoMirror:
                     "trade_id": trade_id,
                     "symbol": symbol,
                     "direction": direction,
-                    "entry_class": trade.get("entry_class"),
+                    "entry_class": trade.get(
+                        "entry_class"
+                    ),
                     "model_ai_confidence": trade.get(
                         "model_ai_confidence"
                     ),
@@ -423,46 +619,19 @@ class IGDemoMirror:
                         "scheduled_close_at"
                     ),
                     "created_at": time.time(),
-                    "broker_status": "SUBMITTING",
+                    "broker_status": "NEW",
                     "environment": "DEMO",
                     "live_money_execution": False,
+                    "open_attempts": 0,
+                    "next_retry_at": None,
                 }
                 self._mirrors()[trade_id] = mirror
                 self._persist()
 
-                try:
-                    result = self.broker.open_market_position(
-                        symbol=symbol,
-                        direction=direction,
-                        deal_reference=(
-                            f"JASONG_{trade_id.replace('-', '')[:20]}"
-                        ),
-                    )
-                    mirror["open_result"] = result
-                    mirror["ig_deal_id"] = result.get(
-                        "dealId"
-                    )
-                    mirror["ig_deal_reference"] = result.get(
-                        "dealReference"
-                    )
-                    mirror["ig_epic"] = result.get("epic")
-                    mirror["ig_size"] = result.get("size")
-                    mirror["broker_entry_level"] = result.get(
-                        "level"
-                    )
-                    mirror["broker_status"] = (
-                        "OPEN"
-                        if result.get("dealStatus") != "REJECTED"
-                        else "REJECTED"
-                    )
-                    mirror["opened_at"] = time.time()
-                    mirror["last_error"] = None
-
-                except Exception as exc:
-                    mirror["broker_status"] = "ERROR"
-                    mirror["last_error"] = (
-                        f"open: {type(exc).__name__}: {exc}"
-                    )
+                self._submit_open(
+                    trade,
+                    mirror,
+                )
 
         with self._lock:
             self._state["last_error"] = None
