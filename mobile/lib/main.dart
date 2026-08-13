@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -46,7 +47,7 @@ class JasongApp extends StatelessWidget {
         ),
         navigationBarTheme: NavigationBarThemeData(
           backgroundColor: const Color(0xFF0A151E),
-          indicatorColor: const Color(0xFF65E6D3).withValues(alpha: .16),
+          indicatorColor: const Color(0xFF65E6D3).withOpacity(.16),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             return TextStyle(
               fontSize: 11,
@@ -132,6 +133,13 @@ class _HomePageState extends State<HomePage> {
 
   List<Map<String, dynamic>> paperTrades = [];
 
+  // V6.6.2 autonomous AI PAPER-learning monitor.
+  Map<String, dynamic>? aiLearningStatus;
+  Map<String, dynamic>? aiLearningSnapshot;
+  List<Map<String, dynamic>> aiLearningWatchers = [];
+  Map<String, dynamic>? aiLearningLastRun;
+  bool aiLearningBusy = false;
+
   final TextEditingController copilotController = TextEditingController();
   bool copilotBusy = false;
   String copilotAnswer = '';
@@ -145,7 +153,6 @@ class _HomePageState extends State<HomePage> {
 
   Timer? watcherPollTimer;
   Timer? autoDashboardPollTimer;
-  Timer? signalPollTimer;
 
   bool watcherBusy = false;
   bool autoManagerBusy = false;
@@ -763,17 +770,15 @@ class _HomePageState extends State<HomePage> {
   // REFRESH LIVE SIGNAL
   // =========================================================
 
-  Future<void> refreshSignal({bool silent = false}) async {
-    if (busy && !silent) {
+  Future<void> refreshSignal() async {
+    if (busy) {
       return;
     }
 
-    if (!silent) {
-      setState(() {
-        busy = true;
-        error = null;
-      });
-    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
 
     try {
       final uri = Uri.parse(
@@ -805,13 +810,11 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      if (!silent) {
-        setState(() {
-          error = e.toString();
-        });
-      }
+      setState(() {
+        error = e.toString();
+      });
     } finally {
-      if (!silent && mounted) {
+      if (mounted) {
         setState(() {
           busy = false;
         });
@@ -947,21 +950,478 @@ class _HomePageState extends State<HomePage> {
   // FIND VERIFIED TRADE
   // =========================================================
 
-  // =========================================================
-  // V6.6 NON-BLOCKING SETUP DISCOVERY
-  // =========================================================
-
   Future<void> findVerifiedTrade() async {
-    // Deep validation is server-owned in V6.6. The phone must not
-    // serially wait for candidate #1 before candidate #2/#3.
-    await runAutoManagerNow();
-    await Future.delayed(const Duration(seconds: 1));
-    await loadAutoDashboard();
+    if (busy) {
+      return;
+    }
 
-    if (mounted) {
+    setState(() {
+      busy = true;
+
+      scanningMarkets = true;
+
+      findingVerifiedTrade = true;
+
+      verifiedTrade = null;
+
+      liveEntryAssessment = null;
+      serverWatcher = null;
+      serverWatchers = [];
+      forwardStats = null;
+      watcherPollTimer?.cancel();
+
+      validationHistory = [];
+
+      error = null;
+
+      networkStatus = null;
+
+      currentAttempt = 0;
+
+      currentValidationMarket =
+          'Scanning all markets...';
+    });
+
+    try {
+      // =====================================================
+      // 1. FAST SCAN
+      // =====================================================
+
+      final scanResult =
+          await runFastScanRequest();
+
+      if (!mounted) {
+        return;
+      }
+
       setState(() {
-        selectedTab = 1;
+        fastScan = scanResult;
+        scanningMarkets = false;
       });
+
+      final rawCandidates =
+          scanResult[
+                  'top_candidates']
+              as List?;
+
+      if (rawCandidates == null ||
+          rawCandidates.isEmpty) {
+        throw Exception(
+          'Fast scanner returned '
+          'no candidates',
+        );
+      }
+
+      final candidates = <
+          Map<String, dynamic>>[];
+
+      for (final item
+          in rawCandidates) {
+        if (item is Map) {
+          candidates.add(
+            Map<String, dynamic>.from(
+              item,
+            ),
+          );
+        }
+      }
+
+      if (candidates.isEmpty) {
+        throw Exception(
+          'No valid candidate '
+          'records received',
+        );
+      }
+
+      final count =
+          candidates.length > 3
+              ? 3
+              : candidates.length;
+
+      // =====================================================
+      // 2. DEEP VALIDATE EACH MARKET
+      // =====================================================
+
+      for (
+        int index = 0;
+        index < count;
+        index++
+      ) {
+        final candidate =
+            candidates[index];
+
+        final market =
+            candidate['market']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          currentValidationMarket =
+              'Deep validating '
+              '#${index + 1} $market';
+
+          networkStatus =
+              'Preparing validation...';
+        });
+
+        Map<String, dynamic> deep;
+
+        try {
+          deep =
+              await deepValidateWithRecovery(
+            candidate,
+          );
+        } on NetworkValidationException catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'NETWORK_ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.message,
+            });
+
+            currentValidationMarket =
+                '$market validation '
+                'could not complete';
+
+            networkStatus =
+                'Network connection failed '
+                'after $maximumAttempts attempts.';
+          });
+
+          // IMPORTANT:
+          // Do NOT move to candidate #2 after a
+          // network failure.
+          throw NetworkValidationException(
+            market:
+                market,
+            message:
+                e.message,
+          );
+        } catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.toString(),
+            });
+          });
+
+          // Non-network backend error:
+          // stop rather than falsely treating the
+          // candidate as rejected.
+          break;
+        }
+
+        // ===================================================
+        // PARSE V4.6 RESPONSE
+        // ===================================================
+
+        final finalStatus =
+            deep['final_status']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        Map<String, dynamic>?
+            finalMarket;
+
+        final rawFinalMarket =
+            deep['final_market'];
+
+        if (rawFinalMarket is Map) {
+          finalMarket =
+              Map<String, dynamic>.from(
+            rawFinalMarket,
+          );
+        }
+
+        final verified =
+            finalMarket?[
+                        'verified'] ==
+                    true ||
+                finalStatus ==
+                    'VERIFIED_TRADE';
+
+        final deepStatus =
+            finalMarket?[
+                        'status']
+                    ?.toString() ??
+                finalStatus;
+
+        final history = <
+            String, dynamic>{
+          'position':
+              index + 1,
+
+          'market':
+              market,
+
+          'symbol':
+              candidate[
+                  'symbol'],
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              candidate[
+                  'direction'],
+
+          'deep_status':
+              deepStatus,
+
+          'verified':
+              verified,
+
+          'deep_score':
+              finalMarket?[
+                  'deep_score'],
+
+          'trades':
+              finalMarket?[
+                  'trades'],
+
+          'wins':
+              finalMarket?[
+                  'wins'],
+
+          'losses':
+              finalMarket?[
+                  'losses'],
+
+          'win_rate':
+              finalMarket?[
+                  'win_rate'],
+
+          'profit_factor':
+              finalMarket?[
+                  'profit_factor'],
+
+          'return_pct':
+              finalMarket?[
+                  'return_pct'],
+
+          'max_drawdown':
+              finalMarket?[
+                  'max_drawdown'],
+
+          'interval':
+              finalMarket?[
+                  'interval'],
+
+          'period':
+              finalMarket?[
+                  'period'],
+
+          'threshold_pct':
+              finalMarket?[
+                  'threshold_pct'],
+
+          'holding_candles':
+              finalMarket?[
+                  'holding_candles'],
+
+          'sample_reliability_pct':
+              finalMarket?[
+                  'sample_reliability_pct'],
+
+          'wilson_lower_win_rate_pct':
+              finalMarket?[
+                  'wilson_lower_win_rate_pct'],
+
+          'reliability_adjusted_score':
+              finalMarket?[
+                  'reliability_adjusted_score'],
+
+          'near_verified':
+              finalMarket?[
+                  'near_verified'] == true,
+
+          'primary_reason':
+              finalMarket?[
+                  'primary_reason'],
+
+          'rejection_reasons':
+              finalMarket?[
+                  'rejection_reasons'],
+
+          'explanation':
+              finalMarket?[
+                  'explanation'],
+        };
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          validationHistory.add(
+            history,
+          );
+
+          networkStatus =
+              '$market validation complete';
+        });
+
+        // ===================================================
+        // NOT VERIFIED
+        // ===================================================
+
+        if (!verified ||
+            finalMarket == null) {
+          continue;
+        }
+
+        // ===================================================
+        // DIRECTION AGREEMENT
+        // ===================================================
+
+        final fastDirection =
+            candidate[
+                    'direction']
+                ?.toString();
+
+        final deepDirection =
+            finalMarket[
+                    'direction']
+                ?.toString();
+
+        if (fastDirection !=
+            deepDirection) {
+          setState(() {
+            validationHistory.last[
+                    'verified'] =
+                false;
+
+            validationHistory.last[
+                    'deep_status'] =
+                'DIRECTION_MISMATCH';
+          });
+
+          continue;
+        }
+
+        // ===================================================
+        // VERIFIED
+        // ===================================================
+
+        final result = <
+            String, dynamic>{
+          ...finalMarket,
+
+          'fast_rank':
+              index + 1,
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              fastDirection,
+
+          'direction_agreement':
+              true,
+        };
+
+        setState(() {
+          verifiedTrade ??=
+              result;
+
+          currentValidationMarket =
+              '$market VERIFIED';
+
+          networkStatus =
+              'Deep validation passed • '
+              'adding candidate to V5.4 watch portfolio';
+        });
+
+        await createServerWatcher(
+          result,
+        );
+
+        // V5.4 intentionally continues through the remaining
+        // shortlisted candidates. Multiple VERIFIED setups can
+        // be watched simultaneously, so a waiting/overextended
+        // #1 candidate does not block a better live entry in #2/#3.
+      }
+    } on NetworkValidationException catch (_) {
+      // Already shown in the validation card.
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified trade search '
+            'failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          scanningMarkets = false;
+          findingVerifiedTrade = false;
+        });
+      }
     }
   }
 
@@ -1159,6 +1619,110 @@ class _HomePageState extends State<HomePage> {
     return '${remainder}s';
   }
 
+  String formatEpochCountdown(
+    dynamic value,
+  ) {
+    final epoch = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (epoch == null || epoch <= 0) {
+      return '-';
+    }
+
+    final now =
+        DateTime.now().millisecondsSinceEpoch /
+            1000.0;
+
+    return formatCountdownSeconds(
+      epoch - now,
+    );
+  }
+
+  Future<void> loadAiLearningStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/ai-learning/status',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningStatus = response;
+
+        final learning =
+            response['learning'];
+
+        if (learning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            learning,
+          );
+        }
+      });
+    } catch (_) {
+      // Keep the previous AI-learning snapshot visible.
+    }
+  }
+
+  Future<void> runAiLearningNow() async {
+    if (aiLearningBusy) {
+      return;
+    }
+
+    setState(() {
+      aiLearningBusy = true;
+      error = null;
+    });
+
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/ai-learning/run-now',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = response;
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = {
+          'status': 'ERROR',
+          'paper_only': true,
+          'live_execution': false,
+          'error': e.toString(),
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          aiLearningBusy = false;
+        });
+      } else {
+        aiLearningBusy = false;
+      }
+    }
+  }
+
   Future<void> loadAutoDashboard() async {
     try {
       final uri = Uri.parse(
@@ -1228,6 +1792,32 @@ class _HomePageState extends State<HomePage> {
                   .toList();
         }
 
+        final rawLearning =
+            response['learning'];
+
+        if (rawLearning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            rawLearning,
+          );
+        }
+
+        final rawLearningWatchers =
+            response['learning_watchers'];
+
+        if (rawLearningWatchers is List) {
+          aiLearningWatchers =
+              rawLearningWatchers
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
         final rawV66Forward =
             response[
                 'v66_forward_intelligence'];
@@ -1250,11 +1840,12 @@ class _HomePageState extends State<HomePage> {
     autoDashboardPollTimer =
         Timer.periodic(
       const Duration(
-        seconds: 10,
+        seconds: 20,
       ),
       (_) {
         loadAutoDashboard();
         loadSystemOverview();
+        loadAiLearningStatus();
       },
     );
 
@@ -1264,6 +1855,10 @@ class _HomePageState extends State<HomePage> {
 
     Future.microtask(
       loadSystemOverview,
+    );
+
+    Future.microtask(
+      loadAiLearningStatus,
     );
   }
 
@@ -1973,8 +2568,15 @@ class _HomePageState extends State<HomePage> {
   }
 
   double _profileMinConfidence() {
-    // V6.6 single source of truth for PAPER eligibility.
-    return 0.30;
+    switch (risk) {
+      case 'Conservative':
+        return 0.72;
+      case 'Aggressive':
+        return 0.62;
+      case 'Balanced':
+      default:
+        return 0.67;
+    }
   }
 
   int _intervalMinutes(
@@ -2436,20 +3038,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // =========================================================
-  // V6.6 AUTOMATIC LIVE SIGNAL POLLING
-  // =========================================================
-
-  void startSignalPolling() {
-    signalPollTimer?.cancel();
-    signalPollTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) {
-        refreshSignal(silent: true);
-      },
-    );
-  }
-
-  // =========================================================
   // INIT
   // =========================================================
 
@@ -2458,7 +3046,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
 
     Future.microtask(
-      () => refreshSignal(silent: true),
+      refreshSignal,
     );
 
     Future.microtask(
@@ -2470,14 +3058,12 @@ class _HomePageState extends State<HomePage> {
     );
 
     startAutoDashboardPolling();
-    startSignalPolling();
   }
 
   @override
   void dispose() {
     watcherPollTimer?.cancel();
     autoDashboardPollTimer?.cancel();
-    signalPollTimer?.cancel();
     symbol.dispose();
     balance.dispose();
     copilotController.dispose();
@@ -3078,7 +3664,8 @@ class _HomePageState extends State<HomePage> {
         forwardStats?['pnl'] ??
         0;
     final forwardWr = forwardStats?['win_rate_pct'] ??
-        forwardStats?['forward_win_rate_pct'];
+        forwardStats?['forward_win_rate_pct'] ??
+        0;
 
     final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
     final ranking = (fastScan?['ranking'] as List?) ?? const [];
@@ -3102,14 +3689,14 @@ class _HomePageState extends State<HomePage> {
       return Container(
         padding: padding,
         decoration: BoxDecoration(
-          color: const Color(0xFF0E1A24).withValues(alpha: .94),
+          color: const Color(0xFF0E1A24).withOpacity(.94),
           borderRadius: BorderRadius.circular(22),
           border: Border.all(
-            color: glow?.withValues(alpha: .28) ?? const Color(0xFF18313C),
+            color: glow?.withOpacity(.28) ?? const Color(0xFF18313C),
           ),
           boxShadow: [
             BoxShadow(
-              color: (glow ?? Colors.black).withValues(alpha: .08),
+              color: (glow ?? Colors.black).withOpacity(.08),
               blurRadius: 26,
               offset: const Offset(0, 12),
             ),
@@ -3202,9 +3789,9 @@ class _HomePageState extends State<HomePage> {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(
-          color: c.withValues(alpha: .12),
+          color: c.withOpacity(.12),
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: c.withValues(alpha: .20)),
+          border: Border.all(color: c.withOpacity(.20)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -3242,7 +3829,7 @@ class _HomePageState extends State<HomePage> {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: sideColor(direction).withValues(alpha: .12),
+                color: sideColor(direction).withOpacity(.12),
                 borderRadius: BorderRadius.circular(15),
               ),
               child: Icon(Icons.currency_exchange_rounded, color: sideColor(direction)),
@@ -3312,34 +3899,6 @@ class _HomePageState extends State<HomePage> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
-          glassCard(
-            child: Column(
-              children: [
-                Image.asset(
-                  'assets/images/jasong_logo.png',
-                  width: 230,
-                  height: 92,
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => const Icon(
-                    Icons.auto_graph_rounded,
-                    size: 52,
-                    color: Color(0xFFFFC83D),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Power • Evolution • Legacy',
-                  style: TextStyle(
-                    color: Color(0xFFFFC83D),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
           Container(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
@@ -3348,12 +3907,12 @@ class _HomePageState extends State<HomePage> {
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  cs.primary.withValues(alpha: .22),
+                  cs.primary.withOpacity(.22),
                   const Color(0xFF0D2630),
                   const Color(0xFF0B1620),
                 ],
               ),
-              border: Border.all(color: cs.primary.withValues(alpha: .25)),
+              border: Border.all(color: cs.primary.withOpacity(.25)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3361,7 +3920,7 @@ class _HomePageState extends State<HomePage> {
                 Row(
                   children: [
                     pill(
-                      autoOn ? 'AUTO MANAGER ON' : 'AUTO MANAGER RECOVERING',
+                      autoOn ? 'AUTO MANAGER ON' : 'AUTO MANAGER OFF',
                       icon: autoOn ? Icons.bolt_rounded : Icons.pause_rounded,
                       color: autoOn ? cs.primary : const Color(0xFFFFD75E),
                     ),
@@ -3378,7 +3937,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     const SizedBox(width: 6),
                     const Text(
-                      'V6.6',
+                      'V6.5',
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w900,
@@ -3448,7 +4007,7 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
           const SizedBox(height: 20),
-          sectionTitle('Live intelligence', subtitle: 'Auto-refreshes every 30 seconds • ${symbol.text.trim()}'),
+          sectionTitle('Live intelligence', subtitle: 'Current signal for ${symbol.text.trim()}'),
           glassCard(
             glow: sideColor(liveDecision),
             child: Column(
@@ -3532,15 +4091,15 @@ class _HomePageState extends State<HomePage> {
                   child: watcherCard(w),
                 )),
           const SizedBox(height: 10),
-          sectionTitle('V6.6 learning policy'),
+          sectionTitle('V6.5 learning policy'),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Live direction must agree'),
+                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Verified + live direction agrees'),
                 Divider(height: 24),
-                _MidnightRuleRow('AI PAPER path', '≥ 40%', 'Directional model AI + direction agreement'),
+                _MidnightRuleRow('AI PAPER path', '≥ 40%', 'AI approves + direction agrees'),
                 Divider(height: 24),
-                _MidnightRuleRow('REJECT', 'SHADOW', 'Rejected setups remain counterfactual evidence only'),
+                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
               ],
             ),
           ),
@@ -3588,7 +4147,7 @@ class _HomePageState extends State<HomePage> {
                 child: FilledButton.tonalIcon(
                   onPressed: busy ? null : findVerifiedTrade,
                   icon: const Icon(Icons.verified_rounded),
-                  label: const Text('Queue validation'),
+                  label: const Text('Deep verify'),
                 ),
               ),
             ],
@@ -3720,7 +4279,7 @@ class _HomePageState extends State<HomePage> {
             children: [
               statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
               const SizedBox(width: 10),
-              statTile('Forward WR', forwardWr == null ? '-' : '${formatNumber(forwardWr, decimals: 1)}%', Icons.percent_rounded),
+              statTile('Forward WR', '${formatPercent(forwardWr)}%', Icons.percent_rounded),
             ],
           ),
           const SizedBox(height: 10),
@@ -3741,7 +4300,7 @@ class _HomePageState extends State<HomePage> {
                   SizedBox(height: 10),
                   Text('No PAPER trades opened yet.', style: TextStyle(fontWeight: FontWeight.w800)),
                   SizedBox(height: 4),
-                  Text('Trades appear here automatically when V6.6 passes a PAPER entry path.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  Text('Trades will appear here when V6.5 passes its live entry path.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
                 ],
               ),
             )
@@ -3788,79 +4347,771 @@ class _HomePageState extends State<HomePage> {
     }
 
     Widget aiPage() {
+      final learning =
+          aiLearningSnapshot ??
+              <String, dynamic>{};
+
+      final mode =
+          aiLearningStatus?['mode']
+                  ?.toString() ??
+              'DIRECT_AI40_SHADOW_PROMOTION_V662';
+
+      final aiFloor =
+          aiLearningStatus?[
+                  'ai_min_confidence_pct'] ??
+              40.0;
+
+      final engineEnabled =
+          learning['enabled'] == true;
+
+      final liveExecution =
+          learning['live_execution'] == true ||
+              aiLearningStatus?[
+                      'broker_execution_enabled'] ==
+                  true;
+
+      final activeWatchers =
+          learning['active_watchers'] ?? 0;
+
+      final openTrades =
+          learning['open_trades'] ?? 0;
+
+      final learningBalance =
+          learning['paper_balance'] ?? 10000;
+
+      final aiTrades = paperTrades
+          .where(
+            (trade) =>
+                trade['source']?.toString() ==
+                    'V66_LEARNING_ENGINE',
+          )
+          .toList();
+
+      Map<String, dynamic>? openAiTrade;
+
+      for (final trade in aiTrades) {
+        if (trade['status']
+                ?.toString()
+                .toUpperCase() ==
+            'OPEN') {
+          openAiTrade = trade;
+          break;
+        }
+      }
+
+      Widget learningTradeCard(
+        Map<String, dynamic> trade,
+      ) {
+        final status =
+            trade['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final market =
+            trade['market']?.toString() ??
+                trade['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            trade['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final entryClass =
+            trade['entry_path']?.toString() ??
+                trade['entry_class']?.toString() ??
+                '-';
+
+        final aiConfidence =
+            trade['model_ai_confidence'];
+
+        final quant =
+            trade['entry_confidence'] ??
+                trade['quant_confidence'];
+
+        final dueAt =
+            trade['settlement_due_at'] ??
+                trade['scheduled_close_at'];
+
+        return glassCard(
+          glow: paperTradeColor(status),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    paperTradeIcon(status),
+                    color:
+                        paperTradeColor(status),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    entryClass,
+                    color: const Color(
+                      0xFF65E6D3,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  statTile(
+                    'Model AI',
+                    aiConfidence is num
+                        ? '${formatPercent(aiConfidence)}%'
+                        : '-',
+                    Icons.psychology_alt_rounded,
+                    valueColor:
+                        Colors.greenAccent,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Quant',
+                    quant is num
+                        ? '${formatPercent(quant)}%'
+                        : '-',
+                    Icons.analytics_outlined,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'Stake',
+                    formatMoney(
+                      trade['stake'],
+                    ),
+                    Icons.payments_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    status == 'OPEN'
+                        ? 'Time left'
+                        : 'P&L',
+                    status == 'OPEN'
+                        ? formatEpochCountdown(
+                            dueAt,
+                          )
+                        : formatMoney(
+                            trade['pnl'],
+                          ),
+                    status == 'OPEN'
+                        ? Icons.timer_outlined
+                        : Icons
+                            .account_balance_wallet_outlined,
+                    valueColor:
+                        status == 'WIN'
+                            ? Colors.greenAccent
+                            : status == 'LOSS'
+                                ? Colors.redAccent
+                                : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
+                '${trade['exit_price'] != null ? '  •  Exit ${formatNumber(trade['exit_price'], decimals: 5)}' : ''}',
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                status == 'OPEN'
+                    ? 'Autonomous PAPER trade is being monitored by the backend.'
+                    : 'Settled PAPER outcome: ${trade['result'] ?? status}.',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      Widget learningWatcherCard(
+        Map<String, dynamic> watcher,
+      ) {
+        final candidate =
+            watcher['candidate'] is Map
+                ? Map<String, dynamic>.from(
+                    watcher['candidate'],
+                  )
+                : <String, dynamic>{};
+
+        final market =
+            watcher['market']?.toString() ??
+                watcher['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            watcher['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final status =
+            watcher['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final deepStatus =
+            watcher['deep_status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final quality =
+            candidate['quality_tier']
+                    ?.toString() ??
+                '-';
+
+        final fastScore =
+            candidate['smart_fast_score'];
+
+        final quant =
+            watcher['last_quant_confidence'];
+
+        return glassCard(
+          glow: status == 'SHADOW_WATCH'
+              ? Colors.amberAccent
+              : cs.primary,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    status,
+                    color:
+                        status == 'SHADOW_WATCH'
+                            ? Colors.amberAccent
+                            : cs.primary,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  pill(
+                    'Deep $deepStatus',
+                    icon:
+                        Icons.fact_check_outlined,
+                  ),
+                  pill(
+                    'Quality $quality',
+                    icon: Icons.grade_outlined,
+                  ),
+                  if (fastScore is num)
+                    pill(
+                      'Fast ${formatNumber(fastScore, decimals: 0)}',
+                      icon:
+                          Icons.speed_rounded,
+                    ),
+                  if (quant is num)
+                    pill(
+                      'Quant ${formatPercent(quant)}%',
+                      icon: Icons
+                          .analytics_outlined,
+                    ),
+                ],
+              ),
+              if (watcher['last_error'] !=
+                  null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  watcher['last_error']
+                      .toString(),
+                  maxLines: 3,
+                  overflow:
+                      TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      }
+
       return ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        padding:
+            const EdgeInsets.fromLTRB(
+          16,
+          4,
+          16,
+          120,
+        ),
         children: [
-          sectionTitle('Jasong AI Copilot', subtitle: 'Advisory analysis of PAPER performance and risk evidence'),
+          sectionTitle(
+            'Autonomous AI PAPER Learning',
+            subtitle:
+                'AI40 shadow promotion • monitoring only on your phone',
+          ),
+          glassCard(
+            glow: engineEnabled
+                ? Colors.greenAccent
+                : Colors.amberAccent,
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      engineEnabled
+                          ? Icons
+                              .smart_toy_rounded
+                          : Icons
+                              .pause_circle_outline,
+                      color: engineEnabled
+                          ? Colors.greenAccent
+                          : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        engineEnabled
+                            ? 'AI learning is ACTIVE'
+                            : 'AI learning is PAUSED',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    pill(
+                      liveExecution
+                          ? 'LIVE'
+                          : 'PAPER ONLY',
+                      color: liveExecution
+                          ? Colors.redAccent
+                          : Colors.greenAccent,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  mode,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight:
+                        FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'AI directional floor: ${formatNumber(aiFloor, decimals: 0)}% • N30 disabled for this experiment',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    statTile(
+                      'Watchers',
+                      '$activeWatchers',
+                      Icons.visibility_outlined,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'Open trades',
+                      '$openTrades',
+                      Icons
+                          .receipt_long_outlined,
+                      valueColor:
+                          (openTrades is num &&
+                                  openTrades > 0)
+                              ? Colors
+                                  .lightBlueAccent
+                              : Colors.white,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    statTile(
+                      'Paper balance',
+                      formatMoney(
+                        learningBalance,
+                      ),
+                      Icons
+                          .account_balance_wallet_outlined,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'AI40 floor',
+                      '${formatNumber(aiFloor, decimals: 0)}%',
+                      Icons
+                          .verified_outlined,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child:
+                          FilledButton.icon(
+                        onPressed:
+                            aiLearningBusy
+                                ? null
+                                : runAiLearningNow,
+                        icon:
+                            aiLearningBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child:
+                                        CircularProgressIndicator(
+                                      strokeWidth:
+                                          2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons
+                                        .auto_awesome_rounded,
+                                  ),
+                        label: Text(
+                          aiLearningBusy
+                              ? 'AI evaluating...'
+                              : 'Run AI cycle now',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip:
+                          'Refresh AI learning',
+                      onPressed: () async {
+                        await loadAutoDashboard();
+                        await loadAiLearningStatus();
+                      },
+                      icon: const Icon(
+                        Icons.refresh_rounded,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (openAiTrade != null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Current AI PAPER trade',
+              subtitle:
+                  'One open learning trade maximum',
+            ),
+            learningTradeCard(
+              openAiTrade,
+            ),
+          ] else if (aiTrades.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Latest AI PAPER outcome',
+            ),
+            learningTradeCard(
+              aiTrades.first,
+            ),
+          ],
+          if (aiLearningLastRun !=
+              null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Last AI decision',
+            ),
+            glassCard(
+              glow: aiLearningLastRun![
+                          'status']
+                      ?.toString() ==
+                  'PAPER_TRADE_OPENED'
+                  ? Colors.greenAccent
+                  : Colors.amberAccent,
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    aiLearningLastRun![
+                                'status']
+                            ?.toString() ??
+                        '-',
+                    style: const TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 15,
+                    ),
+                  ),
+                  if (aiLearningLastRun![
+                          'selected']
+                      is Map) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Builder(
+                      builder: (_) {
+                        final selected =
+                            Map<String,
+                                dynamic>.from(
+                          aiLearningLastRun![
+                              'selected'],
+                        );
+
+                        return Text(
+                          '${selected['market'] ?? selected['symbol'] ?? '-'} '
+                          '${selected['candidate_direction'] ?? ''} • '
+                          'AI ${selected['model_ai_directional_confidence_pct'] ?? '-'}% • '
+                          'Quant ${selected['quant_confidence_pct'] ?? '-'}%',
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.white70,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                  if (aiLearningLastRun![
+                          'error'] !=
+                      null) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Text(
+                      aiLearningLastRun![
+                              'error']
+                          .toString(),
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.redAccent,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'AI learning watchers',
+            subtitle:
+                'A/A+ shadow candidates are isolated from normal production entries',
+          ),
+          if (aiLearningWatchers.isEmpty)
+            glassCard(
+              child: const Text(
+                'No AI-learning watchers yet. Auto Manager will supply new candidates automatically.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          else
+            ...aiLearningWatchers
+                .take(6)
+                .map(
+                  (watcher) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child:
+                        learningWatcherCard(
+                      watcher,
+                    ),
+                  ),
+                ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Jasong AI Copilot',
+            subtitle:
+                'Advisory analysis of PAPER performance and risk evidence',
+          ),
           glassCard(
             glow: cs.secondary,
             child: Column(
               children: [
                 TextField(
-                  controller: copilotController,
+                  controller:
+                      copilotController,
                   minLines: 3,
                   maxLines: 5,
-                  decoration: const InputDecoration(
-                    hintText: 'Ask Jasong AI about trades, watchers, losses or confidence buckets...',
-                    prefixIcon: Icon(Icons.psychology_alt_rounded),
+                  decoration:
+                      const InputDecoration(
+                    hintText:
+                        'Ask Jasong AI about trades, watchers, losses or confidence buckets...',
+                    prefixIcon: Icon(
+                      Icons
+                          .psychology_alt_rounded,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(
+                  height: 10,
+                ),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    onPressed: copilotBusy ? null : () => askJasongCopilot(),
+                    onPressed: copilotBusy
+                        ? null
+                        : () =>
+                            askJasongCopilot(),
                     icon: copilotBusy
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.auto_awesome_rounded),
-                    label: Text(copilotBusy ? 'Analysing...' : 'Ask Jasong AI'),
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(
+                            Icons
+                                .auto_awesome_rounded,
+                          ),
+                    label: Text(
+                      copilotBusy
+                          ? 'Analysing...'
+                          : 'Ask Jasong AI',
+                    ),
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(
+                  height: 8,
+                ),
                 SizedBox(
                   width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: copilotBusy ? null : runOvernightReview,
-                    icon: const Icon(Icons.nights_stay_rounded),
-                    label: const Text('Analyse overnight performance'),
+                  child:
+                      OutlinedButton.icon(
+                    onPressed: copilotBusy
+                        ? null
+                        : runOvernightReview,
+                    icon: const Icon(
+                      Icons
+                          .nights_stay_rounded,
+                    ),
+                    label: const Text(
+                      'Analyse overnight performance',
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          if (copilotAnswer.isNotEmpty) ...[
+          if (copilotAnswer
+              .isNotEmpty) ...[
             const SizedBox(height: 12),
             glassCard(
               child: SelectableText(
                 copilotAnswer,
-                style: const TextStyle(color: Colors.white70, height: 1.45),
+                style: const TextStyle(
+                  color: Colors.white70,
+                  height: 1.45,
+                ),
               ),
             ),
           ],
           const SizedBox(height: 20),
-          sectionTitle('Learning thresholds', subtitle: 'Experimental PAPER eligibility — not win probabilities'),
+          sectionTitle(
+            'Learning thresholds',
+            subtitle:
+                'Experimental PAPER eligibility — not win probabilities',
+          ),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('N30 normal path', '30%', 'Quantitative confidence floor'),
+                _MidnightRuleRow(
+                  'AI40',
+                  '40%',
+                  'Directional model-AI + live direction agreement',
+                ),
                 Divider(height: 24),
-                _MidnightRuleRow('AI40 path', '40%', 'AI confidence + approve + direction agreement'),
+                _MidnightRuleRow(
+                  'EM',
+                  'Experimental',
+                  'High-quality shadow promoted for AI PAPER learning only',
+                ),
                 Divider(height: 24),
-                _MidnightRuleRow('DUAL', 'N30 + AI40', 'Both paths agree at the same observation'),
+                _MidnightRuleRow(
+                  'SHADOW',
+                  'ON',
+                  'Rejected opportunities remain learning evidence',
+                ),
                 Divider(height: 24),
-                _MidnightRuleRow('SHADOW', 'ON', 'Rejected opportunities remain counterfactual evidence'),
+                _MidnightRuleRow(
+                  'LIVE BROKER',
+                  'OFF',
+                  'No broker order is sent by this mode',
+                ),
               ],
             ),
           ),
           const SizedBox(height: 20),
-          sectionTitle('Live observation portfolio'),
+          sectionTitle(
+            'Normal observation portfolio',
+          ),
           if (serverWatchers.isEmpty)
-            glassCard(child: const Text('No active watchers loaded.', style: TextStyle(color: Colors.white54)))
+            glassCard(
+              child: const Text(
+                'No normal active watchers loaded.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
           else
-            ...serverWatchers.take(6).map((w) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: watcherCard(w),
-                )),
+            ...serverWatchers
+                .take(6)
+                .map(
+                  (w) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child: watcherCard(w),
+                  ),
+                ),
         ],
       );
     }
@@ -3894,7 +5145,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 10),
                 DropdownButtonFormField<String>(
-                  initialValue: risk,
+                  value: risk,
                   decoration: const InputDecoration(
                     labelText: 'Risk mode',
                     prefixIcon: Icon(Icons.shield_outlined),
@@ -3912,7 +5163,7 @@ class _HomePageState extends State<HomePage> {
                   child: FilledButton.tonalIcon(
                     onPressed: busy ? null : refreshSignal,
                     icon: const Icon(Icons.refresh_rounded),
-                    label: const Text('Force signal refresh'),
+                    label: const Text('Refresh current signal'),
                   ),
                 ),
               ],
@@ -3929,7 +5180,7 @@ class _HomePageState extends State<HomePage> {
                     Icon(autoOn ? Icons.bolt_rounded : Icons.pause_circle_outline, color: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: Text(autoOn ? 'Auto Manager is running' : 'Auto Manager will auto-recover', style: const TextStyle(fontWeight: FontWeight.w900)),
+                      child: Text(autoOn ? 'Auto Manager is running' : 'Auto Manager is stopped', style: const TextStyle(fontWeight: FontWeight.w900)),
                     ),
                   ],
                 ),
@@ -3937,9 +5188,9 @@ class _HomePageState extends State<HomePage> {
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
-                    onPressed: autoManagerBusy || autoOn ? null : startAutoMode,
-                    icon: const Icon(Icons.bolt_rounded),
-                    label: Text(autoOn ? 'Auto Mode locked ON' : 'Restore Auto Mode'),
+                    onPressed: autoManagerBusy ? null : (autoOn ? stopAutoMode : startAutoMode),
+                    icon: Icon(autoOn ? Icons.stop_circle_outlined : Icons.play_circle_outline),
+                    label: Text(autoOn ? 'Stop Auto Mode' : 'Start Auto Mode'),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -4015,14 +5266,7 @@ class _HomePageState extends State<HomePage> {
                 gradient: LinearGradient(colors: [cs.primary, cs.secondary]),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(14),
-                child: Image.asset(
-                  'assets/images/jasong_logo.png',
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const Icon(Icons.auto_graph_rounded, color: Color(0xFF041014)),
-                ),
-              ),
+              child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF041014)),
             ),
             const SizedBox(width: 11),
             const Expanded(
@@ -4031,7 +5275,7 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.6 • Midnight Autonomous', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.5 • Midnight Glass', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -4043,6 +5287,7 @@ class _HomePageState extends State<HomePage> {
             onPressed: () async {
               await loadAutoDashboard();
               await loadSystemOverview();
+              await loadAiLearningStatus();
               await refreshServerWatchers();
             },
             icon: const Icon(Icons.refresh_rounded),
@@ -4054,6 +5299,7 @@ class _HomePageState extends State<HomePage> {
         onRefresh: () async {
           await loadAutoDashboard();
           await loadSystemOverview();
+          await loadAiLearningStatus();
           await refreshServerWatchers();
           if (selectedTab == 0) {
             await refreshSignal();
@@ -4093,9 +5339,9 @@ class _MidnightValue extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .035),
+        color: Colors.white.withOpacity(.035),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: .05)),
+        border: Border.all(color: Colors.white.withOpacity(.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4104,7 +5350,7 @@ class _MidnightValue extends StatelessWidget {
             label,
             style: const TextStyle(
               fontSize: 10,
-              color: Color(0x73FFFFFF),
+              color: Colors.white45,
             ),
           ),
           const SizedBox(height: 4),
@@ -4143,7 +5389,7 @@ class _MidnightRuleRow extends StatelessWidget {
           width: 34,
           height: 34,
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primary.withValues(alpha: .10),
+            color: Theme.of(context).colorScheme.primary.withOpacity(.10),
             borderRadius: BorderRadius.circular(11),
           ),
           child: Icon(
