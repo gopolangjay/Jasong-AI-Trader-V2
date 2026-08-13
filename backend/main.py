@@ -3534,6 +3534,12 @@ V64_LEARNING_ENGINE = AI40OnlyLearningTradeEngine(
 )
 V64_LEARNING_ENGINE.start()
 
+# AI-learning experiment: disable the N30 entry path inside V64.
+# Only the AI40 model path may open an autonomous learning PAPER trade.
+V64_LEARNING_ENGINE.NORMAL_MIN_CONFIDENCE = 1.01
+V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = PAPER_AI_MIN_CONFIDENCE
+
+
 
 V55_AUTO_MANAGER = AutomatedTradeManager(
     scan_candidates_func=
@@ -4699,114 +4705,400 @@ def v64_learning_pause():
 
 
 # ============================================================
-# V6.6 AI40 AUTONOMOUS PAPER LEARNING API
+# V6.6 DIRECT AUTONOMOUS AI40 PAPER LEARNING API
 # ============================================================
+
+_AI_LEARNING_RUN_LOCK = threading.Lock()
+
+
+def _ai_learning_candidate_direction(candidate: dict) -> str:
+    return str(
+        candidate.get("direction")
+        or candidate.get("signal")
+        or candidate.get("decision")
+        or candidate.get("side")
+        or "WAIT"
+    ).upper().strip()
+
+
+def _ai_learning_live_direction(live: dict) -> str:
+    return str(
+        live.get("direction")
+        or live.get("signal")
+        or live.get("decision")
+        or "WAIT"
+    ).upper().strip()
+
+
+def _ai_learning_candidate_score(candidate: dict) -> float:
+    for key in (
+        "adaptive_rank_score",
+        "smart_fast_score",
+        "fast_score",
+        "score",
+        "market_score",
+    ):
+        try:
+            value = candidate.get(key)
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _v66_ai_learning_cycle() -> dict:
+    """
+    One autonomous PAPER-only AI40 cycle.
+
+    This bypasses the strict deep-validation watcher funnel for the
+    experimental AI-learning path only.
+
+    Requirements:
+    - ranked candidate from fast scan
+    - BUY/SELL candidate direction
+    - live direction must agree
+    - directional model-AI confidence >= 40%
+    - max 1 open AI-learning PAPER trade
+    - no broker/live execution
+    """
+
+    if not _AI_LEARNING_RUN_LOCK.acquire(blocking=False):
+        return {
+            "status": "AI_LEARNING_BUSY",
+            "paper_only": True,
+            "live_execution": False,
+        }
+
+    try:
+        V64_LEARNING_ENGINE.enable()
+
+        current = V64_LEARNING_ENGINE.status()
+        open_count = int(current.get("open_trades", 0) or 0)
+
+        if open_count >= 1:
+            return {
+                "status": "WAIT_EXISTING_TRADE",
+                "paper_only": True,
+                "live_execution": False,
+                "open_trades": open_count,
+                "learning": current,
+            }
+
+        balance = float(
+            current.get("paper_balance", 10000.0)
+            or 10000.0
+        )
+
+        candidates = _v55_scan_candidates(
+            top_n=9,
+            payout=0.80,
+        )
+
+        evaluated = []
+        qualified = []
+
+        for rank, raw in enumerate(candidates[:9], start=1):
+            candidate = dict(raw or {})
+            symbol = str(candidate.get("symbol") or "").strip()
+            market = str(candidate.get("market") or symbol).strip()
+            wanted = _ai_learning_candidate_direction(candidate)
+
+            row = {
+                "rank": rank,
+                "market": market,
+                "symbol": symbol,
+                "candidate_direction": wanted,
+                "fast_score": _ai_learning_candidate_score(candidate),
+                "live_direction": None,
+                "quant_confidence_pct": None,
+                "model_ai_directional_confidence_pct": None,
+                "direction_match": False,
+                "ai40_pass": False,
+                "passed": False,
+                "reason": None,
+            }
+
+            if not symbol:
+                row["reason"] = "Missing symbol"
+                evaluated.append(row)
+                continue
+
+            if wanted not in {"BUY", "SELL"}:
+                row["reason"] = "Candidate is not BUY/SELL"
+                evaluated.append(row)
+                continue
+
+            try:
+                live = _v63_adaptive_live_signal(
+                    symbol,
+                    "Balanced",
+                    balance,
+                )
+            except Exception as exc:
+                row["reason"] = (
+                    f"Signal error: {type(exc).__name__}: {exc}"
+                )
+                evaluated.append(row)
+                continue
+
+            live_direction = _ai_learning_live_direction(live)
+
+            quant = V64_LEARNING_ENGINE._confidence01(
+                live.get("confidence")
+            )
+
+            model_ai = (
+                V64_LEARNING_ENGINE
+                ._directional_model_ai_confidence(
+                    live,
+                    wanted,
+                )
+            )
+
+            direction_match = live_direction == wanted
+            ai40_pass = model_ai >= PAPER_AI_MIN_CONFIDENCE
+
+            try:
+                price = float(live.get("price") or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+
+            passed = (
+                direction_match
+                and ai40_pass
+                and price > 0.0
+            )
+
+            row.update({
+                "live_direction": live_direction,
+                "quant_confidence_pct": round(quant * 100.0, 2),
+                "model_ai_directional_confidence_pct": round(
+                    model_ai * 100.0,
+                    2,
+                ),
+                "direction_match": direction_match,
+                "ai40_pass": ai40_pass,
+                "passed": passed,
+            })
+
+            if not direction_match:
+                row["reason"] = (
+                    f"Live direction {live_direction} "
+                    f"does not match {wanted}"
+                )
+            elif not ai40_pass:
+                row["reason"] = (
+                    f"AI confidence {model_ai * 100.0:.2f}% "
+                    f"is below 40%"
+                )
+            elif price <= 0:
+                row["reason"] = "No valid live price"
+            else:
+                row["reason"] = "Passed direction agreement + AI40"
+
+            evaluated.append(row)
+
+            if passed:
+                qualified.append({
+                    "candidate": candidate,
+                    "live": live,
+                    "row": row,
+                    "quant": quant,
+                    "model_ai": model_ai,
+                    "score": row["fast_score"],
+                })
+
+        if not qualified:
+            return {
+                "status": "NO_AI40_SETUP",
+                "paper_only": True,
+                "live_execution": False,
+                "scanned": len(candidates),
+                "qualified": 0,
+                "evaluated": evaluated,
+                "learning": V64_LEARNING_ENGINE.status(),
+            }
+
+        qualified.sort(
+            key=lambda item: (
+                float(item["score"]),
+                float(item["model_ai"]),
+                float(item["quant"]),
+            ),
+            reverse=True,
+        )
+
+        selected = qualified[0]
+        row = dict(selected["row"])
+        candidate = dict(selected["candidate"])
+
+        try:
+            holding_candles = int(
+                candidate.get("holding_candles", 4) or 4
+            )
+        except (TypeError, ValueError):
+            holding_candles = 4
+
+        holding_candles = max(1, min(holding_candles, 24))
+
+        validated = {
+            "symbol": row["symbol"],
+            "market": row["market"],
+            "direction": row["candidate_direction"],
+            "verified": False,
+            "status": "WATCH",
+            "holding_candles": holding_candles,
+            "source": "AI_LEARNING",
+            "entry_path": "AI40",
+            "model_ai_confidence": selected["model_ai"],
+            "quant_confidence": selected["quant"],
+        }
+
+        submitted = V64_LEARNING_ENGINE.submit_candidate(
+            candidate,
+            validated,
+            risk_mode="Balanced",
+            starting_balance=balance,
+            payout=0.80,
+        )
+
+        if not bool(submitted.get("accepted", False)):
+            return {
+                "status": "CANDIDATE_SUBMIT_REJECTED",
+                "paper_only": True,
+                "live_execution": False,
+                "selected": row,
+                "submitted": submitted,
+                "evaluated": evaluated,
+            }
+
+        before = V64_LEARNING_ENGINE.trades(limit=200)
+        before_rows = (
+            before.get("trades", [])
+            if isinstance(before, dict)
+            else []
+        )
+        before_ids = {
+            str(item.get("trade_id"))
+            for item in before_rows
+            if isinstance(item, dict)
+            and item.get("trade_id") is not None
+        }
+
+        learning_after = V64_LEARNING_ENGINE.tick()
+
+        after = V64_LEARNING_ENGINE.trades(limit=200)
+        after_rows = (
+            after.get("trades", [])
+            if isinstance(after, dict)
+            else []
+        )
+
+        new_trades = [
+            item
+            for item in after_rows
+            if isinstance(item, dict)
+            and str(item.get("trade_id")) not in before_ids
+        ]
+
+        ai_trades = [
+            item
+            for item in new_trades
+            if str(item.get("entry_class") or "").upper()
+            in {"M", "EM"}
+        ]
+
+        if ai_trades:
+            return {
+                "status": "PAPER_TRADE_OPENED",
+                "paper_only": True,
+                "live_execution": False,
+                "selected": row,
+                "trade": ai_trades[0],
+                "evaluated": evaluated,
+                "learning": learning_after,
+            }
+
+        return {
+            "status": "AI40_WATCHER_SUBMITTED_NO_ENTRY",
+            "paper_only": True,
+            "live_execution": False,
+            "selected": row,
+            "submitted": submitted,
+            "evaluated": evaluated,
+            "learning": learning_after,
+            "message": (
+                "Candidate passed pre-check, but the fresh V64 tick "
+                "did not open an AI40 PAPER trade."
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "paper_only": True,
+            "live_execution": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    finally:
+        _AI_LEARNING_RUN_LOCK.release()
+
+
 @app.get("/ai-learning/status")
 def ai_learning_status():
     return {
-        "mode": "AI40_AUTONOMOUS_PAPER",
+        "mode": "DIRECT_AI40_AUTONOMOUS_PAPER",
         "paper_only": True,
         "broker_execution_enabled": False,
+        "normal_path_disabled_for_ai_learning": True,
+        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
+        "ai_min_confidence_pct":
+            PAPER_AI_MIN_CONFIDENCE * 100.0,
         "learning": V64_LEARNING_ENGINE.status(),
-        "manager": V55_AUTO_MANAGER.status(),
     }
 
 
 @app.get("/ai-learning/trades")
-def ai_learning_trades(
-    limit: int = 100,
-):
-    return V64_LEARNING_ENGINE.trades(
-        limit=limit
-    )
+def ai_learning_trades(limit: int = 100):
+    return V64_LEARNING_ENGINE.trades(limit=limit)
+
+
+@app.get("/ai-learning/watchers")
+def ai_learning_watchers():
+    return V64_LEARNING_ENGINE.watchers()
+
+
+@app.get("/ai-learning/journal")
+def ai_learning_journal(limit: int = 100):
+    return V64_LEARNING_ENGINE.journal(limit=limit)
 
 
 @app.post("/ai-learning/start")
 def ai_learning_start():
-    learning = V64_LEARNING_ENGINE.enable()
-
-    manager = V55_AUTO_MANAGER.status()
-
-    if not bool(
-        manager.get("enabled", False)
-    ):
-        V55_AUTO_MANAGER.enable(
-            risk_mode=str(
-                manager.get(
-                    "risk_mode",
-                    "Balanced",
-                )
-            ),
-            starting_balance=float(
-                manager.get(
-                    "starting_balance",
-                    10000.0,
-                )
-                or 10000.0
-            ),
-            payout=float(
-                manager.get(
-                    "payout",
-                    0.80,
-                )
-                or 0.80
-            ),
-            scan_interval_minutes=2,
-            target_active_watchers=6,
-            scan_top_n=9,
-        )
-
-    V55_AUTO_MANAGER.start_thread()
+    V64_LEARNING_ENGINE.enable()
     V64_LEARNING_ENGINE.start()
-
     return {
         "status": "AI_LEARNING_ENABLED",
         "paper_only": True,
-        "broker_execution_enabled": False,
+        "live_execution": False,
         "learning": V64_LEARNING_ENGINE.status(),
-        "manager": V55_AUTO_MANAGER.status(),
     }
 
 
 @app.post("/ai-learning/run-now")
 def ai_learning_run_now():
-    # Queue a fresh Auto Manager discovery/validation cycle. Completed
-    # validations are automatically submitted to V64_LEARNING_ENGINE.
-    queued = V55_AUTO_MANAGER.queue_run(
-        source="ai_learning",
-    )
-
-    # Also evaluate any learning watchers already available right now.
-    learning = V64_LEARNING_ENGINE.tick()
-
-    return {
-        "status": (
-            "AI_LEARNING_RUN_QUEUED"
-            if queued.get("accepted")
-            else "AI_LEARNING_SCAN_ALREADY_RUNNING"
-        ),
-        "accepted": bool(
-            queued.get("accepted", False)
-        ),
-        "job_id": queued.get("job_id"),
-        "job": queued.get("job"),
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "learning": learning,
-        "manager": V55_AUTO_MANAGER.status(),
-    }
+    return _v66_ai_learning_cycle()
 
 
 @app.post("/ai-learning/stop")
 def ai_learning_stop():
-    learning = V64_LEARNING_ENGINE.pause()
-
     return {
         "status": "AI_LEARNING_PAUSED",
         "paper_only": True,
-        "broker_execution_enabled": False,
-        "learning": learning,
-        "manager": V55_AUTO_MANAGER.status(),
+        "live_execution": False,
+        "learning": V64_LEARNING_ENGINE.pause(),
     }
 
 
