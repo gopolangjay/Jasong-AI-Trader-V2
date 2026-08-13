@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 import pandas as pd
 import yfinance as yf
 
+from ig_demo_broker import IGDemoBroker, IGDemoError
+
 
 # ============================================================
 # JASONG AI TRADER V6.2
@@ -28,6 +30,49 @@ FINNHUB_API_KEY = os.getenv(
     "FINNHUB_API_KEY",
     "",
 ).strip()
+
+# V6.6.5: use the connected IG DEMO account as the primary candle source.
+# This can be disabled without code changes if needed.
+IG_DEMO_MARKET_DATA_ENABLED = (
+    os.getenv(
+        "IG_DEMO_MARKET_DATA",
+        "true",
+    ).strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+IG_DEMO_HISTORY_REFRESH_SECONDS = max(
+    300,
+    int(
+        os.getenv(
+            "IG_DEMO_HISTORY_REFRESH_SECONDS",
+            "1800",
+        )
+    ),
+)
+IG_DEMO_WARMUP_POINTS = max(
+    80,
+    min(
+        500,
+        int(
+            os.getenv(
+                "IG_DEMO_WARMUP_POINTS",
+                "160",
+            )
+        ),
+    ),
+)
+IG_DEMO_MAX_CACHE_ROWS = max(
+    160,
+    min(
+        2000,
+        int(
+            os.getenv(
+                "IG_DEMO_MAX_CACHE_ROWS",
+                "600",
+            )
+        ),
+    ),
+)
 
 TWELVE_BASE = "https://api.twelvedata.com"
 FINNHUB_BASE = "https://finnhub.io/api/v1"
@@ -61,6 +106,14 @@ class RouterCacheEntry:
 _CACHE: Dict[str, RouterCacheEntry] = {}
 _CACHE_LOCK = threading.RLock()
 
+# Rolling IG cache is keyed by canonical symbol + interval, intentionally
+# independent of requested period. For live/demo learning we need a stable
+# recent window rather than repeatedly downloading the same 1-month history.
+_IG_HISTORY_CACHE: Dict[str, RouterCacheEntry] = {}
+_IG_HISTORY_LOCK = threading.RLock()
+
+_IG_DEMO_BROKER = IGDemoBroker()
+
 _UNIVERSE_CACHE: List[dict] = []
 _UNIVERSE_UPDATED_AT = 0.0
 _UNIVERSE_LOCK = threading.RLock()
@@ -71,6 +124,17 @@ _TWELVE_DAY_CALLS = 0
 _TWELVE_RATE_LOCK = threading.RLock()
 
 _PROVIDER_STATE = {
+    "IG_DEMO": {
+        "configured": bool(
+            IG_DEMO_MARKET_DATA_ENABLED
+            and _IG_DEMO_BROKER.configured()
+        ),
+        "healthy": None,
+        "last_success": None,
+        "last_error": None,
+        "requests": 0,
+        "historical_points": 0,
+    },
     "TWELVE_DATA": {
         "configured": bool(TWELVE_DATA_API_KEY),
         "healthy": None,
@@ -438,6 +502,278 @@ def _allow_twelve_call() -> bool:
 
 
 # ============================================================
+# IG DEMO HISTORICAL MARKET DATA
+# ============================================================
+
+def get_ig_demo_broker() -> IGDemoBroker:
+    """Return the shared strict DEMO broker used by data + execution."""
+    return _IG_DEMO_BROKER
+
+
+def _ig_resolution(
+    interval: str,
+) -> str:
+    lookup = {
+        "1m": "MINUTE",
+        "2m": "MINUTE_2",
+        "3m": "MINUTE_3",
+        "5m": "MINUTE_5",
+        "10m": "MINUTE_10",
+        "15m": "MINUTE_15",
+        "30m": "MINUTE_30",
+        "60m": "HOUR",
+        "1h": "HOUR",
+        "2h": "HOUR_2",
+        "3h": "HOUR_3",
+        "4h": "HOUR_4",
+        "1d": "DAY",
+    }
+    clean = str(interval or "").lower().strip()
+    if clean not in lookup:
+        raise RuntimeError(
+            f"IG DEMO interval not supported: {interval}"
+        )
+    return lookup[clean]
+
+
+def _ig_mid(
+    value,
+) -> Optional[float]:
+    if not isinstance(value, dict):
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def number(key: str) -> Optional[float]:
+        raw = value.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
+    bid = number("bid")
+    ask = number("ask")
+    last = number("lastTraded")
+
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    if last is not None:
+        return last
+    if bid is not None:
+        return bid
+    if ask is not None:
+        return ask
+    return None
+
+
+def _ig_prices_to_frame(
+    prices: list,
+) -> pd.DataFrame:
+    rows = []
+    index = []
+
+    for item in prices or []:
+        if not isinstance(item, dict):
+            continue
+
+        timestamp = (
+            item.get("snapshotTimeUTC")
+            or item.get("snapshotTime")
+        )
+        parsed_time = pd.to_datetime(
+            timestamp,
+            utc=True,
+            errors="coerce",
+        )
+        if pd.isna(parsed_time):
+            continue
+
+        open_price = _ig_mid(
+            item.get("openPrice")
+        )
+        high_price = _ig_mid(
+            item.get("highPrice")
+        )
+        low_price = _ig_mid(
+            item.get("lowPrice")
+        )
+        close_price = _ig_mid(
+            item.get("closePrice")
+        )
+
+        if any(
+            value is None
+            for value in (
+                open_price,
+                high_price,
+                low_price,
+                close_price,
+            )
+        ):
+            continue
+
+        try:
+            volume = float(
+                item.get("lastTradedVolume")
+                or 0.0
+            )
+        except Exception:
+            volume = 0.0
+
+        index.append(parsed_time)
+        rows.append({
+            "Open": open_price,
+            "High": high_price,
+            "Low": low_price,
+            "Close": close_price,
+            "Volume": volume,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(
+        rows,
+        index=pd.DatetimeIndex(index),
+    )
+    frame.index.name = "datetime"
+
+    return clean_ohlcv(frame)
+
+
+def _ig_history_key(
+    symbol: str,
+    interval: str,
+) -> str:
+    return (
+        f"{canonical_fx_symbol(symbol)}|"
+        f"{str(interval).lower().strip()}"
+    )
+
+
+def download_ig_demo(
+    symbol: str,
+    period: str,
+    interval: str,
+) -> pd.DataFrame:
+    """Fetch/refresh a small rolling IG DEMO candle window.
+
+    First use warms ~160 points. Subsequent refreshes request only one newest
+    point every 30 minutes by default, conserving IG's historical-data quota.
+    """
+    if not IG_DEMO_MARKET_DATA_ENABLED:
+        raise RuntimeError(
+            "IG DEMO market-data provider disabled"
+        )
+
+    if not _IG_DEMO_BROKER.configured():
+        raise RuntimeError(
+            "IG DEMO credentials not configured"
+        )
+
+    key = _ig_history_key(
+        symbol,
+        interval,
+    )
+    now = time.time()
+
+    with _IG_HISTORY_LOCK:
+        existing_entry = (
+            _IG_HISTORY_CACHE.get(key)
+        )
+        existing = (
+            existing_entry.dataframe.copy()
+            if existing_entry is not None
+            else pd.DataFrame()
+        )
+        age = (
+            now - existing_entry.created_at
+            if existing_entry is not None
+            else None
+        )
+
+    if (
+        existing_entry is not None
+        and len(existing) >= 80
+        and age is not None
+        and age < IG_DEMO_HISTORY_REFRESH_SECONDS
+    ):
+        return existing
+
+    points = (
+        1
+        if len(existing) >= 80
+        else IG_DEMO_WARMUP_POINTS
+    )
+
+    _provider_request("IG_DEMO")
+
+    payload = _IG_DEMO_BROKER.historical_prices(
+        canonical_fx_symbol(symbol),
+        resolution=_ig_resolution(interval),
+        num_points=points,
+    )
+
+    prices = payload.get("prices") or []
+    fresh = _ig_prices_to_frame(prices)
+
+    if fresh.empty:
+        raise RuntimeError(
+            f"IG DEMO returned no usable candles for "
+            f"{canonical_fx_symbol(symbol)} {interval}"
+        )
+
+    if existing.empty:
+        merged = fresh
+    else:
+        merged = pd.concat(
+            [existing, fresh],
+        )
+        merged = merged[
+            ~merged.index.duplicated(
+                keep="last",
+            )
+        ].sort_index()
+
+    merged = merged.tail(
+        IG_DEMO_MAX_CACHE_ROWS
+    )
+
+    if len(merged) < 80:
+        raise RuntimeError(
+            f"IG DEMO returned only {len(merged)} usable rows "
+            f"for {canonical_fx_symbol(symbol)} {interval}"
+        )
+
+    with _IG_HISTORY_LOCK:
+        _IG_HISTORY_CACHE[key] = RouterCacheEntry(
+            dataframe=merged.copy(),
+            created_at=time.time(),
+            source="IG_DEMO",
+        )
+
+    _PROVIDER_STATE["IG_DEMO"][
+        "historical_points"
+    ] += len(prices)
+
+    _provider_success("IG_DEMO")
+
+    # Also seed the router's normal period-specific cache.
+    _cache_put(
+        symbol,
+        period,
+        interval,
+        merged,
+        "IG_DEMO",
+    )
+
+    return merged.copy()
+
+
+# ============================================================
 # TWELVE DATA
 # ============================================================
 
@@ -586,13 +922,39 @@ def get_market_data(
     period: str = "1mo",
     interval: str = "15m",
 ) -> pd.DataFrame:
-    cached = _cache_get(symbol, period, interval)
+    cached = _cache_get(
+        symbol,
+        period,
+        interval,
+    )
 
     if cached is not None and len(cached) >= 80:
         return cached
 
     errors = []
 
+    # V6.6.5: IG DEMO is primary because this is the actual broker/demo
+    # environment the AI is executing against.
+    if (
+        IG_DEMO_MARKET_DATA_ENABLED
+        and _IG_DEMO_BROKER.configured()
+    ):
+        try:
+            return download_ig_demo(
+                symbol,
+                period,
+                interval,
+            )
+        except Exception as exc:
+            _provider_failure(
+                "IG_DEMO",
+                exc,
+            )
+            errors.append(
+                f"IG DEMO: {exc}"
+            )
+
+    # Historical fallbacks remain available.
     if TWELVE_DATA_API_KEY:
         try:
             data = download_twelve_data(
@@ -609,8 +971,13 @@ def get_market_data(
             )
             return data
         except Exception as exc:
-            _provider_failure("TWELVE_DATA", exc)
-            errors.append(f"Twelve Data: {exc}")
+            _provider_failure(
+                "TWELVE_DATA",
+                exc,
+            )
+            errors.append(
+                f"Twelve Data: {exc}"
+            )
 
     try:
         data = download_yahoo(
@@ -627,8 +994,13 @@ def get_market_data(
         )
         return data
     except Exception as exc:
-        _provider_failure("YAHOO", exc)
-        errors.append(f"Yahoo: {exc}")
+        _provider_failure(
+            "YAHOO",
+            exc,
+        )
+        errors.append(
+            f"Yahoo: {exc}"
+        )
 
     stale = _cache_get(
         symbol,
@@ -871,41 +1243,102 @@ def get_discovery_market_data(
     period: str = "5d",
     interval: str = "15m",
 ) -> pd.DataFrame:
-    """Cheap discovery route: cache -> Yahoo -> Twelve Data -> stale cache.
+    """V6.6.5 discovery: cache -> IG DEMO -> Yahoo -> Twelve -> stale.
 
-    Twelve Data is conserved for quality confirmation/deep validation while
-    broad discovery leans on Yahoo/cached data. A Yahoo failure does not stop
-    the cycle because Twelve Data and stale cache remain fallbacks.
+    Auto Manager is restricted to the nine core IG FX pairs during Phase 1,
+    so using IG here stays within the historical data budget.
     """
-    cached = _cache_get(symbol, period, interval)
+    cached = _cache_get(
+        symbol,
+        period,
+        interval,
+    )
     if cached is not None and len(cached) >= 80:
         return cached
 
     errors = []
+
+    if (
+        IG_DEMO_MARKET_DATA_ENABLED
+        and _IG_DEMO_BROKER.configured()
+    ):
+        try:
+            return download_ig_demo(
+                symbol,
+                period,
+                interval,
+            )
+        except Exception as exc:
+            _provider_failure(
+                "IG_DEMO",
+                exc,
+            )
+            errors.append(
+                f"IG DEMO: {exc}"
+            )
+
     try:
-        data = download_yahoo(symbol, period, interval)
-        _cache_put(symbol, period, interval, data, "YAHOO_DISCOVERY")
+        data = download_yahoo(
+            symbol,
+            period,
+            interval,
+        )
+        _cache_put(
+            symbol,
+            period,
+            interval,
+            data,
+            "YAHOO_DISCOVERY",
+        )
         return data
     except Exception as exc:
-        _provider_failure("YAHOO", exc)
-        errors.append(f"Yahoo: {exc}")
+        _provider_failure(
+            "YAHOO",
+            exc,
+        )
+        errors.append(
+            f"Yahoo: {exc}"
+        )
 
     if TWELVE_DATA_API_KEY:
         try:
-            data = download_twelve_data(symbol, period, interval)
-            _cache_put(symbol, period, interval, data, "TWELVE_DATA_DISCOVERY_FALLBACK")
+            data = download_twelve_data(
+                symbol,
+                period,
+                interval,
+            )
+            _cache_put(
+                symbol,
+                period,
+                interval,
+                data,
+                "TWELVE_DATA_DISCOVERY_FALLBACK",
+            )
             return data
         except Exception as exc:
-            _provider_failure("TWELVE_DATA", exc)
-            errors.append(f"Twelve Data: {exc}")
+            _provider_failure(
+                "TWELVE_DATA",
+                exc,
+            )
+            errors.append(
+                f"Twelve Data: {exc}"
+            )
 
-    stale = _cache_get(symbol, period, interval, stale=True)
+    stale = _cache_get(
+        symbol,
+        period,
+        interval,
+        stale=True,
+    )
     if stale is not None and len(stale) >= 80:
         return stale
+
     raise RuntimeError(
-        "All V6.4 discovery routes failed for "
-        f"{symbol} {period} {interval}. " + " | ".join(errors)
+        "All V6.6.5 discovery routes failed for "
+        f"{symbol} {period} {interval}. "
+        + " | ".join(errors)
     )
+
 
 def market_data_health() -> dict:
     healthy = [
@@ -923,6 +1356,7 @@ def market_data_health() -> dict:
     return {
         "status": "HEALTHY" if healthy else "READY",
         "priority": [
+            "IG_DEMO",
             "TWELVE_DATA",
             "YAHOO",
             "STALE_CACHE",
@@ -937,6 +1371,17 @@ def market_data_health() -> dict:
             for key, value in _PROVIDER_STATE.items()
         },
         "cache_entries": len(_CACHE),
+        "ig_demo_market_data": {
+            "enabled": IG_DEMO_MARKET_DATA_ENABLED,
+            "configured": _IG_DEMO_BROKER.configured(),
+            "rolling_cache_entries": len(
+                _IG_HISTORY_CACHE
+            ),
+            "refresh_seconds":
+                IG_DEMO_HISTORY_REFRESH_SECONDS,
+            "warmup_points":
+                IG_DEMO_WARMUP_POINTS,
+        },
         "universe_size": len(_UNIVERSE_CACHE),
         "universe_updated_at": (
             _UNIVERSE_UPDATED_AT or None
