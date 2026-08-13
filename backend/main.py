@@ -17,6 +17,7 @@ from market_data_router import (
     get_discovery_market_data,
     get_learning_universe,
     market_data_health,
+    get_ig_demo_broker,
 )
 
 from fastapi import Body, Depends, FastAPI, HTTPException
@@ -60,7 +61,7 @@ from confidence_replay import ConfidenceReplayEngine
 from confidence_wr_analyzer import ConfidenceWinRateAnalyzer
 from persistent_state import PersistentStateStore
 from v64_learning_engine import V64LearningTradeEngine
-from ig_demo_broker import IGDemoBroker, IGDemoError
+from ig_demo_broker import IGDemoError
 from ig_demo_bridge import IGDemoMirror
 
 from database import (
@@ -198,14 +199,14 @@ MARKETS = dict(CORE_MARKETS)
 # Twelve Data Basic is intentionally protected from credit exhaustion.
 # The full provider universe is available, but Auto Manager rotates a small
 # discovery batch through it rather than downloading 1,300+ histories at once.
-FX_DISCOVERY_BATCH_SIZE = 20
+FX_DISCOVERY_BATCH_SIZE = len(CORE_MARKETS)
 _FX_DISCOVERY_OFFSET = 0
 _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.6 API",
-    version="6.6.0",
+    title="Jasong AI Trader V6.6.5 API",
+    version="6.6.5",
 )
 
 app.add_middleware(
@@ -3357,45 +3358,13 @@ V53_WATCHER_ENGINE.start()
 def _v62_next_fx_batch(
     batch_size: int = FX_DISCOVERY_BATCH_SIZE,
 ) -> dict[str, str]:
-    """Return the next rotating slice of the curated learning FX universe.
+    """V6.6.5 Phase-1 IG DEMO discovery universe.
 
-    V6.6.4 IG-DEMO learning fix: use the existing curated learning universe
-    instead of the full provider universe. This removes unsupported exotic
-    currencies such as AED before expensive deep validation, while the IG
-    exact-market preflight remains the final execution gate.
+    Keep the first 10 broker-demo trades on nine liquid core FX pairs.
+    This avoids wasting IG historical-data allowance across an 80-pair
+    rotating universe while Yahoo/Twelve Data are degraded.
     """
-
-    global _FX_DISCOVERY_OFFSET
-
-    with _FX_DISCOVERY_LOCK:
-        universe = get_learning_universe()
-
-        if not universe:
-            return dict(CORE_MARKETS)
-
-        total = len(universe)
-        batch_size = max(
-            1, min(int(batch_size), total)
-        )
-
-        if _FX_DISCOVERY_OFFSET >= total:
-            _FX_DISCOVERY_OFFSET = 0
-
-        selected = [
-            universe[
-                (_FX_DISCOVERY_OFFSET + index) % total
-            ]
-            for index in range(batch_size)
-        ]
-
-        _FX_DISCOVERY_OFFSET = (
-            _FX_DISCOVERY_OFFSET + batch_size
-        ) % total
-
-        return {
-            item["market"]: item["symbol"]
-            for item in selected
-        }
+    return dict(CORE_MARKETS)
 
 
 def _v55_scan_candidates(
@@ -3449,12 +3418,12 @@ def _v55_scan_candidates(
     )
 
     universe_size = len(
-        get_learning_universe()
+        CORE_MARKETS
     )
 
     for candidate in ranked:
         candidate["discovery_version"] = (
-            "V6.6.4_CURATED_IG_DEMO_FX"
+            "V6.6.5_IG_DEMO_CORE9"
         )
         candidate["discovery_universe_size"] = (
             universe_size
@@ -3552,7 +3521,7 @@ V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = PAPER_AI_MIN_CONFIDENCE
 # ============================================================
 # Strictly demo-only. The broker class hard-codes demo-api.ig.com
 # and has no production IG URL.
-IG_DEMO_BROKER = IGDemoBroker()
+IG_DEMO_BROKER = get_ig_demo_broker()
 IG_DEMO_MIRROR = IGDemoMirror(
     broker=IG_DEMO_BROKER,
     trade_source=lambda: V64_LEARNING_ENGINE.trades(
