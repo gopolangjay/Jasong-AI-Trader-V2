@@ -78,6 +78,12 @@ class IGDemoMirror:
             minimum=10,
             maximum=300,
         )
+        self.account_refresh_seconds = self._int_env(
+            "IG_DEMO_ACCOUNT_REFRESH_SECONDS",
+            30,
+            minimum=15,
+            maximum=300,
+        )
 
         default_state = (
             "/var/data/jasong_ig_demo_mirror.json"
@@ -96,13 +102,16 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.6.6-IG-DEMO",
+            "version": "6.6.8-IG-DEMO",
             "mirrors": {},
             "broker_positions": [],
+            "broker_account": {},
             "last_sync_at": None,
             "last_broker_sync_at": None,
+            "last_account_sync_at": None,
             "last_error": None,
             "broker_reconciliation_error": None,
+            "account_sync_error": None,
         }
         self._load()
 
@@ -428,6 +437,142 @@ class IGDemoMirror:
                 return key, mirror
         return None, None
 
+    @staticmethod
+    def _safe_number(
+        value: Any,
+    ) -> Optional[float]:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _normalise_account_snapshot(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Extract the active IG DEMO account balance/P&L without exposing tokens."""
+        broker_status = self.broker.status()
+        active_account_id = str(
+            broker_status.get("account_id")
+            or ""
+        )
+
+        rows = [
+            dict(item)
+            for item in payload.get("accounts", []) or []
+            if isinstance(item, dict)
+        ]
+
+        selected: Dict[str, Any] = {}
+        for item in rows:
+            if (
+                active_account_id
+                and str(item.get("accountId") or "")
+                == active_account_id
+            ):
+                selected = item
+                break
+
+        if not selected:
+            for item in rows:
+                if item.get("preferred") is True:
+                    selected = item
+                    break
+
+        if not selected and rows:
+            selected = rows[0]
+
+        balance_block = selected.get("balance")
+        if not isinstance(balance_block, dict):
+            balance_block = {}
+
+        account_balance = self._safe_number(
+            balance_block.get("balance")
+        )
+        account_available = self._safe_number(
+            balance_block.get("available")
+        )
+        account_deposit = self._safe_number(
+            balance_block.get("deposit")
+        )
+        account_profit_loss = self._safe_number(
+            balance_block.get("profitLoss")
+        )
+
+        return {
+            "account_id": (
+                selected.get("accountId")
+                or active_account_id
+                or None
+            ),
+            "account_name": selected.get("accountName"),
+            "account_type": selected.get("accountType"),
+            "currency": (
+                selected.get("currency")
+                or selected.get("currencyIsoCode")
+            ),
+            "preferred": selected.get("preferred"),
+            "balance": account_balance,
+            "available": account_available,
+            "margin": account_deposit,
+            "profit_loss": account_profit_loss,
+            "source": "IG_DEMO_ACCOUNT",
+            "environment": "DEMO",
+            "live_money_execution": False,
+        }
+
+    def refresh_account_snapshot(
+        self,
+        *,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Refresh account balance/floating P&L at a quota-safe cadence."""
+        if not self.broker.configured():
+            return dict(
+                self._state.get("broker_account")
+                or {}
+            )
+
+        now = time.time()
+        last = float(
+            self._state.get("last_account_sync_at")
+            or 0.0
+        )
+
+        if (
+            not force
+            and last > 0
+            and now - last < self.account_refresh_seconds
+        ):
+            return dict(
+                self._state.get("broker_account")
+                or {}
+            )
+
+        try:
+            payload = self.broker.accounts()
+            snapshot = self._normalise_account_snapshot(
+                payload
+            )
+            with self._lock:
+                self._state["broker_account"] = snapshot
+                self._state["last_account_sync_at"] = now
+                self._state["account_sync_error"] = None
+                self._persist()
+            return dict(snapshot)
+        except Exception as exc:
+            with self._lock:
+                self._state["account_sync_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._persist()
+            return dict(
+                self._state.get("broker_account")
+                or {}
+            )
+
     def reconcile_broker_positions(
         self,
     ) -> Dict[str, Any]:
@@ -545,6 +690,11 @@ class IGDemoMirror:
             ] = None
             self._persist()
 
+        # Account balance/floating P&L is a separate IG endpoint. Refresh it
+        # at a slower cadence so performance is broker-grounded without
+        # burning the non-trading REST allowance.
+        self.refresh_account_snapshot()
+
         return self.status()
 
     def ensure_broker_fresh(
@@ -625,35 +775,68 @@ class IGDemoMirror:
         )
 
     def _broker_stats(self) -> Dict[str, Any]:
-        closed = [
+        mirrors = list(
+            self._mirrors().values()
+        )
+
+        graded = [
             item
-            for item in self._mirrors().values()
+            for item in mirrors
             if str(
                 item.get("broker_result")
                 or ""
             ).upper() in {"WIN", "LOSS"}
         ]
+
+        closed = [
+            item
+            for item in mirrors
+            if str(
+                item.get("broker_status")
+                or ""
+            ).upper() in {
+                "CLOSED",
+                "CLOSED_EXTERNALLY",
+            }
+        ]
+
         wins = sum(
             1
-            for item in closed
+            for item in graded
             if str(
                 item.get("broker_result")
                 or ""
             ).upper() == "WIN"
         )
-        losses = len(closed) - wins
+        losses = len(graded) - wins
+
+        account = dict(
+            self._state.get("broker_account")
+            or {}
+        )
+
         return {
-            "trades": len(closed),
+            "accepted_trades": self._accepted_count(),
+            "open_positions": self._open_count(),
+            "closed_positions": len(closed),
+            "graded_trades": len(graded),
+            # Backward compatibility.
+            "trades": len(graded),
             "wins": wins,
             "losses": losses,
             "win_rate_pct": (
                 round(
-                    wins / len(closed) * 100.0,
+                    wins / len(graded) * 100.0,
                     2,
                 )
-                if closed
+                if graded
                 else 0.0
             ),
+            "account_balance": account.get("balance"),
+            "account_available": account.get("available"),
+            "account_margin": account.get("margin"),
+            "account_profit_loss": account.get("profit_loss"),
+            "account_currency": account.get("currency"),
         }
 
     def phase_complete(self) -> bool:
@@ -684,6 +867,12 @@ class IGDemoMirror:
                 )
                 or []
             )
+            broker_account = dict(
+                self._state.get(
+                    "broker_account"
+                )
+                or {}
+            )
             last_broker_sync = float(
                 self._state.get(
                     "last_broker_sync_at"
@@ -704,6 +893,24 @@ class IGDemoMirror:
                     "broker_reconciliation_error"
                 )
             )
+            last_account_sync = float(
+                self._state.get(
+                    "last_account_sync_at"
+                )
+                or 0.0
+            )
+            account_sync_age = (
+                max(
+                    0.0,
+                    time.time()
+                    - last_account_sync,
+                )
+                if last_account_sync > 0
+                else None
+            )
+            account_sync_error = self._state.get(
+                "account_sync_error"
+            )
             sync_state = (
                 "ERROR"
                 if reconciliation_error
@@ -720,7 +927,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.6.7-IG-DEMO-ALWAYS-SYNC",
+                "version": "6.6.8-IG-DEMO-PERFORMANCE-SYNC",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -735,7 +942,9 @@ class IGDemoMirror:
                 "max_open_positions": self.max_open_positions,
                 "open_broker_positions": self._open_count(),
                 "broker_positions": broker_positions,
+                "broker_account": broker_account,
                 "broker_stats": self._broker_stats(),
+                "broker_performance": self._broker_stats(),
                 "sync_state": sync_state,
                 "last_broker_sync_at": (
                     last_broker_sync
@@ -752,6 +961,23 @@ class IGDemoMirror:
                 ),
                 "broker_reconciliation_error":
                     reconciliation_error,
+                "last_account_sync_at": (
+                    last_account_sync
+                    if last_account_sync > 0
+                    else None
+                ),
+                "account_sync_age_seconds": (
+                    round(
+                        account_sync_age,
+                        2,
+                    )
+                    if account_sync_age is not None
+                    else None
+                ),
+                "account_sync_error":
+                    account_sync_error,
+                "account_refresh_seconds":
+                    self.account_refresh_seconds,
                 "poll_seconds": self.poll_seconds,
                 "retry_seconds": self.retry_seconds,
                 "max_open_retries": self.max_open_retries,
@@ -1021,6 +1247,7 @@ class IGDemoMirror:
                 return self.status()
 
             self.broker.connect()
+            self.refresh_account_snapshot()
 
             # Always reconcile IG first, even if autotrade is temporarily
             # disabled. IG is the source of truth for open broker positions.
