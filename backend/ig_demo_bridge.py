@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -64,6 +66,18 @@ class IGDemoMirror:
             minimum=1,
             maximum=20,
         )
+        self.default_hold_seconds = self._int_env(
+            "IG_DEMO_DEFAULT_HOLD_SECONDS",
+            3600,
+            minimum=60,
+            maximum=86400,
+        )
+        self.reconcile_max_age_seconds = self._int_env(
+            "IG_DEMO_RECONCILE_MAX_AGE_SECONDS",
+            25,
+            minimum=10,
+            maximum=300,
+        )
 
         default_state = (
             "/var/data/jasong_ig_demo_mirror.json"
@@ -78,13 +92,17 @@ class IGDemoMirror:
         )
 
         self._lock = threading.RLock()
+        self._sync_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
             "version": "6.6.6-IG-DEMO",
             "mirrors": {},
+            "broker_positions": [],
             "last_sync_at": None,
+            "last_broker_sync_at": None,
             "last_error": None,
+            "broker_reconciliation_error": None,
         }
         self._load()
 
@@ -179,9 +197,9 @@ class IGDemoMirror:
         return self.status()
 
     def _run(self) -> None:
-        while not self._stop_event.wait(
-            self.poll_seconds
-        ):
+        # Reconcile immediately on process start. This lets a restarted
+        # backend rediscover JASONG_* IG DEMO positions before the phone opens.
+        while not self._stop_event.is_set():
             try:
                 self.sync_once()
             except Exception as exc:
@@ -194,6 +212,11 @@ class IGDemoMirror:
                     )
                     self._persist()
 
+            if self._stop_event.wait(
+                self.poll_seconds
+            ):
+                break
+
     def _mirrors(self) -> Dict[str, Dict[str, Any]]:
         mirrors = self._state.setdefault(
             "mirrors",
@@ -201,19 +224,437 @@ class IGDemoMirror:
         )
         return mirrors
 
-    def _accepted_count(self) -> int:
-        return sum(
-            1
-            for item in self._mirrors().values()
-            if item.get("ig_deal_id")
+    @staticmethod
+    def _timestamp_from_ig(value: Any) -> Optional[float]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        candidates = [
+            text,
+            text.replace("Z", "+00:00"),
+        ]
+
+        for candidate in candidates:
+            try:
+                parsed = datetime.fromisoformat(candidate)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except Exception:
+                continue
+
+        # IG sometimes returns fractional seconds with a space separator.
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+        ):
+            try:
+                parsed = datetime.strptime(
+                    text.split(".")[0],
+                    fmt,
+                ).replace(tzinfo=timezone.utc)
+                return parsed.timestamp()
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _symbol_from_market(
+        market: Dict[str, Any],
+        epic: str,
+    ) -> str:
+        name = str(
+            market.get("instrumentName")
+            or market.get("name")
+            or ""
+        ).upper()
+
+        match = re.search(
+            r"\b([A-Z]{3})\s*[/ -]\s*([A-Z]{3})\b",
+            name,
+        )
+        if match:
+            return f"{match.group(1)}/{match.group(2)}"
+
+        # Some IG names contain the pair without a separator.
+        compact = re.sub(r"[^A-Z]", "", name)
+        core_codes = {
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "AUDUSD",
+            "NZDUSD",
+            "USDCAD",
+            "USDCHF",
+            "EURJPY",
+            "GBPJPY",
+        }
+        for pair in core_codes:
+            if pair in compact:
+                return f"{pair[:3]}/{pair[3:]}"
+
+        return str(epic or name or "IG DEMO")
+
+    def _normalise_ig_positions(
+        self,
+        payload: Dict[str, Any],
+    ) -> list[Dict[str, Any]]:
+        rows: list[Dict[str, Any]] = []
+
+        for item in payload.get("positions", []) or []:
+            if not isinstance(item, dict):
+                continue
+
+            position = item.get("position") or {}
+            market = item.get("market") or {}
+            if not isinstance(position, dict):
+                continue
+            if not isinstance(market, dict):
+                market = {}
+
+            deal_reference = str(
+                position.get("dealReference")
+                or ""
+            ).strip()
+
+            # Critical safety boundary: only adopt positions created by Jasong.
+            # Manual IG DEMO positions remain untouched.
+            if not deal_reference.startswith("JASONG_"):
+                continue
+
+            deal_id = str(
+                position.get("dealId")
+                or ""
+            ).strip()
+            if not deal_id:
+                continue
+
+            epic = str(
+                market.get("epic")
+                or position.get("epic")
+                or ""
+            ).strip()
+            opened_at = self._timestamp_from_ig(
+                position.get("createdDateUTC")
+                or position.get("createdDate")
+            )
+            if opened_at is None:
+                opened_at = time.time()
+
+            try:
+                size = float(
+                    position.get("dealSize")
+                    or position.get("size")
+                    or 0.0
+                )
+            except Exception:
+                size = 0.0
+
+            try:
+                entry_level = float(
+                    position.get("level")
+                    or 0.0
+                )
+            except Exception:
+                entry_level = 0.0
+
+            rows.append({
+                "deal_id": deal_id,
+                "deal_reference": deal_reference,
+                "symbol": self._symbol_from_market(
+                    market,
+                    epic,
+                ),
+                "market": (
+                    market.get("instrumentName")
+                    or market.get("name")
+                    or self._symbol_from_market(
+                        market,
+                        epic,
+                    )
+                ),
+                "epic": epic,
+                "direction": str(
+                    position.get("direction")
+                    or ""
+                ).upper(),
+                "size": size,
+                "entry_level": entry_level,
+                "opened_at": opened_at,
+                "scheduled_close_at": (
+                    opened_at
+                    + self.default_hold_seconds
+                ),
+                "bid": market.get("bid"),
+                "offer": market.get("offer"),
+                "market_status": market.get("marketStatus"),
+                "status": "OPEN",
+                "source": "IG_DEMO_BROKER",
+                "environment": "DEMO",
+                "live_money_execution": False,
+            })
+
+        rows.sort(
+            key=lambda row: float(
+                row.get("opened_at") or 0.0
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def _mirror_by_deal_id(
+        self,
+        deal_id: str,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        for key, mirror in self._mirrors().items():
+            if str(
+                mirror.get("ig_deal_id")
+                or ""
+            ) == str(deal_id):
+                return key, mirror
+        return None, None
+
+    def _mirror_by_reference(
+        self,
+        deal_reference: str,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        for key, mirror in self._mirrors().items():
+            if str(
+                mirror.get("ig_deal_reference")
+                or ""
+            ) == str(deal_reference):
+                return key, mirror
+        return None, None
+
+    def reconcile_broker_positions(
+        self,
+    ) -> Dict[str, Any]:
+        """Rebuild local mirror state from authoritative IG DEMO positions.
+
+        This is intentionally independent of the phone/app and allows a
+        restarted backend to recover bot-created positions using JASONG_ deal
+        references.
+        """
+        if not self.broker.configured():
+            return self.status()
+
+        self.broker.connect()
+        payload = self.broker.positions()
+        positions = self._normalise_ig_positions(
+            payload
+        )
+        now = time.time()
+        current_deal_ids = {
+            str(row.get("deal_id") or "")
+            for row in positions
+        }
+
+        with self._lock:
+            mirrors = self._mirrors()
+
+            for position in positions:
+                deal_id = str(
+                    position.get("deal_id")
+                    or ""
+                )
+                deal_reference = str(
+                    position.get("deal_reference")
+                    or ""
+                )
+
+                key, mirror = self._mirror_by_deal_id(
+                    deal_id
+                )
+                if mirror is None:
+                    key, mirror = self._mirror_by_reference(
+                        deal_reference
+                    )
+
+                if mirror is None:
+                    key = f"IG_RECOVERED_{deal_id}"
+                    mirror = {
+                        "trade_id": key,
+                        "created_at": position.get(
+                            "opened_at"
+                        ),
+                        "recovered_from_ig": True,
+                        "entry_class": "IG_RECOVERED",
+                        "environment": "DEMO",
+                        "live_money_execution": False,
+                        "open_attempts": 0,
+                    }
+                    mirrors[key] = mirror
+
+                mirror.update({
+                    "symbol": position.get("symbol"),
+                    "market": position.get("market"),
+                    "direction": position.get("direction"),
+                    "ig_deal_id": deal_id,
+                    "ig_deal_reference": deal_reference,
+                    "ig_epic": position.get("epic"),
+                    "ig_size": position.get("size"),
+                    "broker_entry_level": position.get(
+                        "entry_level"
+                    ),
+                    "opened_at": (
+                        mirror.get("opened_at")
+                        or position.get("opened_at")
+                    ),
+                    "scheduled_close_at": (
+                        mirror.get("scheduled_close_at")
+                        or position.get(
+                            "scheduled_close_at"
+                        )
+                    ),
+                    "broker_status": "OPEN",
+                    "last_seen_on_ig_at": now,
+                    "last_error": None,
+                })
+
+            # If a position used to be OPEN in our ledger but IG no longer
+            # reports it, treat IG as authoritative. Do not delete the record:
+            # keeping it is what preserves the Phase-1 sample count.
+            for mirror in mirrors.values():
+                deal_id = str(
+                    mirror.get("ig_deal_id")
+                    or ""
+                )
+                if (
+                    deal_id
+                    and str(
+                        mirror.get("broker_status")
+                        or ""
+                    ).upper() == "OPEN"
+                    and deal_id not in current_deal_ids
+                ):
+                    mirror["broker_status"] = (
+                        "CLOSED_EXTERNALLY"
+                    )
+                    mirror["closed_at"] = (
+                        mirror.get("closed_at")
+                        or now
+                    )
+                    mirror["externally_closed"] = True
+
+            self._state["broker_positions"] = positions
+            self._state["last_broker_sync_at"] = now
+            self._state[
+                "broker_reconciliation_error"
+            ] = None
+            self._persist()
+
+        return self.status()
+
+    def ensure_broker_fresh(
+        self,
+        max_age_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Refresh IG position truth only when the cached snapshot is stale."""
+        if not self.broker.configured():
+            return self.status()
+
+        maximum_age = int(
+            max_age_seconds
+            if max_age_seconds is not None
+            else self.reconcile_max_age_seconds
+        )
+        last = float(
+            self._state.get("last_broker_sync_at")
+            or 0.0
         )
 
+        if (
+            last > 0
+            and time.time() - last < maximum_age
+        ):
+            return self.status()
+
+        # Avoid duplicate GET /positions calls when app polling and background
+        # sync overlap.
+        acquired = self._sync_lock.acquire(
+            blocking=False
+        )
+        if not acquired:
+            return self.status()
+
+        try:
+            return self.reconcile_broker_positions()
+        except Exception as exc:
+            with self._lock:
+                self._state[
+                    "broker_reconciliation_error"
+                ] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._persist()
+            return self.status()
+        finally:
+            self._sync_lock.release()
+
+    def _accepted_count(self) -> int:
+        return len({
+            str(item.get("ig_deal_id"))
+            for item in self._mirrors().values()
+            if item.get("ig_deal_id")
+        })
+
     def _open_count(self) -> int:
-        return sum(
+        # Combine the last authoritative IG snapshot with positions opened
+        # since that snapshot during the current cycle.
+        positions = self._state.get(
+            "broker_positions"
+        )
+        broker_count = (
+            len(positions)
+            if isinstance(positions, list)
+            else 0
+        )
+        ledger_count = sum(
             1
             for item in self._mirrors().values()
-            if item.get("broker_status") == "OPEN"
+            if str(
+                item.get("broker_status")
+                or ""
+            ).upper() == "OPEN"
         )
+        return max(
+            broker_count,
+            ledger_count,
+        )
+
+    def _broker_stats(self) -> Dict[str, Any]:
+        closed = [
+            item
+            for item in self._mirrors().values()
+            if str(
+                item.get("broker_result")
+                or ""
+            ).upper() in {"WIN", "LOSS"}
+        ]
+        wins = sum(
+            1
+            for item in closed
+            if str(
+                item.get("broker_result")
+                or ""
+            ).upper() == "WIN"
+        )
+        losses = len(closed) - wins
+        return {
+            "trades": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": (
+                round(
+                    wins / len(closed) * 100.0,
+                    2,
+                )
+                if closed
+                else 0.0
+            ),
+        }
 
     def phase_complete(self) -> bool:
         return self._accepted_count() >= self.phase_target
@@ -236,8 +677,50 @@ class IGDemoMirror:
                 ),
                 reverse=True,
             )
+
+            broker_positions = list(
+                self._state.get(
+                    "broker_positions"
+                )
+                or []
+            )
+            last_broker_sync = float(
+                self._state.get(
+                    "last_broker_sync_at"
+                )
+                or 0.0
+            )
+            broker_sync_age = (
+                max(
+                    0.0,
+                    time.time()
+                    - last_broker_sync,
+                )
+                if last_broker_sync > 0
+                else None
+            )
+            reconciliation_error = (
+                self._state.get(
+                    "broker_reconciliation_error"
+                )
+            )
+            sync_state = (
+                "ERROR"
+                if reconciliation_error
+                else (
+                    "SYNCED"
+                    if broker_sync_age is not None
+                    and broker_sync_age
+                    <= max(
+                        60,
+                        self.poll_seconds * 3,
+                    )
+                    else "STALE"
+                )
+            )
+
             return {
-                "version": "6.6.6-IG-DEMO",
+                "version": "6.6.7-IG-DEMO-ALWAYS-SYNC",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -251,12 +734,33 @@ class IGDemoMirror:
                 "phase_complete": self.phase_complete(),
                 "max_open_positions": self.max_open_positions,
                 "open_broker_positions": self._open_count(),
+                "broker_positions": broker_positions,
+                "broker_stats": self._broker_stats(),
+                "sync_state": sync_state,
+                "last_broker_sync_at": (
+                    last_broker_sync
+                    if last_broker_sync > 0
+                    else None
+                ),
+                "broker_sync_age_seconds": (
+                    round(
+                        broker_sync_age,
+                        2,
+                    )
+                    if broker_sync_age is not None
+                    else None
+                ),
+                "broker_reconciliation_error":
+                    reconciliation_error,
                 "poll_seconds": self.poll_seconds,
                 "retry_seconds": self.retry_seconds,
                 "max_open_retries": self.max_open_retries,
+                "default_hold_seconds":
+                    self.default_hold_seconds,
                 "last_sync_at": self._state.get("last_sync_at"),
                 "last_error": self._state.get("last_error"),
-                "mirrors": mirrors[:50],
+                "state_path": str(self.state_path),
+                "mirrors": mirrors[:100],
                 "environment": "DEMO",
                 "live_money_execution": False,
             }
@@ -443,198 +947,501 @@ class IGDemoMirror:
 
         self._persist()
 
+    @staticmethod
+    def _record_broker_outcome(
+        mirror: Dict[str, Any],
+        close_result: Dict[str, Any],
+    ) -> None:
+        try:
+            entry = float(
+                mirror.get("broker_entry_level")
+                or 0.0
+            )
+            exit_level = float(
+                close_result.get("level")
+                or 0.0
+            )
+        except Exception:
+            entry = 0.0
+            exit_level = 0.0
+
+        direction = str(
+            mirror.get("direction")
+            or ""
+        ).upper()
+
+        mirror["broker_exit_level"] = (
+            exit_level
+            if exit_level > 0
+            else None
+        )
+
+        if entry <= 0 or exit_level <= 0:
+            return
+
+        if direction == "BUY":
+            result = (
+                "WIN"
+                if exit_level > entry
+                else "LOSS"
+            )
+            movement = exit_level - entry
+        elif direction == "SELL":
+            result = (
+                "WIN"
+                if exit_level < entry
+                else "LOSS"
+            )
+            movement = entry - exit_level
+        else:
+            return
+
+        mirror["broker_result"] = result
+        mirror["broker_price_movement"] = movement
+
     def sync_once(self) -> Dict[str, Any]:
-        with self._lock:
-            self._state["last_sync_at"] = time.time()
-
-        if not self.enabled:
+        # Serialise full mirror cycles. App polling may separately ask for
+        # ensure_broker_fresh(), but only one mutating sync runs at a time.
+        acquired = self._sync_lock.acquire(
+            blocking=False
+        )
+        if not acquired:
             return self.status()
 
-        if not self.broker.configured():
+        try:
             with self._lock:
-                self._state["last_error"] = (
-                    "IG DEMO credentials not configured"
+                self._state["last_sync_at"] = time.time()
+
+            if not self.broker.configured():
+                with self._lock:
+                    self._state["last_error"] = (
+                        "IG DEMO credentials not configured"
+                    )
+                    self._persist()
+                return self.status()
+
+            self.broker.connect()
+
+            # Always reconcile IG first, even if autotrade is temporarily
+            # disabled. IG is the source of truth for open broker positions.
+            try:
+                payload = self.broker.positions()
+                positions = self._normalise_ig_positions(
+                    payload
                 )
-                self._persist()
-            return self.status()
+                now = time.time()
+                current_ids = {
+                    str(row.get("deal_id") or "")
+                    for row in positions
+                }
 
-        self.broker.connect()
+                with self._lock:
+                    for position in positions:
+                        deal_id = str(
+                            position.get("deal_id")
+                            or ""
+                        )
+                        deal_reference = str(
+                            position.get("deal_reference")
+                            or ""
+                        )
 
-        trade_payload = self.trade_source()
-        trades = self._trade_rows(trade_payload)
-        by_id = {
-            str(item.get("trade_id")): item
-            for item in trades
-            if item.get("trade_id")
-        }
+                        key, mirror = self._mirror_by_deal_id(
+                            deal_id
+                        )
+                        if mirror is None:
+                            key, mirror = self._mirror_by_reference(
+                                deal_reference
+                            )
 
-        # 1. Close broker positions whose AI learning trade has settled
-        #    or whose planned holding period is due.
-        for trade_id, mirror in list(
-            self._mirrors().items()
-        ):
-            if mirror.get("broker_status") != "OPEN":
-                continue
+                        if mirror is None:
+                            key = (
+                                f"IG_RECOVERED_{deal_id}"
+                            )
+                            mirror = {
+                                "trade_id": key,
+                                "created_at":
+                                    position.get(
+                                        "opened_at"
+                                    ),
+                                "recovered_from_ig":
+                                    True,
+                                "entry_class":
+                                    "IG_RECOVERED",
+                                "environment": "DEMO",
+                                "live_money_execution":
+                                    False,
+                                "open_attempts": 0,
+                            }
+                            self._mirrors()[
+                                key
+                            ] = mirror
 
-            trade = by_id.get(trade_id)
-            if trade is None:
-                continue
+                        mirror.update({
+                            "symbol":
+                                position.get(
+                                    "symbol"
+                                ),
+                            "market":
+                                position.get(
+                                    "market"
+                                ),
+                            "direction":
+                                position.get(
+                                    "direction"
+                                ),
+                            "ig_deal_id":
+                                deal_id,
+                            "ig_deal_reference":
+                                deal_reference,
+                            "ig_epic":
+                                position.get(
+                                    "epic"
+                                ),
+                            "ig_size":
+                                position.get(
+                                    "size"
+                                ),
+                            "broker_entry_level":
+                                position.get(
+                                    "entry_level"
+                                ),
+                            "opened_at":
+                                mirror.get(
+                                    "opened_at"
+                                )
+                                or position.get(
+                                    "opened_at"
+                                ),
+                            "scheduled_close_at":
+                                mirror.get(
+                                    "scheduled_close_at"
+                                )
+                                or position.get(
+                                    "scheduled_close_at"
+                                ),
+                            "broker_status":
+                                "OPEN",
+                            "last_seen_on_ig_at":
+                                now,
+                            "last_error":
+                                None,
+                        })
 
-            if self._close_due(trade, mirror):
+                    for mirror in (
+                        self._mirrors().values()
+                    ):
+                        deal_id = str(
+                            mirror.get(
+                                "ig_deal_id"
+                            )
+                            or ""
+                        )
+                        if (
+                            deal_id
+                            and str(
+                                mirror.get(
+                                    "broker_status"
+                                )
+                                or ""
+                            ).upper() == "OPEN"
+                            and deal_id
+                            not in current_ids
+                        ):
+                            mirror[
+                                "broker_status"
+                            ] = (
+                                "CLOSED_EXTERNALLY"
+                            )
+                            mirror[
+                                "closed_at"
+                            ] = (
+                                mirror.get(
+                                    "closed_at"
+                                )
+                                or now
+                            )
+
+                    self._state[
+                        "broker_positions"
+                    ] = positions
+                    self._state[
+                        "last_broker_sync_at"
+                    ] = now
+                    self._state[
+                        "broker_reconciliation_error"
+                    ] = None
+            except Exception as exc:
+                with self._lock:
+                    self._state[
+                        "broker_reconciliation_error"
+                    ] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+            trade_payload = self.trade_source()
+            trades = self._trade_rows(
+                trade_payload
+            )
+            by_id = {
+                str(item.get("trade_id")): item
+                for item in trades
+                if item.get("trade_id")
+            }
+
+            # Close due JASONG positions. If internal learning state survived,
+            # its due time wins. If it was lost during a restart, the recovered
+            # broker position's own scheduled_close_at is used.
+            for trade_id, mirror in list(
+                self._mirrors().items()
+            ):
+                if str(
+                    mirror.get("broker_status")
+                    or ""
+                ).upper() != "OPEN":
+                    continue
+
+                trade = by_id.get(trade_id)
+                due = False
+
+                if trade is not None:
+                    due = self._close_due(
+                        trade,
+                        mirror,
+                    )
+                else:
+                    try:
+                        scheduled = float(
+                            mirror.get(
+                                "scheduled_close_at"
+                            )
+                            or 0.0
+                        )
+                    except Exception:
+                        scheduled = 0.0
+                    due = bool(
+                        scheduled > 0
+                        and time.time()
+                        >= scheduled
+                    )
+
+                if not due:
+                    continue
+
                 deal_id = str(
                     mirror.get("ig_deal_id")
                     or ""
                 )
                 if not deal_id:
                     continue
+
                 try:
-                    result = self.broker.close_position(
-                        deal_id
+                    result = (
+                        self.broker.close_position(
+                            deal_id
+                        )
                     )
-                    mirror["broker_status"] = "CLOSED"
-                    mirror["closed_at"] = time.time()
-                    mirror["close_result"] = result
-                    mirror["internal_result"] = trade.get(
-                        "result"
+                    mirror[
+                        "broker_status"
+                    ] = "CLOSED"
+                    mirror["closed_at"] = (
+                        time.time()
                     )
-                    mirror["internal_pnl"] = trade.get(
-                        "pnl"
+                    mirror[
+                        "close_result"
+                    ] = result
+                    if trade is not None:
+                        mirror[
+                            "internal_result"
+                        ] = trade.get(
+                            "result"
+                        )
+                        mirror[
+                            "internal_pnl"
+                        ] = trade.get(
+                            "pnl"
+                        )
+                    self._record_broker_outcome(
+                        mirror,
+                        result,
                     )
                 except Exception as exc:
                     mirror["last_error"] = (
-                        f"close: {type(exc).__name__}: {exc}"
+                        f"close: "
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
                     )
 
-        # 2. Mirror newly opened Jasong AI learning trades.
-        #    Existing transient errors are retried automatically. This is
-        #    important because an IG account-allowance 403 is temporary and
-        #    must not permanently strand an otherwise-valid AI trade.
-        if not self.phase_complete():
-            for trade in trades:
-                if self.phase_complete():
-                    break
-                if self._open_count() >= self.max_open_positions:
-                    break
+            # Autotrade-disabled mode still reconciles and closes bot-owned
+            # positions, but does not create new ones.
+            if self.enabled and not self.phase_complete():
+                for trade in trades:
+                    if self.phase_complete():
+                        break
+                    if (
+                        self._open_count()
+                        >= self.max_open_positions
+                    ):
+                        break
 
-                trade_id = str(
-                    trade.get("trade_id")
-                    or ""
-                )
-                if not trade_id:
-                    continue
+                    trade_id = str(
+                        trade.get("trade_id")
+                        or ""
+                    )
+                    if not trade_id:
+                        continue
 
-                trade_status = str(
-                    trade.get("status")
-                    or ""
-                ).upper()
-                if trade_status != "OPEN":
-                    continue
-
-                existing = self._mirrors().get(
-                    trade_id
-                )
-
-                if existing is not None:
-                    broker_status = str(
-                        existing.get("broker_status")
+                    trade_status = str(
+                        trade.get("status")
                         or ""
                     ).upper()
-
-                    if broker_status in {
-                        "OPEN",
-                        "CLOSED",
-                        "REJECTED",
-                        "SUBMITTING",
-                    }:
+                    if trade_status != "OPEN":
                         continue
 
-                    # Upgrade old persisted ERROR records from V6.6.5 when
-                    # their failure was the temporary IG allowance condition.
-                    last_error = str(
-                        existing.get("last_error")
-                        or ""
-                    )
-                    attempts = int(
-                        existing.get("open_attempts")
-                        or 0
+                    existing = (
+                        self._mirrors().get(
+                            trade_id
+                        )
                     )
 
-                    if (
-                        broker_status == "ERROR"
-                        and self._retryable_open_error(
-                            last_error
-                        )
-                        and attempts < self.max_open_retries
-                    ):
-                        existing["broker_status"] = "RETRY_WAIT"
-                        existing["next_retry_at"] = time.time()
+                    if existing is not None:
+                        broker_status = str(
+                            existing.get(
+                                "broker_status"
+                            )
+                            or ""
+                        ).upper()
 
-                    if str(
-                        existing.get("broker_status")
-                        or ""
-                    ).upper() != "RETRY_WAIT":
+                        if broker_status in {
+                            "OPEN",
+                            "CLOSED",
+                            "CLOSED_EXTERNALLY",
+                            "REJECTED",
+                            "SUBMITTING",
+                        }:
+                            continue
+
+                        last_error = str(
+                            existing.get(
+                                "last_error"
+                            )
+                            or ""
+                        )
+                        attempts = int(
+                            existing.get(
+                                "open_attempts"
+                            )
+                            or 0
+                        )
+
+                        if (
+                            broker_status
+                            == "ERROR"
+                            and self._retryable_open_error(
+                                last_error
+                            )
+                            and attempts
+                            < self.max_open_retries
+                        ):
+                            existing[
+                                "broker_status"
+                            ] = "RETRY_WAIT"
+                            existing[
+                                "next_retry_at"
+                            ] = time.time()
+
+                        if str(
+                            existing.get(
+                                "broker_status"
+                            )
+                            or ""
+                        ).upper() != "RETRY_WAIT":
+                            continue
+
+                        try:
+                            next_retry = float(
+                                existing.get(
+                                    "next_retry_at"
+                                )
+                                or 0.0
+                            )
+                        except Exception:
+                            next_retry = 0.0
+
+                        if (
+                            time.time()
+                            < next_retry
+                        ):
+                            continue
+
+                        self._submit_open(
+                            trade,
+                            existing,
+                        )
                         continue
 
-                    try:
-                        next_retry = float(
-                            existing.get("next_retry_at")
-                            or 0.0
-                        )
-                    except Exception:
-                        next_retry = 0.0
-
-                    if time.time() < next_retry:
-                        continue
-
+                    mirror = {
+                        "trade_id": trade_id,
+                        "symbol":
+                            trade.get(
+                                "symbol"
+                            )
+                            or trade.get(
+                                "market"
+                            ),
+                        "direction":
+                            str(
+                                trade.get(
+                                    "direction"
+                                )
+                                or ""
+                            ).upper(),
+                        "entry_class":
+                            trade.get(
+                                "entry_class"
+                            ),
+                        "model_ai_confidence":
+                            trade.get(
+                                "model_ai_confidence"
+                            ),
+                        "internal_entry_price":
+                            trade.get(
+                                "entry_price"
+                            ),
+                        "scheduled_close_at":
+                            trade.get(
+                                "scheduled_close_at"
+                            ),
+                        "created_at":
+                            time.time(),
+                        "broker_status":
+                            "NEW",
+                        "environment":
+                            "DEMO",
+                        "live_money_execution":
+                            False,
+                        "open_attempts":
+                            0,
+                        "next_retry_at":
+                            None,
+                    }
+                    self._mirrors()[
+                        trade_id
+                    ] = mirror
+                    self._persist()
                     self._submit_open(
                         trade,
-                        existing,
+                        mirror,
                     )
-                    continue
 
-                symbol = str(
-                    trade.get("symbol")
-                    or trade.get("market")
-                    or ""
-                )
-                direction = str(
-                    trade.get("direction")
-                    or ""
-                ).upper()
-
-                mirror = {
-                    "trade_id": trade_id,
-                    "symbol": symbol,
-                    "direction": direction,
-                    "entry_class": trade.get(
-                        "entry_class"
-                    ),
-                    "model_ai_confidence": trade.get(
-                        "model_ai_confidence"
-                    ),
-                    "internal_entry_price": trade.get(
-                        "entry_price"
-                    ),
-                    "scheduled_close_at": trade.get(
-                        "scheduled_close_at"
-                    ),
-                    "created_at": time.time(),
-                    "broker_status": "NEW",
-                    "environment": "DEMO",
-                    "live_money_execution": False,
-                    "open_attempts": 0,
-                    "next_retry_at": None,
-                }
-                self._mirrors()[trade_id] = mirror
+            # Re-read positions after a trade/close cycle only when the broker
+            # snapshot is older than one poll. This keeps the app close to IG
+            # without exceeding IG's non-trading REST quota.
+            with self._lock:
+                self._state["last_error"] = None
                 self._persist()
 
-                self._submit_open(
-                    trade,
-                    mirror,
-                )
+            return self.status()
+        finally:
+            self._sync_lock.release()
 
-        with self._lock:
-            self._state["last_error"] = None
-            self._persist()
-
-        return self.status()
