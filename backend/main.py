@@ -4744,6 +4744,13 @@ def get_auto_dashboard(
         "learning": learning_status,
         "learning_watchers": learning_watchers[:20],
         "ig_demo": ig_demo_status,
+        "ig_demo_performance":
+            dict(
+                ig_demo_status.get(
+                    "broker_performance"
+                )
+                or {}
+            ),
         "paper_trades":
             paper_trade_rows[:50],
         "v66_forward_intelligence":
@@ -5621,6 +5628,11 @@ def _v664_overnight_demo_snapshot() -> dict:
         ig_demo.get("broker_stats")
         or {}
     )
+    broker_performance = dict(
+        ig_demo.get("broker_performance")
+        or broker_stats
+        or {}
+    )
     learning_actual = dict(
         learning.get("actual")
         or {}
@@ -5660,7 +5672,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.6.7-ALWAYS-SYNC",
+            "6.6.8-PERFORMANCE-SYNC",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
@@ -5755,6 +5767,40 @@ def _v664_overnight_demo_snapshot() -> dict:
                     )
                     or 0.0
                 ),
+            "broker_closed_positions":
+                int(
+                    broker_performance.get(
+                        "closed_positions"
+                    )
+                    or 0
+                ),
+            "broker_graded_trades":
+                int(
+                    broker_performance.get(
+                        "graded_trades"
+                    )
+                    or 0
+                ),
+            "broker_account_balance":
+                broker_performance.get(
+                    "account_balance"
+                ),
+            "broker_account_available":
+                broker_performance.get(
+                    "account_available"
+                ),
+            "broker_account_margin":
+                broker_performance.get(
+                    "account_margin"
+                ),
+            "broker_running_pnl":
+                broker_performance.get(
+                    "account_profit_loss"
+                ),
+            "broker_account_currency":
+                broker_performance.get(
+                    "account_currency"
+                ),
             "broker_sync_state":
                 ig_demo.get(
                     "sync_state"
@@ -5769,6 +5815,8 @@ def _v664_overnight_demo_snapshot() -> dict:
             latest_settled,
         "broker_positions":
             broker_positions,
+        "broker_performance":
+            broker_performance,
         "manager": manager,
         "learning": learning,
         "ig_demo": ig_demo,
