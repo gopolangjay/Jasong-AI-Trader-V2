@@ -1961,6 +1961,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   .toList();
         }
 
+        final rawModelEvidence =
+            response['model_forward_evidence'];
+
+        if (rawModelEvidence is Map) {
+          forwardStats =
+              Map<String, dynamic>.from(
+            rawModelEvidence,
+          );
+        }
+
         final rawIgPerformance =
             response['ig_demo_performance'];
 
@@ -2587,7 +2597,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> loadForwardStats() async {
     try {
       final uri = Uri.parse(
-        '$apiBase/forward-stats',
+        '$apiBase/model-forward-evidence',
       ).replace(
         queryParameters: {
           'starting_balance':
@@ -3867,6 +3877,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final forwardWr = forwardStats?['win_rate_pct'] ??
         forwardStats?['forward_win_rate_pct'] ??
         0;
+    final modelOpen =
+        forwardStats?['open_entries'] ?? 0;
+    final modelSettled =
+        forwardStats?['settled_entries'] ?? 0;
+    final modelWins =
+        forwardStats?['wins'] ?? 0;
+    final modelLosses =
+        forwardStats?['losses'] ?? 0;
+    final modelBrokerMatched =
+        forwardStats?['broker_matched_entries'] ?? 0;
+    final recoveredUnattributed =
+        forwardStats?['broker_recovered_unattributed'] ?? 0;
 
     final brokerPerf =
         igDemoPerformance ??
@@ -4755,20 +4777,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           sectionTitle(
             'Model forward evidence',
             subtitle:
-                'Internal PAPER statistics kept separate from broker DEMO performance',
+                'V6 AI-learning entries • open trades count immediately; W/L only after settlement',
           ),
           Row(
             children: [
               statTile(
-                'Forward trades',
+                'Model entries',
                 '$forwardTrades',
                 Icons.receipt_long_outlined,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Forward WR',
-                '${formatPercent(forwardWr)}%',
+                'Open model',
+                '$modelOpen',
+                Icons.hourglass_top_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Settled model',
+                '$modelSettled',
+                Icons.fact_check_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Model W / L',
+                '$modelWins / $modelLosses',
+                Icons.insights_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Model WR',
+                '${formatNumber(forwardWr, decimals: 1)}%',
                 Icons.percent_rounded,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Broker matched',
+                '$modelBrokerMatched',
+                Icons.link_rounded,
               ),
             ],
           ),
@@ -4792,6 +4846,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ],
           ),
+          if ((int.tryParse('$recoveredUnattributed') ?? 0) > 0) ...[
+            const SizedBox(height: 8),
+            glassCard(
+              child: Text(
+                '$recoveredUnattributed IG-recovered position(s) are preserved as broker evidence but are not falsely attributed to the model because their original confidence metadata was lost before Always-Sync persistence.',
+                style: const TextStyle(
+                  color: Colors.amberAccent,
+                  fontSize: 11,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
@@ -6261,7 +6328,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.6.8 • Performance-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.6.9 • Evidence-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
