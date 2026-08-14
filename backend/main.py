@@ -64,6 +64,7 @@ from persistent_state import PersistentStateStore
 from v64_learning_engine import V64LearningTradeEngine
 from ig_demo_broker import IGDemoError
 from ig_demo_bridge import IGDemoMirror
+from compound_engine import EliteCompoundEngine
 
 from database import (
     SessionLocal,
@@ -206,8 +207,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.6.7 API",
-    version="6.6.7",
+    title="Jasong AI Trader V6.7.0 API",
+    version="6.7.0",
 )
 
 app.add_middleware(
@@ -4760,6 +4761,15 @@ def get_auto_dashboard(
                 )
                 or {}
             ),
+        "compound": (
+            COMPOUND_ENGINE.status()
+            if "COMPOUND_ENGINE" in globals()
+            else {
+                "status": "STARTING",
+                "environment": "DEMO",
+                "live_money_execution": False,
+            }
+        ),
         "paper_trades":
             paper_trade_rows[:50],
         "v66_forward_intelligence":
@@ -5782,6 +5792,378 @@ def _v66_ai_learning_cycle() -> dict:
         _AI_LEARNING_RUN_LOCK.release()
 
 
+# ============================================================
+# V6.7.0 ELITE 80/20 COMPOUND ENGINE
+# ============================================================
+
+def _v670_compound_candidate_source(
+    cycle_capital: float,
+) -> list[dict]:
+    """Evaluate the current V64 learning watcher pool for Elite Compound.
+
+    This is read-only with respect to the existing learning system. It reuses
+    the already-sourced/deep-validated watcher metadata, obtains a fresh live
+    signal, and exposes the fields the compound engine needs for its own gate.
+    Existing PAPER/SHADOW tracking remains untouched.
+    """
+    watcher_payload = V64_LEARNING_ENGINE.watchers()
+    watchers = (
+        watcher_payload.get("watchers", [])
+        if isinstance(watcher_payload, dict)
+        else []
+    )
+    watchers = [
+        dict(item)
+        for item in watchers
+        if isinstance(item, dict)
+    ]
+
+    evaluated: list[dict] = []
+    balance = max(
+        1.0,
+        float(cycle_capital or 1.0),
+    )
+
+    for rank, watcher in enumerate(
+        watchers,
+        start=1,
+    ):
+        symbol = str(
+            watcher.get("symbol")
+            or ""
+        ).strip()
+        wanted = str(
+            watcher.get("direction")
+            or ""
+        ).upper().strip()
+        market = str(
+            watcher.get("market")
+            or symbol
+        ).strip()
+
+        candidate_meta = (
+            watcher.get("candidate")
+            if isinstance(
+                watcher.get("candidate"),
+                dict,
+            )
+            else {}
+        )
+        validated_meta = (
+            watcher.get("validated")
+            if isinstance(
+                watcher.get("validated"),
+                dict,
+            )
+            else {}
+        )
+
+        smart_score = _ai_learning_candidate_score(
+            candidate_meta
+        )
+        quality_tier = str(
+            candidate_meta.get("quality_tier")
+            or validated_meta.get("quality_tier")
+            or ""
+        ).upper().strip()
+        deep_status = str(
+            watcher.get("deep_status")
+            or validated_meta.get("status")
+            or ""
+        ).upper().strip()
+
+        row = {
+            "rank": rank,
+            "watcher_id": watcher.get("watcher_id"),
+            "market": market,
+            "symbol": symbol,
+            "direction": wanted,
+            "quality_tier": quality_tier,
+            "deep_status": deep_status,
+            "smart_fast_score": smart_score,
+            "verified": bool(watcher.get("verified")),
+            "experimental": bool(watcher.get("experimental")),
+            "trade_eligible": bool(watcher.get("trade_eligible")),
+            "strategy_quarantined": bool(
+                candidate_meta.get(
+                    "strategy_quarantined",
+                    False,
+                )
+            ),
+            "live_direction": None,
+            "direction_match": False,
+            "quant_confidence": 0.0,
+            "model_ai_confidence": 0.0,
+            "reason": None,
+        }
+
+        if (
+            not symbol
+            or wanted not in {
+                "BUY",
+                "SELL",
+            }
+        ):
+            row["reason"] = (
+                "Watcher has no valid BUY/SELL symbol."
+            )
+            evaluated.append(row)
+            continue
+
+        if row["strategy_quarantined"]:
+            row["reason"] = (
+                "Existing strategy-health gate quarantined this candidate."
+            )
+            evaluated.append(row)
+            continue
+
+        live_result = _ai_learning_call_with_timeout(
+            _v63_adaptive_live_signal,
+            symbol,
+            watcher.get(
+                "risk_mode",
+                "Balanced",
+            ),
+            balance,
+            timeout_seconds=25.0,
+        )
+
+        if not live_result.get("ok"):
+            row["reason"] = (
+                "Live signal timeout"
+                if live_result.get("timeout")
+                else (
+                    "Live signal error: "
+                    f"{live_result.get('error')}"
+                )
+            )
+            evaluated.append(row)
+            continue
+
+        live = dict(
+            live_result.get("result")
+            or {}
+        )
+        live_direction = (
+            _ai_learning_live_direction(
+                live
+            )
+        )
+        quant = (
+            V64_LEARNING_ENGINE
+            ._confidence01(
+                live.get("confidence")
+            )
+        )
+        model_ai = (
+            V64_LEARNING_ENGINE
+            ._directional_model_ai_confidence(
+                live,
+                wanted,
+            )
+        )
+
+        row.update({
+            "live_direction": live_direction,
+            "direction_match": (
+                live_direction == wanted
+            ),
+            "quant_confidence": quant,
+            "quant_confidence_pct": round(
+                quant * 100.0,
+                2,
+            ),
+            "model_ai_confidence": model_ai,
+            "model_ai_directional_confidence_pct": round(
+                model_ai * 100.0,
+                2,
+            ),
+            "live_price": live.get("price"),
+            "rsi": live.get("rsi"),
+            "signal_reason": live.get("reason"),
+            "reason": live.get("reason"),
+        })
+        evaluated.append(row)
+
+    evaluated.sort(
+        key=lambda row: (
+            float(
+                row.get(
+                    "model_ai_confidence"
+                )
+                or 0.0
+            ),
+            float(
+                row.get(
+                    "quant_confidence"
+                )
+                or 0.0
+            ),
+            float(
+                row.get(
+                    "smart_fast_score"
+                )
+                or 0.0
+            ),
+        ),
+        reverse=True,
+    )
+    return evaluated
+
+
+COMPOUND_STATE_PATH = os.getenv(
+    "COMPOUND_STATE_PATH",
+    (
+        "/var/data/jasong_compound_state.json"
+        if os.path.isdir("/var/data")
+        else "/tmp/jasong_compound_state.json"
+    ),
+)
+
+COMPOUND_ENGINE = EliteCompoundEngine(
+    broker=IG_DEMO_BROKER,
+    candidate_source=
+        _v670_compound_candidate_source,
+    correlation_source=
+        _v66_fx_correlation_matrix,
+    state_path=COMPOUND_STATE_PATH,
+)
+COMPOUND_ENGINE.start_thread()
+
+
+@app.get("/compound/status")
+def compound_status():
+    return COMPOUND_ENGINE.status()
+
+
+@app.get("/compound/rules")
+def compound_rules():
+    return COMPOUND_ENGINE.rules()
+
+
+@app.get("/compound/history")
+def compound_history(
+    limit: int = 100,
+):
+    return COMPOUND_ENGINE.history(
+        limit=limit
+    )
+
+
+@app.get("/compound/candidates")
+def compound_candidates():
+    return COMPOUND_ENGINE.candidates()
+
+
+@app.get("/compound/positions")
+def compound_positions():
+    return COMPOUND_ENGINE.positions()
+
+
+@app.post("/compound/start")
+def compound_start(
+    starting_capital: float,
+    new_campaign: bool = True,
+):
+    """Start the Elite Compound strategy on IG DEMO only.
+
+    Legacy JASONG_* broker entries are paused so that IG account P&L can be
+    attributed cleanly to the compound basket. The existing Auto Manager,
+    PAPER learning, model-forward evidence and SHADOW evidence keep running.
+    """
+    validate_balance(
+        starting_capital
+    )
+
+    # Stop only NEW legacy broker entries. IGDemoMirror continues its thread,
+    # reconciles existing JASONG_* positions and closes them when due.
+    IG_DEMO_MIRROR.set_enabled(False)
+    IG_DEMO_MIRROR.start()
+    COMPOUND_ENGINE.mark_legacy_execution_paused(
+        True
+    )
+
+    try:
+        result = COMPOUND_ENGINE.start_campaign(
+            starting_capital,
+            new_campaign=new_campaign,
+        )
+    except (ValueError, IGDemoError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        )
+
+    return {
+        "status": "COMPOUND_START_REQUESTED",
+        "compound": result,
+        "legacy_ai_tracking_preserved": True,
+        "legacy_ig_new_entries_paused": True,
+        "ig_environment": "DEMO",
+        "live_money_execution": False,
+    }
+
+
+@app.post("/compound/resume")
+def compound_resume():
+    IG_DEMO_MIRROR.set_enabled(False)
+    IG_DEMO_MIRROR.start()
+    COMPOUND_ENGINE.mark_legacy_execution_paused(
+        True
+    )
+    try:
+        result = COMPOUND_ENGINE.resume()
+    except (ValueError, IGDemoError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        )
+    return {
+        "status": "COMPOUND_RESUMED",
+        "compound": result,
+        "legacy_ai_tracking_preserved": True,
+        "legacy_ig_new_entries_paused": True,
+        "ig_environment": "DEMO",
+        "live_money_execution": False,
+    }
+
+
+@app.post("/compound/stop")
+def compound_stop(
+    close_now: bool = False,
+    resume_legacy: bool = False,
+):
+    result = COMPOUND_ENGINE.stop(
+        close_now=close_now
+    )
+
+    if resume_legacy:
+        IG_DEMO_MIRROR.set_enabled(True)
+        IG_DEMO_MIRROR.start()
+        COMPOUND_ENGINE.mark_legacy_execution_paused(
+            False
+        )
+
+    return {
+        "status": (
+            "COMPOUND_STOPPED"
+            if close_now
+            else "COMPOUND_NEW_CYCLES_STOPPED"
+        ),
+        "compound": result,
+        "legacy_ig_new_entries_resumed": bool(
+            resume_legacy
+        ),
+        "ig_environment": "DEMO",
+        "live_money_execution": False,
+    }
+
+
+@app.post("/compound/run-now")
+def compound_run_now():
+    return COMPOUND_ENGINE.tick()
+
+
 
 # ============================================================
 # V6.6.4 OVERNIGHT IG DEMO CONTROL
@@ -6000,7 +6382,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.6.9-EVIDENCE-SYNC",
+            "6.7.0-ELITE-COMPOUND",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
@@ -6418,6 +6800,11 @@ def ai_learning_status():
         "mode": "DIRECT_AI40_SHADOW_PROMOTION_V662",
         "paper_only": True,
         "broker_execution_enabled": False,
+        "ig_demo_broker_execution_enabled": bool(
+            IG_DEMO_MIRROR.status().get("enabled")
+            or COMPOUND_ENGINE.status().get("enabled")
+        ),
+        "live_money_execution": False,
         "normal_path_disabled_for_ai_learning": True,
         "shadow_promotion_for_ai_learning": True,
         "ig_demo": IG_DEMO_MIRROR.status(),
@@ -7397,17 +7784,29 @@ def _v68_copilot_context():
                     ),
             })
 
+    ig_demo_state = IG_DEMO_MIRROR.status()
+    compound_state = COMPOUND_ENGINE.status()
+    ig_demo_execution_enabled = bool(
+        ig_demo_state.get("enabled")
+        or compound_state.get("enabled")
+        or compound_state.get("current_cycle")
+    )
+
     return {
         "engine": {
             "version":
-                "V6.8.1",
-            "paper_only":
+                "V6.7.0",
+            "paper_learning_enabled":
                 True,
-            "broker_execution_enabled":
+            "ig_demo_broker_execution_enabled":
+                ig_demo_execution_enabled,
+            "live_money_execution":
                 False,
             "copilot_advisory_only":
                 True,
         },
+        "ig_demo": ig_demo_state,
+        "elite_compound": compound_state,
         "adaptive_confidence":
             adaptive_confidence_gate.snapshot(),
         "v66_forward_intelligence":
@@ -7483,8 +7882,9 @@ def v68_overnight_review():
         )
 
     question = (
-        "Review the genuine PAPER trading performance in this evidence "
-        "for the most recent overnight session. Separate settled trades "
+        "Review the most recent Jasong session using BOTH internal PAPER/model evidence "
+        "and actual IG DEMO broker evidence. If Elite Compound was active, review its cycle evidence separately. "
+        "Separate settled trades "
         "from open/watch-only setups. Include wins, losses, WR, PF and "
         "P&L where supported. Identify repeated loss patterns and say "
         "whether the sample is large enough to justify changing the strategy."
