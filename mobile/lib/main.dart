@@ -142,6 +142,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // V6.6.4 mobile control plane for server-side IG DEMO overnight runs.
   Map<String, dynamic>? overnightDemoStatus;
+  Map<String, dynamic>? igDemoPerformance;
   bool overnightDemoBusy = false;
 
   final TextEditingController copilotController = TextEditingController();
@@ -1658,6 +1659,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       setState(() {
         overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+
+        if (rawPerformance is Map) {
+          igDemoPerformance =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+        }
       });
     } catch (_) {
       // Keep the last server-side overnight snapshot visible.
@@ -1698,6 +1709,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       setState(() {
         overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+        if (rawPerformance is Map) {
+          igDemoPerformance =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+        }
+
         networkStatus =
             'Overnight IG DEMO is running on the server.';
       });
@@ -1750,6 +1771,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       setState(() {
         overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+        if (rawPerformance is Map) {
+          igDemoPerformance =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+        }
+
         networkStatus = response['message']
                 ?.toString() ??
             'Overnight DEMO stopped.';
@@ -1928,6 +1959,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   )
                   .toList();
+        }
+
+        final rawIgPerformance =
+            response['ig_demo_performance'];
+
+        if (rawIgPerformance is Map) {
+          igDemoPerformance =
+              Map<String, dynamic>.from(
+            rawIgPerformance,
+          );
         }
 
         final rawLearning =
@@ -3827,6 +3868,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         forwardStats?['forward_win_rate_pct'] ??
         0;
 
+    final brokerPerf =
+        igDemoPerformance ??
+            <String, dynamic>{};
+
+    final igAccepted =
+        brokerPerf['accepted_trades'] ?? 0;
+    final igOpen =
+        brokerPerf['open_positions'] ?? 0;
+    final igClosed =
+        brokerPerf['closed_positions'] ?? 0;
+    final igGraded =
+        brokerPerf['graded_trades'] ??
+            brokerPerf['trades'] ??
+            0;
+    final igWins =
+        brokerPerf['wins'] ?? 0;
+    final igLosses =
+        brokerPerf['losses'] ?? 0;
+    final igWinRate =
+        brokerPerf['win_rate_pct'] ?? 0;
+    final igBalance =
+        brokerPerf['account_balance'];
+    final igAvailable =
+        brokerPerf['account_available'];
+    final igRunningPnl =
+        brokerPerf['account_profit_loss'];
+    final igCurrency =
+        brokerPerf['account_currency']
+                ?.toString() ??
+            '';
+
     final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
     final ranking = (fastScan?['ranking'] as List?) ?? const [];
 
@@ -4153,9 +4225,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           Row(
             children: [
-              statTile('Paper balance', '$paperBalance', Icons.account_balance_wallet_outlined),
+              statTile(
+                igBalance != null ? 'IG funds' : 'Paper balance',
+                igBalance != null
+                    ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}'
+                    : '$paperBalance',
+                Icons.account_balance_wallet_outlined,
+              ),
               const SizedBox(width: 10),
-              statTile('Open trades', '$openTrades / 3', Icons.swap_horiz_rounded),
+              statTile(
+                'IG positions',
+                '$igOpen',
+                Icons.swap_horiz_rounded,
+              ),
             ],
           ),
           const SizedBox(height: 10),
@@ -4163,7 +4245,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             children: [
               statTile('Watchers', '$activeWatchers / $targetWatchers', Icons.visibility_outlined),
               const SizedBox(width: 10),
-              statTile('Forward trades', '$forwardTrades', Icons.show_chart_rounded),
+              statTile('Phase', '$igAccepted / 10', Icons.flag_outlined),
             ],
           ),
           const SizedBox(height: 20),
@@ -4431,76 +4513,301 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     Widget tradesPage() {
+      final pnlValue =
+          double.tryParse(
+            '${igRunningPnl ?? 0}',
+          ) ??
+          0.0;
+
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
-          sectionTitle('Trade performance', subtitle: 'Forward PAPER + reconciled IG DEMO broker journal'),
+          sectionTitle(
+            'IG DEMO performance',
+            subtitle:
+                'Broker-grounded Phase-1 performance • IG is the source of truth',
+          ),
           Row(
             children: [
-              statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
+              statTile(
+                'Phase trades',
+                '$igAccepted / 10',
+                Icons.flag_outlined,
+              ),
               const SizedBox(width: 10),
-              statTile('Forward WR', '${formatPercent(forwardWr)}%', Icons.percent_rounded),
+              statTile(
+                'Open IG',
+                '$igOpen',
+                Icons.swap_horiz_rounded,
+              ),
             ],
           ),
           const SizedBox(height: 10),
           Row(
             children: [
-              statTile('Total P&L', formatMoney(totalPnl), Icons.payments_outlined, valueColor: (double.tryParse('$totalPnl') ?? 0) >= 0 ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75)),
+              statTile(
+                'Settled IG',
+                '$igClosed',
+                Icons.fact_check_outlined,
+              ),
               const SizedBox(width: 10),
-              statTile('Balance', '$paperBalance', Icons.account_balance_wallet_outlined),
+              statTile(
+                'IG W / L',
+                '$igWins / $igLosses',
+                Icons.insights_rounded,
+              ),
             ],
           ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'IG win rate',
+                '${formatNumber(igWinRate, decimals: 1)}%',
+                Icons.percent_rounded,
+                valueColor:
+                    (double.tryParse('$igWinRate') ?? 0) > 0
+                        ? const Color(0xFF67F0C1)
+                        : Colors.white,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Running P&L',
+                igRunningPnl == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igRunningPnl)}',
+                Icons.payments_outlined,
+                valueColor:
+                    pnlValue >= 0
+                        ? const Color(0xFF67F0C1)
+                        : const Color(0xFFFF6B75),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'IG funds',
+                igBalance == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}',
+                Icons.account_balance_wallet_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Available',
+                igAvailable == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igAvailable)}',
+                Icons.savings_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          glassCard(
+            child: Text(
+              igGraded == 0
+                  ? 'Performance grading starts as IG positions close. Open positions still contribute to the broker running P&L above.'
+                  : '$igGraded settled broker trade(s) currently have a WIN/LOSS outcome.',
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+              ),
+            ),
+          ),
           const SizedBox(height: 20),
-          sectionTitle('Trade journal'),
+          sectionTitle(
+            'Trade journal',
+            subtitle:
+                'Internal AI entries + broker-reconciled IG DEMO positions',
+          ),
           if (paperTrades.isEmpty)
             glassCard(
               child: const Column(
                 children: [
-                  Icon(Icons.hourglass_empty_rounded, size: 38, color: Colors.white30),
+                  Icon(
+                    Icons.hourglass_empty_rounded,
+                    size: 38,
+                    color: Colors.white30,
+                  ),
                   SizedBox(height: 10),
-                  Text('No reconciled trades loaded yet.', style: TextStyle(fontWeight: FontWeight.w800)),
+                  Text(
+                    'No reconciled trades loaded yet.',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
                   SizedBox(height: 4),
-                  Text('IG DEMO positions and PAPER learning trades will reappear here after server reconciliation.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  Text(
+                    'IG DEMO positions and PAPER learning trades will reappear here after server reconciliation.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
                 ],
               ),
             )
           else
-            ...paperTrades.take(30).map((trade) {
-              final status = trade['status']?.toString().toUpperCase() ?? '-';
-              final market = trade['market']?.toString() ?? trade['symbol']?.toString() ?? '-';
-              final direction = trade['direction']?.toString().toUpperCase() ?? '-';
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: glassCard(
-                  glow: paperTradeColor(status),
-                  child: Row(
-                    children: [
-                      Icon(paperTradeIcon(status), color: paperTradeColor(status)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('$market  $direction', style: const TextStyle(fontWeight: FontWeight.w900)),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${paperTradeHeadline(status)} • ${trade['entry_class'] ?? trade['entry_path'] ?? '-'}',
-                              style: const TextStyle(color: Colors.white54, fontSize: 11),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Text(formatMoney(trade['pnl']), style: TextStyle(color: paperTradeColor(status), fontWeight: FontWeight.w900)),
-                    ],
+            ...paperTrades.take(30).map(
+              (trade) {
+                final status =
+                    trade['status']
+                            ?.toString()
+                            .toUpperCase() ??
+                        '-';
+                final market =
+                    trade['market']?.toString() ??
+                        trade['symbol']?.toString() ??
+                        '-';
+                final direction =
+                    trade['direction']
+                            ?.toString()
+                            .toUpperCase() ??
+                        '-';
+                final broker =
+                    trade['broker']?.toString() ??
+                        '';
+                final entryPath =
+                    trade['entry_class'] ??
+                        trade['entry_path'] ??
+                        '-';
+                final pnl = trade['pnl'];
+
+                return Padding(
+                  padding:
+                      const EdgeInsets.only(
+                    bottom: 10,
                   ),
-                ),
-              );
-            }),
+                  child: glassCard(
+                    glow:
+                        paperTradeColor(status),
+                    child: Row(
+                      children: [
+                        Icon(
+                          paperTradeIcon(status),
+                          color:
+                              paperTradeColor(status),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '$market  $direction',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${paperTradeHeadline(status)} • $entryPath'
+                                '${broker.isNotEmpty ? ' • $broker DEMO' : ''}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white54,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              if (trade['entry_price'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
+                                  '${trade['ig_size'] != null ? ' • Size ${trade['ig_size']}' : ''}',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        Text(
+                          pnl == null
+                              ? (status == 'OPEN'
+                                  ? 'OPEN'
+                                  : '-')
+                              : formatMoney(pnl),
+                          style: TextStyle(
+                            color:
+                                paperTradeColor(status),
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Model forward evidence',
+            subtitle:
+                'Internal PAPER statistics kept separate from broker DEMO performance',
+          ),
+          Row(
+            children: [
+              statTile(
+                'Forward trades',
+                '$forwardTrades',
+                Icons.receipt_long_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Forward WR',
+                '${formatPercent(forwardWr)}%',
+                Icons.percent_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Model P&L',
+                formatMoney(totalPnl),
+                Icons.analytics_outlined,
+                valueColor:
+                    (double.tryParse('$totalPnl') ?? 0) >= 0
+                        ? const Color(0xFF67F0C1)
+                        : const Color(0xFFFF6B75),
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Paper balance',
+                '$paperBalance',
+                Icons.account_balance_wallet_outlined,
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: loadForwardStats,
-            icon: const Icon(Icons.refresh_rounded),
-            label: const Text('Refresh performance'),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await loadAutoDashboard();
+                await loadOvernightDemoStatus();
+                await loadForwardStats();
+              },
+              icon: const Icon(
+                Icons.refresh_rounded,
+              ),
+              label: const Text(
+                'Refresh performance',
+              ),
+            ),
           ),
         ],
       );
@@ -5041,7 +5348,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   const SizedBox(width: 10),
                   statTile(
                     'IG positions',
-                    '$brokerPositions / $maxBrokerPositions',
+                    '$brokerPositions',
                     Icons.swap_horiz_rounded,
                   ),
                 ],
@@ -5954,7 +6261,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.6.7 • Always-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.6.8 • Performance-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
