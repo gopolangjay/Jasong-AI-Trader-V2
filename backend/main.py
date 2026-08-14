@@ -4167,6 +4167,13 @@ def get_auto_dashboard(
     learning_trades_payload = V64_LEARNING_ENGINE.trades(limit=100)
     learning_trades = learning_trades_payload.get("trades", [])
 
+    model_forward_evidence = (
+        _v669_model_forward_evidence(
+            starting_balance=
+                starting_balance
+        )
+    )
+
     # V6.6.7: cached broker truth is maintained by the always-on mirror.
     # Do not make an extra IG REST call on every mobile dashboard poll.
     ig_demo_status = IG_DEMO_MIRROR.status()
@@ -4741,6 +4748,8 @@ def get_auto_dashboard(
         },
         "forward":
             forward,
+        "model_forward_evidence":
+            model_forward_evidence,
         "learning": learning_status,
         "learning_watchers": learning_watchers[:20],
         "ig_demo": ig_demo_status,
@@ -4788,6 +4797,325 @@ def get_forward_journal(
     """Immutable-observation view of V5.7 genuine forward entries/outcomes."""
     return V53_WATCHER_ENGINE.forward_journal(
         limit=limit
+    )
+
+
+def _v669_model_forward_evidence(
+    starting_balance: float = 10000.0,
+) -> dict:
+    """Forward evidence for the model that is actually creating IG DEMO trades.
+
+    The legacy V53 forward engine is retained separately. V6.6.9 counts
+    V64/AI-learning entries as soon as they are opened, while win-rate/P&L
+    remain based only on settled outcomes.
+
+    Broker-recovered positions with no surviving model metadata are *not*
+    silently attributed to the model. They remain broker evidence until
+    a model-linked trade_id/metadata exists.
+    """
+    learning_status = V64_LEARNING_ENGINE.status()
+    learning_payload = V64_LEARNING_ENGINE.trades(
+        limit=2000
+    )
+    learning_rows = [
+        dict(item)
+        for item in learning_payload.get(
+            "trades",
+            [],
+        )
+        if isinstance(item, dict)
+    ]
+
+    mirrors_payload = IG_DEMO_MIRROR.status()
+    mirrors = [
+        dict(item)
+        for item in mirrors_payload.get(
+            "mirrors",
+            [],
+        )
+        if isinstance(item, dict)
+    ]
+
+    mirror_by_trade_id = {
+        str(item.get("trade_id")): item
+        for item in mirrors
+        if item.get("trade_id") is not None
+    }
+
+    # Actual model-generated entries: OPEN + CLOSED learning trades.
+    actual_rows = []
+    for trade in learning_rows:
+        status = str(
+            trade.get("status")
+            or ""
+        ).upper()
+
+        if status not in {
+            "OPEN",
+            "CLOSED",
+        }:
+            continue
+
+        row = dict(trade)
+        trade_id = str(
+            row.get("trade_id")
+            or ""
+        )
+        mirror = mirror_by_trade_id.get(
+            trade_id
+        )
+
+        if mirror:
+            row["broker_linked"] = bool(
+                mirror.get("ig_deal_id")
+            )
+            row["ig_deal_id"] = mirror.get(
+                "ig_deal_id"
+            )
+            row["broker_status"] = mirror.get(
+                "broker_status"
+            )
+            row["broker_result"] = mirror.get(
+                "broker_result"
+            )
+
+            # If the broker has a definitive result, retain it as a second
+            # evidence field without overwriting the internal PAPER result.
+            row["broker_outcome_available"] = (
+                str(
+                    mirror.get(
+                        "broker_result"
+                    )
+                    or ""
+                ).upper()
+                in {
+                    "WIN",
+                    "LOSS",
+                }
+            )
+        else:
+            row["broker_linked"] = False
+            row["broker_outcome_available"] = False
+
+        actual_rows.append(row)
+
+    open_rows = [
+        row
+        for row in actual_rows
+        if str(
+            row.get("status")
+            or ""
+        ).upper() == "OPEN"
+    ]
+    settled_rows = [
+        row
+        for row in actual_rows
+        if str(
+            row.get("status")
+            or ""
+        ).upper() == "CLOSED"
+        and str(
+            row.get("result")
+            or ""
+        ).upper()
+        in {
+            "WIN",
+            "LOSS",
+        }
+    ]
+
+    wins = sum(
+        1
+        for row in settled_rows
+        if str(
+            row.get("result")
+            or ""
+        ).upper() == "WIN"
+    )
+    losses = len(
+        settled_rows
+    ) - wins
+
+    total_pnl = round(
+        sum(
+            float(
+                row.get("pnl")
+                or 0.0
+            )
+            for row in settled_rows
+        ),
+        2,
+    )
+
+    broker_matched = sum(
+        1
+        for row in actual_rows
+        if row.get(
+            "broker_linked"
+        )
+    )
+
+    recovered_unattributed = sum(
+        1
+        for mirror in mirrors
+        if mirror.get(
+            "ig_deal_id"
+        )
+        and bool(
+            mirror.get(
+                "recovered_from_ig"
+            )
+        )
+        and str(
+            mirror.get(
+                "entry_class"
+            )
+            or ""
+        ).upper()
+        == "IG_RECOVERED"
+    )
+
+    by_entry_class = {}
+    for row in actual_rows:
+        cls = str(
+            row.get(
+                "entry_class"
+            )
+            or "UNKNOWN"
+        ).upper()
+        bucket = by_entry_class.setdefault(
+            cls,
+            {
+                "entries": 0,
+                "open": 0,
+                "settled": 0,
+                "wins": 0,
+                "losses": 0,
+            },
+        )
+        bucket["entries"] += 1
+
+        if str(
+            row.get("status")
+            or ""
+        ).upper() == "OPEN":
+            bucket["open"] += 1
+        elif str(
+            row.get("result")
+            or ""
+        ).upper() in {
+            "WIN",
+            "LOSS",
+        }:
+            bucket["settled"] += 1
+            if str(
+                row.get(
+                    "result"
+                )
+                or ""
+            ).upper() == "WIN":
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+
+    for bucket in by_entry_class.values():
+        bucket["win_rate_pct"] = (
+            round(
+                bucket["wins"]
+                / bucket["settled"]
+                * 100.0,
+                2,
+            )
+            if bucket["settled"]
+            else 0.0
+        )
+
+    legacy = V53_WATCHER_ENGINE.forward_stats(
+        starting_balance=
+            starting_balance
+    )
+
+    return {
+        "version":
+            "6.6.9",
+        "source":
+            "V64_AI_LEARNING_FORWARD_EVIDENCE",
+        "entries":
+            len(actual_rows),
+        # Compatibility aliases used by existing mobile code.
+        "forward_trades":
+            len(actual_rows),
+        "trades":
+            len(actual_rows),
+        "open_entries":
+            len(open_rows),
+        "settled_entries":
+            len(settled_rows),
+        "wins":
+            wins,
+        "losses":
+            losses,
+        "win_rate_pct":
+            (
+                round(
+                    wins
+                    / len(settled_rows)
+                    * 100.0,
+                    2,
+                )
+                if settled_rows
+                else 0.0
+            ),
+        "total_pnl":
+            total_pnl,
+        "paper_balance":
+            learning_status.get(
+                "paper_balance"
+            ),
+        "starting_balance":
+            learning_status.get(
+                "starting_balance"
+            ),
+        "broker_matched_entries":
+            broker_matched,
+        "broker_recovered_unattributed":
+            recovered_unattributed,
+        "by_entry_class":
+            by_entry_class,
+        "confidence_buckets":
+            learning_status.get(
+                "confidence_buckets"
+            )
+            or {},
+        "rows":
+            actual_rows[:100],
+        "legacy_v53_forward":
+            legacy,
+        "note":
+            (
+                "Entries count immediately when the V64/AI-learning model "
+                "opens them. W/L, win rate and Model P&L populate only after "
+                "those model entries settle. IG_RECOVERED positions without "
+                "surviving model metadata remain broker evidence only."
+            ),
+        "live_money_execution":
+            False,
+        "demo_only":
+            True,
+    }
+
+
+@app.get("/model-forward-evidence")
+def get_model_forward_evidence(
+    starting_balance: float = 10000.0,
+):
+    validate_balance(
+        starting_balance
+    )
+
+    return _v669_model_forward_evidence(
+        starting_balance=
+            starting_balance
     )
 
 
@@ -5672,7 +6000,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.6.8-PERFORMANCE-SYNC",
+            "6.6.9-EVIDENCE-SYNC",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
