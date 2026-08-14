@@ -89,7 +89,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   // =========================================================
   // USER SETTINGS
   // =========================================================
@@ -3187,6 +3187,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     Future.microtask(
       refreshSignal,
@@ -3204,7 +3205,23 @@ class _HomePageState extends State<HomePage> {
   }
 
   @override
+  void didChangeAppLifecycleState(
+    AppLifecycleState state,
+  ) {
+    if (state == AppLifecycleState.resumed) {
+      // The backend/IG connection is authoritative. Whenever Android resumes
+      // the UI, immediately rebuild the phone view from server + IG truth.
+      startAutoDashboardPolling();
+      Future.microtask(loadOvernightDemoStatus);
+      Future.microtask(loadAutoDashboard);
+      Future.microtask(loadAiLearningStatus);
+      Future.microtask(loadSystemOverview);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     watcherPollTimer?.cancel();
     autoDashboardPollTimer?.cancel();
     symbol.dispose();
@@ -4417,7 +4434,7 @@ class _HomePageState extends State<HomePage> {
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
-          sectionTitle('PAPER performance', subtitle: 'Genuine forward entries only'),
+          sectionTitle('Trade performance', subtitle: 'Forward PAPER + reconciled IG DEMO broker journal'),
           Row(
             children: [
               statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
@@ -4441,9 +4458,9 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Icon(Icons.hourglass_empty_rounded, size: 38, color: Colors.white30),
                   SizedBox(height: 10),
-                  Text('No PAPER trades opened yet.', style: TextStyle(fontWeight: FontWeight.w800)),
+                  Text('No reconciled trades loaded yet.', style: TextStyle(fontWeight: FontWeight.w800)),
                   SizedBox(height: 4),
-                  Text('Trades will appear here when V6.5 passes its live entry path.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  Text('IG DEMO positions and PAPER learning trades will reappear here after server reconciliation.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
                 ],
               ),
             )
@@ -4572,6 +4589,44 @@ class _HomePageState extends State<HomePage> {
           overnightSummary[
                   'max_broker_positions'] ??
               3;
+
+      final overnightIg =
+          overnight['ig_demo'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['ig_demo'],
+                )
+              : <String, dynamic>{};
+
+      final brokerSyncState =
+          overnightSummary[
+                  'broker_sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              overnightIg['sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              'STALE';
+
+      final brokerSyncAge =
+          overnightSummary[
+                  'broker_sync_age_seconds'] ??
+              overnightIg[
+                  'broker_sync_age_seconds'];
+
+      final brokerPositionRows =
+          overnight['broker_positions'] is List
+              ? (overnight[
+                          'broker_positions']
+                      as List)
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList()
+              : <Map<String, dynamic>>[];
 
       final overnightWins =
           overnightSummary['wins'] ?? 0;
@@ -5016,6 +5071,155 @@ class _HomePageState extends State<HomePage> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
+                  color: (
+                    brokerSyncState == 'SYNCED'
+                        ? Colors.greenAccent
+                        : brokerSyncState == 'ERROR'
+                            ? Colors.redAccent
+                            : Colors.amberAccent
+                  ).withValues(alpha: .06),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color: (
+                      brokerSyncState == 'SYNCED'
+                          ? Colors.greenAccent
+                          : brokerSyncState == 'ERROR'
+                              ? Colors.redAccent
+                              : Colors.amberAccent
+                    ).withValues(alpha: .20),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      brokerSyncState == 'SYNCED'
+                          ? Icons.sync_rounded
+                          : brokerSyncState == 'ERROR'
+                              ? Icons.sync_problem_rounded
+                              : Icons.sync_lock_rounded,
+                      color:
+                          brokerSyncState == 'SYNCED'
+                              ? Colors.greenAccent
+                              : brokerSyncState == 'ERROR'
+                                  ? Colors.redAccent
+                                  : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Backend ↔ IG DEMO: $brokerSyncState',
+                            style: const TextStyle(
+                              fontWeight:
+                                  FontWeight.w900,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            brokerSyncAge is num
+                                ? 'Last broker reconciliation ${formatCountdownSeconds(brokerSyncAge)} ago • $brokerPositions open position(s)'
+                                : 'Waiting for broker reconciliation • $brokerPositions open position(s)',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white54,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (brokerPositionRows.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                ...brokerPositionRows
+                    .take(3)
+                    .map(
+                      (position) => Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          bottom: 8,
+                        ),
+                        child: Container(
+                          width:
+                              double.infinity,
+                          padding:
+                              const EdgeInsets
+                                  .symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration:
+                              BoxDecoration(
+                            color: Colors.white
+                                .withValues(
+                              alpha: .025,
+                            ),
+                            borderRadius:
+                                BorderRadius
+                                    .circular(
+                              12,
+                            ),
+                            border: Border.all(
+                              color: Colors.white
+                                  .withValues(
+                                alpha: .05,
+                              ),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons
+                                    .account_balance_rounded,
+                                size: 17,
+                                color: Color(
+                                  0xFF65E6D3,
+                                ),
+                              ),
+                              const SizedBox(
+                                width: 9,
+                              ),
+                              Expanded(
+                                child: Text(
+                                  '${position['symbol'] ?? position['market'] ?? 'IG'} '
+                                  '${position['direction'] ?? ''}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight
+                                            .w800,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${position['size'] ?? '-'} @ ${formatNumber(position['entry_level'], decimals: 5)}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white60,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+              ],
+              const SizedBox(height: 4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
                   color: Colors.white.withValues(
                     alpha: .035,
                   ),
@@ -5123,8 +5327,8 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 10),
               const Text(
-                'DEMO ONLY • Live-money execution remains disabled. '
-                'The Render backend keeps running after the app is closed or the phone is locked.',
+                'IG DEMO ONLY • Live-money execution remains disabled. '
+                'IG is the broker source of truth; the app re-syncs from the backend whenever it opens or resumes.',
                 style: TextStyle(
                   color: Colors.white38,
                   fontSize: 10,
@@ -5555,9 +5759,9 @@ class _HomePageState extends State<HomePage> {
                 ),
                 Divider(height: 24),
                 _MidnightRuleRow(
-                  'LIVE BROKER',
-                  'OFF',
-                  'No broker order is sent by this mode',
+                  'IG DEMO BROKER',
+                  'ON',
+                  'Demo broker orders are mirrored to IG • live money remains OFF',
                 ),
               ],
             ),
@@ -5750,7 +5954,7 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.6.4 • Overnight DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.6.7 • Always-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
