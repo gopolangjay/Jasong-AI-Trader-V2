@@ -1,6812 +1,6160 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
-from adaptive_confidence import AdaptiveConfidenceGate
-from v66_intelligence import V66Intelligence
-from v68_copilot import COPILOT
-import threading
-import time
-from dataclasses import dataclass, replace
-from typing import Dict, Optional, Tuple
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
-import pandas as pd
-import yfinance as yf
-
-from market_data_router import (
-    canonical_fx_symbol,
-    get_forex_universe,
-    get_market_data,
-    get_discovery_market_data,
-    get_learning_universe,
-    market_data_health,
-    get_ig_demo_broker,
-)
-
-from fastapi import Body, Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-
-from deep_validator import validate_candidates
-from fast_scanner import fast_scan_markets
-from sequential_scanner import build_top_markets
-
-from market_scanner import (
-    classify_result,
-    calculate_market_score,
-)
-
-from multi_optimizer import optimise_all_timeframes
-from strategy_optimizer import optimise_strategy
-from optimizer import threshold_sweep
-
-from indicators import add_indicators
-
-from engine import (
-    PROFILES,
-    train_model,
-    enrich,
-    decision,
-)
-
-from paper import (
-    backtest,
-    stake_for_balance,
-)
-
-from trade_watcher import TradeWatcherEngine
-from auto_manager import AutomatedTradeManager
-from risk_gateway import RiskGateway
-from execution_gateway import ExecutionGateway
-from autonomous_controller import AutonomousController
-from confidence_replay import ConfidenceReplayEngine
-from confidence_wr_analyzer import ConfidenceWinRateAnalyzer
-from persistent_state import PersistentStateStore
-from v64_learning_engine import V64LearningTradeEngine
-from ig_demo_broker import IGDemoError
-from ig_demo_bridge import IGDemoMirror
-
-from database import (
-    SessionLocal,
-    Trade,
-    init_db,
-)
-
-
-# ============================================================
-# V6.6 UNIFIED ADAPTIVE THRESHOLD POLICY
-# ============================================================
-PAPER_NORMAL_MIN_CONFIDENCE = 0.30
-PAPER_AI_MIN_CONFIDENCE = 0.40
-PAPER_ABSOLUTE_MIN_CONFIDENCE = 0.30
-
-# Make the threshold uniform across ALL risk modes. Risk mode now changes
-# position sizing / drawdown controls only, not entry-confidence requirements.
-PROFILES = {
-    name: replace(profile, min_confidence=PAPER_NORMAL_MIN_CONFIDENCE)
-    for name, profile in PROFILES.items()
+void main() {
+  runApp(const JasongApp());
 }
 
+class JasongApp extends StatelessWidget {
+  const JasongApp({super.key});
 
-# ============================================================
-# V6.6 AI40-ONLY AUTONOMOUS PAPER LEARNING POLICY
-# ============================================================
-class AI40OnlyLearningTradeEngine(V64LearningTradeEngine):
-    """PAPER-only learning engine that requires the AI40 path to enter.
-
-    The inherited V6.6 learning engine already handles candidate watchers,
-    paper stake sizing, timed settlement, P&L, persistence, shadow evidence
-    and learning statistics. This override changes only entry eligibility:
-
-      * BUY/SELL live direction must match the candidate direction.
-      * Directional model-AI confidence must be at least 40%.
-      * Normal N30 confidence alone can no longer open an AI-learning trade.
-
-    No broker execution is enabled.
-    """
-
-    def _entry_class(
-        self,
-        watcher: Dict[str, object],
-        live: Dict[str, object],
-    ) -> Dict[str, object]:
-        decision = super()._entry_class(
-            watcher,
-            live,
-        )
-
-        verified = bool(
-            watcher.get("verified")
-        )
-        experimental = bool(
-            watcher.get("experimental")
-        )
-        trade_eligible = bool(
-            watcher.get(
-                "trade_eligible",
-                verified or experimental,
-            )
-        )
-
-        direction_match = bool(
-            decision.get("direction_match")
-        )
-        ai_pass = bool(
-            decision.get("ai_pass")
-        )
-
-        if (
-            trade_eligible
-            and direction_match
-            and ai_pass
-        ):
-            return {
-                **decision,
-                "class": (
-                    "EM"
-                    if experimental
-                    else "M"
-                ),
-                "enter": True,
-                "reason": (
-                    "AI40 autonomous PAPER path: "
-                    "live direction agrees and directional "
-                    "model-AI confidence is >=40%"
-                ),
-            }
-
-        reason = str(
-            decision.get("reason")
-            or "AI40 entry requirements not met"
-        )
-
-        if (
-            trade_eligible
-            and direction_match
-            and not ai_pass
-        ):
-            reason = (
-                "AI40 autonomous PAPER path rejected: "
-                "direction agrees but directional model-AI "
-                "confidence is below 40%"
-            )
-
-        return {
-            **decision,
-            "class": "S",
-            "enter": False,
-            "reason": reason,
-        }
-
-# ============================================================
-# JASONG AI TRADER V6.5
-# HIGH-THROUGHPUT AUTONOMOUS PAPER LEARNING ENGINE
-# ============================================================
-
-CORE_MARKETS = {
-    "EURUSD": "EUR/USD",
-    "GBPUSD": "GBP/USD",
-    "USDJPY": "USD/JPY",
-    "AUDUSD": "AUD/USD",
-    "NZDUSD": "NZD/USD",
-    "USDCAD": "USD/CAD",
-    "USDCHF": "USD/CHF",
-    "EURJPY": "EUR/JPY",
-    "GBPJPY": "GBP/JPY",
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Jasong AI Trader',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF07111A),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF65E6D3),
+          brightness: Brightness.dark,
+          primary: const Color(0xFF65E6D3),
+          secondary: const Color(0xFF6FA8FF),
+          surface: const Color(0xFF0E1A24),
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+        ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF0E1A24),
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+            side: const BorderSide(
+              color: Color(0xFF17303A),
+            ),
+          ),
+        ),
+        navigationBarTheme: NavigationBarThemeData(
+          backgroundColor: const Color(0xFF0A151E),
+          indicatorColor: const Color(0xFF65E6D3).withValues(alpha: .16),
+          labelTextStyle: WidgetStateProperty.resolveWith((states) {
+            return TextStyle(
+              fontSize: 11,
+              fontWeight: states.contains(WidgetState.selected)
+                  ? FontWeight.w800
+                  : FontWeight.w500,
+              color: states.contains(WidgetState.selected)
+                  ? const Color(0xFF65E6D3)
+                  : Colors.white54,
+            );
+          }),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF0B1720),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF24404B)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF24404B)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF65E6D3)),
+          ),
+        ),
+      ),
+      home: const HomePage(),
+    );
+  }
 }
 
-# Backward compatibility for manual endpoints.
-MARKETS = dict(CORE_MARKETS)
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
-# Twelve Data Basic is intentionally protected from credit exhaustion.
-# The full provider universe is available, but Auto Manager rotates a small
-# discovery batch through it rather than downloading 1,300+ histories at once.
-FX_DISCOVERY_BATCH_SIZE = len(CORE_MARKETS)
-_FX_DISCOVERY_OFFSET = 0
-_FX_DISCOVERY_LOCK = threading.RLock()
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
 
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  // =========================================================
+  // USER SETTINGS
+  // =========================================================
 
-app = FastAPI(
-    title="Jasong AI Trader V6.6.5 API",
-    version="6.6.5",
-)
+  final TextEditingController symbol =
+      TextEditingController(
+    text: 'EURUSD=X',
+  );
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+  final TextEditingController balance =
+      TextEditingController(
+    text: '10000',
+  );
 
-init_db()
+  String risk = 'Balanced';
 
+  int selectedTab = 0;
 
-# ============================================================
-# DATABASE
-# ============================================================
+  final String apiBase =
+      const String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue:
+        'https://jasong-ai-trader-v2.onrender.com',
+  );
 
-def get_db():
-    db = SessionLocal()
+  // =========================================================
+  // DATA
+  // =========================================================
 
-    try:
-        yield db
+  Map<String, dynamic>? sig;
+  Map<String, dynamic>? bt;
+  Map<String, dynamic>? fastScan;
+  Map<String, dynamic>? verifiedTrade;
 
-    finally:
-        db.close()
+  Map<String, dynamic>? liveEntryAssessment;
 
+  Map<String, dynamic>? serverWatcher;
+  List<Map<String, dynamic>> serverWatchers = [];
+  Map<String, dynamic>? forwardStats;
+  Map<String, dynamic>? v66ForwardIntelligence;
 
-# ============================================================
-# CACHE
-# ============================================================
+  List<Map<String, dynamic>> paperTrades = [];
 
-@dataclass
-class CacheEntry:
-    dataframe: pd.DataFrame
-    created_at: float
-    source: str
+  // V6.6.2 autonomous AI PAPER-learning monitor.
+  Map<String, dynamic>? aiLearningStatus;
+  Map<String, dynamic>? aiLearningSnapshot;
+  List<Map<String, dynamic>> aiLearningWatchers = [];
+  Map<String, dynamic>? aiLearningLastRun;
+  bool aiLearningBusy = false;
 
+  // V6.6.4 mobile control plane for server-side IG DEMO overnight runs.
+  Map<String, dynamic>? overnightDemoStatus;
+  bool overnightDemoBusy = false;
 
-_DATA_CACHE: Dict[
-    Tuple[str, str, str],
-    CacheEntry,
-] = {}
+  final TextEditingController copilotController = TextEditingController();
+  bool copilotBusy = false;
+  String copilotAnswer = '';
 
-_CACHE_LOCK = threading.Lock()
-_DOWNLOAD_LOCK = threading.Lock()
+  Map<String, dynamic>? systemOverview;
+  Map<String, dynamic>? systemDiagnostic;
+  bool systemDiagnosticBusy = false;
 
+  Map<String, dynamic>? autoDashboard;
+  Map<String, dynamic>? autoManagerJob;
 
-# Fresh data for five minutes.
-CACHE_TTL_SECONDS = 300
+  Timer? watcherPollTimer;
+  Timer? autoDashboardPollTimer;
 
-# Old data may be reused during Yahoo failure.
-STALE_CACHE_MAX_AGE_SECONDS = 21600
+  bool watcherBusy = false;
+  bool autoManagerBusy = false;
 
-# Space Yahoo requests apart.
-MIN_DOWNLOAD_GAP_SECONDS = 2.5
+  List<Map<String, dynamic>>
+      validationHistory = [];
 
-# Stop hammering Yahoo after a rate-limit incident.
-YAHOO_COOLDOWN_SECONDS = 180
+  // =========================================================
+  // APP STATE
+  // =========================================================
 
+  bool busy = false;
+  bool scanningMarkets = false;
+  bool findingVerifiedTrade = false;
 
-_last_download_time = 0.0
-_yahoo_cooldown_until = 0.0
+  String? currentValidationMarket;
+  String? networkStatus;
+  String? error;
 
+  int currentAttempt = 0;
+  int maximumAttempts = 3;
 
-# ============================================================
-# GENERAL VALIDATION
-# ============================================================
+  // =========================================================
+  // GENERIC GET
+  // =========================================================
 
-def validate_risk_mode(
-    risk_mode: str,
-):
-    if risk_mode not in PROFILES:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid risk mode",
-        )
+  Future<Map<String, dynamic>> getJson(
+    Uri uri, {
+    int timeoutSeconds = 120,
+  }) async {
+    final client = http.Client();
 
-
-def validate_balance(
-    amount: float,
-    field_name: str = "starting_balance",
-):
-    if amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"{field_name} must be "
-                "greater than 0"
+    try {
+      final response = await client
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Connection': 'close',
+            },
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
             ),
-        )
+          );
 
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
 
-# ============================================================
-# CACHE HELPERS
-# ============================================================
+      final decoded = jsonDecode(
+        response.body,
+      );
 
-def _cache_key(
-    symbol: str,
-    period: str,
-    interval: str,
-):
-    return (
-        symbol.upper().strip(),
-        period.lower().strip(),
-        interval.lower().strip(),
-    )
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected JSON response',
+        );
+      }
 
+      return Map<String, dynamic>.from(
+        decoded,
+      );
+    } finally {
+      client.close();
+    }
+  }
 
-def _cache_put(
-    symbol: str,
-    period: str,
-    interval: str,
-    data: pd.DataFrame,
-    source: str,
-):
-    key = _cache_key(
-        symbol,
-        period,
-        interval,
-    )
+  // =========================================================
+  // CHECK WHETHER ERROR IS NETWORK RELATED
+  // =========================================================
 
-    with _CACHE_LOCK:
-        _DATA_CACHE[key] = CacheEntry(
-            dataframe=data.copy(),
-            created_at=time.time(),
-            source=source,
-        )
-
-
-def _cache_get(
-    symbol: str,
-    period: str,
-    interval: str,
-    allow_stale: bool = False,
-) -> Optional[pd.DataFrame]:
-
-    key = _cache_key(
-        symbol,
-        period,
-        interval,
-    )
-
-    with _CACHE_LOCK:
-        entry = _DATA_CACHE.get(
-            key
-        )
-
-        if entry is None:
-            return None
-
-        age = (
-            time.time()
-            - entry.created_at
-        )
-
-        max_age = (
-            STALE_CACHE_MAX_AGE_SECONDS
-            if allow_stale
-            else CACHE_TTL_SECONDS
-        )
-
-        if age > max_age:
-            return None
-
-        return entry.dataframe.copy()
-
-
-def clear_market_cache():
-    with _CACHE_LOCK:
-        count = len(
-            _DATA_CACHE
-        )
-
-        _DATA_CACHE.clear()
-
-    return count
-
-
-def cache_stats():
-    now = time.time()
-
-    with _CACHE_LOCK:
-        items = []
-
-        for (
-            symbol,
-            period,
-            interval,
-        ), entry in _DATA_CACHE.items():
-
-            age = (
-                now
-                - entry.created_at
-            )
-
-            items.append({
-                "symbol": symbol,
-                "period": period,
-                "interval": interval,
-                "rows": len(
-                    entry.dataframe
-                ),
-                "source": entry.source,
-                "age_seconds": round(
-                    age,
-                    1,
-                ),
-                "fresh": (
-                    age
-                    <= CACHE_TTL_SECONDS
-                ),
-            })
-
-    return {
-        "entries": len(items),
-        "fresh_ttl_seconds":
-            CACHE_TTL_SECONDS,
-        "stale_max_age_seconds":
-            STALE_CACHE_MAX_AGE_SECONDS,
-        "yahoo_cooldown_active":
-            yahoo_cooldown_active(),
-        "yahoo_cooldown_remaining":
-            yahoo_cooldown_remaining(),
-        "items": items,
+  bool isNetworkError(
+    Object error,
+  ) {
+    if (error is SocketException) {
+      return true;
     }
 
+    if (error is TimeoutException) {
+      return true;
+    }
 
-# ============================================================
-# YAHOO COOLDOWN
-# ============================================================
+    if (error is http.ClientException) {
+      return true;
+    }
 
-def yahoo_cooldown_active():
-    return (
-        time.time()
-        < _yahoo_cooldown_until
-    )
+    final text =
+        error.toString().toLowerCase();
 
+    return text.contains(
+          'socketexception',
+        ) ||
+        text.contains(
+          'clientexception',
+        ) ||
+        text.contains(
+          'failed host lookup',
+        ) ||
+        text.contains(
+          'connection abort',
+        ) ||
+        text.contains(
+          'connection reset',
+        ) ||
+        text.contains(
+          'connection closed',
+        ) ||
+        text.contains(
+          'timed out',
+        ) ||
+        text.contains(
+          'timeout',
+        ) ||
+        text.contains(
+          'http 502',
+        ) ||
+        text.contains(
+          'http 503',
+        ) ||
+        text.contains(
+          'http 504',
+        );
+  }
 
-def yahoo_cooldown_remaining():
-    remaining = (
-        _yahoo_cooldown_until
-        - time.time()
-    )
+  // =========================================================
+  // HEALTH CHECK
+  // =========================================================
 
-    return max(
-        0.0,
-        round(
-            remaining,
-            1,
-        ),
-    )
+  Future<bool> checkBackendHealth() async {
+    final uri = Uri.parse(
+      '$apiBase/health',
+    );
 
+    try {
+      final client = http.Client();
 
-def activate_yahoo_cooldown():
-    global _yahoo_cooldown_until
-
-    _yahoo_cooldown_until = (
-        time.time()
-        + YAHOO_COOLDOWN_SECONDS
-    )
-
-
-def _looks_like_rate_limit(
-    exc: Exception,
-):
-    text = str(
-        exc
-    ).lower()
-
-    markers = [
-        "too many requests",
-        "rate limit",
-        "yfratelimiterror",
-        "429",
-    ]
-
-    return any(
-        marker in text
-        for marker in markers
-    )
-
-
-# ============================================================
-# DOWNLOAD THROTTLE
-# ============================================================
-
-def _wait_for_download_slot():
-    global _last_download_time
-
-    with _DOWNLOAD_LOCK:
-        now = time.time()
-
-        elapsed = (
-            now
-            - _last_download_time
-        )
-
-        if (
-            elapsed
-            < MIN_DOWNLOAD_GAP_SECONDS
-        ):
-            time.sleep(
-                MIN_DOWNLOAD_GAP_SECONDS
-                - elapsed
+      try {
+        final response = await client
+            .get(
+              uri,
+              headers: {
+                'Accept':
+                    'application/json',
+                'Connection':
+                    'close',
+              },
             )
+            .timeout(
+              const Duration(
+                seconds: 35,
+              ),
+            );
 
-        _last_download_time = (
-            time.time()
-        )
+        return response.statusCode == 200;
+      } finally {
+        client.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
 
+  // =========================================================
+  // WAIT FOR BACKEND TO RECOVER
+  // =========================================================
 
-# ============================================================
-# CLEAN PRICE DATA
-# ============================================================
+  Future<bool> waitForBackendRecovery(
+    String market,
+    int attempt,
+  ) async {
+    const delays = [
+      8,
+      12,
+      18,
+    ];
 
-def _clean_price_data(
-    frame: pd.DataFrame,
-):
-    if frame is None:
-        return pd.DataFrame()
+    final delayIndex =
+        (attempt - 1).clamp(
+      0,
+      delays.length - 1,
+    );
 
-    data = frame.copy()
+    final delay =
+        delays[delayIndex];
 
-    if isinstance(
-        data.columns,
-        pd.MultiIndex,
-    ):
-        data.columns = (
-            data.columns
-            .get_level_values(0)
-        )
+    if (mounted) {
+      setState(() {
+        currentValidationMarket =
+            'Connection interrupted';
 
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-    ]
+        networkStatus =
+            'Waiting ${delay}s before '
+            'retrying $market...';
+      });
+    }
 
-    if not all(
-        name in data.columns
-        for name in required
-    ):
-        return pd.DataFrame()
+    await Future.delayed(
+      Duration(
+        seconds: delay,
+      ),
+    );
 
-    if "Volume" not in data.columns:
-        data["Volume"] = 0.0
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Checking Jasong AI '
+            'Trader server...';
+      });
+    }
 
-    data = data[
-        [
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-        ]
-    ].copy()
+    bool healthy =
+        await checkBackendHealth();
 
-    data = data.dropna(
-        subset=[
-            "Open",
-            "High",
-            "Low",
-            "Close",
-        ]
-    )
+    if (healthy) {
+      if (mounted) {
+        setState(() {
+          networkStatus =
+              'Server online. '
+              'Retrying $market...';
+        });
+      }
 
-    data = data.sort_index()
+      await Future.delayed(
+        const Duration(
+          seconds: 2,
+        ),
+      );
 
-    return data
+      return true;
+    }
 
+    // Give Render one more chance to wake.
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Server still waking. '
+            'Checking again...';
+      });
+    }
 
-# ============================================================
-# SAFE YAHOO PERIODS
-# ============================================================
+    await Future.delayed(
+      const Duration(
+        seconds: 10,
+      ),
+    );
 
-def safe_native_period(
-    period: str,
-    interval: str,
-):
-    period = str(
-        period or "1mo"
-    ).lower().strip()
+    healthy =
+        await checkBackendHealth();
 
-    interval = str(
-        interval or "15m"
-    ).lower().strip()
+    return healthy;
+  }
 
-    if interval == "1m":
-        if period not in {
-            "1d",
-            "5d",
-            "7d",
-        }:
-            return "5d"
+  // =========================================================
+  // RESILIENT POST
+  // =========================================================
 
-    if interval in {
-        "2m",
-        "5m",
-        "15m",
-        "30m",
-    }:
-        if period not in {
-            "1d",
-            "5d",
-            "1mo",
-        }:
-            return "1mo"
+  Future<Map<String, dynamic>>
+      postJsonOnce(
+    Uri uri,
+    dynamic body, {
+    int timeoutSeconds = 240,
+  }) async {
+    final client = http.Client();
 
-    return period
-
-
-# ============================================================
-# NATIVE YAHOO DOWNLOAD
-# ============================================================
-
-def _download_native(
-    symbol: str,
-    period: str,
-    interval: str,
-):
-    period = safe_native_period(
-        period,
-        interval,
-    )
-
-    fresh = _cache_get(
-        symbol,
-        period,
-        interval,
-    )
-
-    if (
-        fresh is not None
-        and len(fresh) >= 80
-    ):
-        return fresh
-
-    if yahoo_cooldown_active():
-        stale = _cache_get(
-            symbol,
-            period,
-            interval,
-            allow_stale=True,
-        )
-
-        if (
-            stale is not None
-            and len(stale) >= 80
-        ):
-            return stale
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Yahoo market data is "
-                "temporarily cooling down "
-                f"({yahoo_cooldown_remaining()}s)"
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: {
+              'Accept':
+                  'application/json',
+              'Content-Type':
+                  'application/json',
+              'Connection':
+                  'close',
+            },
+            body: jsonEncode(
+              body,
             ),
-        )
-
-    _wait_for_download_slot()
-
-    try:
-        raw = yf.download(
-            symbol,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=True,
-            threads=False,
-        )
-
-        data = _clean_price_data(
-            raw
-        )
-
-        if data.empty:
-            raise ValueError(
-                "Yahoo returned no usable data"
-            )
-
-        _cache_put(
-            symbol,
-            period,
-            interval,
-            data,
-            source="YAHOO",
-        )
-
-        return data.copy()
-
-    except Exception as exc:
-        if _looks_like_rate_limit(
-            exc
-        ):
-            activate_yahoo_cooldown()
-
-        stale = _cache_get(
-            symbol,
-            period,
-            interval,
-            allow_stale=True,
-        )
-
-        if (
-            stale is not None
-            and len(stale) >= 80
-        ):
-            return stale
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Market data unavailable: "
-                f"{symbol} {period} {interval}: "
-                f"{exc}"
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
             ),
-        )
+          );
 
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
 
-# ============================================================
-# LOCAL RESAMPLING
-# ============================================================
+      final decoded = jsonDecode(
+        response.body,
+      );
 
-def _resample_ohlcv(
-    base: pd.DataFrame,
-    rule: str,
-):
-    data = base.resample(
-        rule,
-        label="right",
-        closed="right",
-    ).agg({
-        "Open": "first",
-        "High": "max",
-        "Low": "min",
-        "Close": "last",
-        "Volume": "sum",
-    })
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Backend returned an '
+          'unexpected JSON response',
+        );
+      }
 
-    data = data.dropna(
-        subset=[
-            "Open",
-            "High",
-            "Low",
-            "Close",
-        ]
-    )
-
-    return data
-
-
-def _derived_data(
-    symbol: str,
-    period: str,
-    interval: str,
-):
-    """
-    Generate common higher timeframes locally.
-
-    30m is derived from native 15m.
-
-    1h for short histories can also be derived from 15m.
-
-    Longer hourly history is downloaded natively because
-    Yahoo does not provide enough 15m history to truthfully
-    create a multi-month 1h backtest.
-    """
-
-    interval = interval.lower()
-
-    existing = _cache_get(
-        symbol,
-        period,
-        interval,
-    )
-
-    if (
-        existing is not None
-        and len(existing) >= 80
-    ):
-        return existing
-
-    # --------------------------------------------------------
-    # 30 MINUTES FROM 15 MINUTES
-    # --------------------------------------------------------
-
-    if interval == "30m":
-        base_period = safe_native_period(
-            period,
-            "15m",
-        )
-
-        base = _download_native(
-            symbol,
-            base_period,
-            "15m",
-        )
-
-        derived = _resample_ohlcv(
-            base,
-            "30min",
-        )
-
-        if len(derived) >= 80:
-            _cache_put(
-                symbol,
-                period,
-                "30m",
-                derived,
-                source="RESAMPLED_15M",
-            )
-
-            return derived.copy()
-
-    # --------------------------------------------------------
-    # SHORT 1H HISTORY FROM 15M
-    # --------------------------------------------------------
-
-    if (
-        interval in {
-            "60m",
-            "1h",
-        }
-        and period in {
-            "1d",
-            "5d",
-            "1mo",
-        }
-    ):
-        base = _download_native(
-            symbol,
-            safe_native_period(
-                period,
-                "15m",
-            ),
-            "15m",
-        )
-
-        derived = _resample_ohlcv(
-            base,
-            "1h",
-        )
-
-        if len(derived) >= 80:
-            _cache_put(
-                symbol,
-                period,
-                interval,
-                derived,
-                source="RESAMPLED_15M",
-            )
-
-            return derived.copy()
-
-    # --------------------------------------------------------
-    # 2H / 4H FROM NATIVE 1H
-    # --------------------------------------------------------
-
-    if interval in {
-        "2h",
-        "4h",
-    }:
-        base = _download_native(
-            symbol,
-            period,
-            "1h",
-        )
-
-        rule = (
-            "2h"
-            if interval == "2h"
-            else "4h"
-        )
-
-        derived = _resample_ohlcv(
-            base,
-            rule,
-        )
-
-        if len(derived) >= 80:
-            _cache_put(
-                symbol,
-                period,
-                interval,
-                derived,
-                source="RESAMPLED_1H",
-            )
-
-            return derived.copy()
-
-    return None
-
-
-# ============================================================
-# PUBLIC DATA ACCESS
-# ============================================================
-
-def get_data(
-    symbol: str,
-    period: str = "1mo",
-    interval: str = "15m",
-):
-    """Unified V6.2 market-data entry point.
-
-    Provider routing is handled by market_data_router.py. Downstream strategy,
-    backtest, validator and watcher code continue using this same function.
-    """
-
-    symbol = str(symbol or "").strip()
-    period = str(period or "1mo").lower().strip()
-    interval = str(interval or "15m").lower().strip()
-
-    if not symbol:
-        raise HTTPException(
-            status_code=400,
-            detail="Market symbol required",
-        )
-
-    try:
-        data = get_market_data(
-            symbol=symbol,
-            period=period,
-            interval=interval,
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "V6.2 market data unavailable: "
-                f"{symbol} {period} {interval}: {exc}"
-            ),
-        )
-
-    if data is None or data.empty or len(data) < 80:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "V6.2 insufficient market data: "
-                f"{symbol} {period} {interval}"
-            ),
-        )
-
-    return data
-
-
-# ============================================================
-# AI BUILD PIPELINE
-# ============================================================
-
-def build(
-    symbol: str,
-    period: str,
-    interval: str,
-):
-    raw = get_data(
-        symbol,
-        period,
-        interval,
-    )
-
-    indicators = add_indicators(
-        raw
-    )
-
-    model = train_model(
-        indicators
-    )
-
-    return enrich(
-        indicators,
-        model,
-    )
-
-
-# ============================================================
-# ROOT
-# ============================================================
-
-@app.get("/")
-def root():
-    return {
-        "name":
-            "Jasong AI Trader V6.6",
-
-        "version":
-            "6.6.0",
-
-        "mode":
-            "paper-trading",
-
-        "live_execution":
-            False,
+      return Map<String, dynamic>.from(
+        decoded,
+      );
+    } finally {
+      client.close();
     }
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
-@app.get("/health")
-def health():
-    provider = market_data_health()
-
-    manager = (
-        V55_AUTO_MANAGER.status()
-        if "V55_AUTO_MANAGER" in globals()
-        else {}
-    )
-
-    return {
-        "status": "ok",
-        "version": "6.6.0",
-        "engine": "JASONG_AI_V6.6",
-        "auto_manager_enabled": bool(
-            manager.get("enabled", False)
-        ),
-        "auto_manager_runs": int(
-            manager.get("runs", 0) or 0
-        ),
-        "market_data_status": provider.get("status"),
-        "configured_providers": provider.get(
-            "configured_providers", []
-        ),
-        "healthy_providers": provider.get(
-            "healthy_providers", []
-        ),
-        "fx_universe_size": provider.get(
-            "universe_size", 0
-        ),
-        "v65_learning": (
-            V64_LEARNING_ENGINE.status()
-            if "V64_LEARNING_ENGINE" in globals()
-            else None
-        ),
-        "threshold_policy": {
-            "normal_min_confidence": PAPER_NORMAL_MIN_CONFIDENCE,
-            "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
-            "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
-            "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
-                        "paper_only": True,
-        },
-        "live_execution": False,
-    }
-
-
-# ============================================================
-# DATA CACHE
-# ============================================================
-
-@app.get("/data-cache")
-def data_cache():
-    return {
-        "status": "ok",
-        **cache_stats(),
-    }
-
-
-@app.post("/data-cache/clear")
-def clear_data_cache():
-    removed = clear_market_cache()
-
-    return {
-        "status": "cleared",
-        "entries_removed": removed,
-    }
-
-
-# ============================================================
-# V6.2 FOREX UNIVERSE / DATA PROVIDERS
-# ============================================================
-
-@app.get("/fx-universe")
-def fx_universe(
-    limit: int = 100,
-    offset: int = 0,
-    refresh: bool = False,
-):
-    limit = max(1, min(int(limit), 5000))
-    offset = max(0, int(offset))
-
-    universe = get_forex_universe(
-        force_refresh=refresh
-    )
-    selected = universe[offset: offset + limit]
-
-    return {
-        "version": "6.6.0",
-        "total_fx_instruments": len(universe),
-        "offset": offset,
-        "returned": len(selected),
-        "markets": selected,
-        "live_execution": False,
-    }
-
-
-@app.get("/market-data-health")
-def get_market_data_health():
-    return {
-        "version": "6.6.0",
-        **market_data_health(),
-        "live_execution": False,
-    }
-
-
-@app.get("/market-data-probe")
-def market_data_probe(
-    symbol: str = "EUR/USD",
-    period: str = "5d",
-    interval: str = "15m",
-):
-    data = get_data(
-        symbol=symbol,
-        period=period,
-        interval=interval,
-    )
-
-    return {
-        "status": "ok",
-        "symbol": canonical_fx_symbol(symbol),
-        "period": period,
-        "interval": interval,
-        "rows": len(data),
-        "latest_price": float(
-            data["Close"].iloc[-1]
-        ),
-        "market_data": market_data_health(),
-        "live_execution": False,
-    }
-
-
-# ============================================================
-# V6.6 CONTINUOUS SIGNAL -> AUTONOMOUS PAPER BRIDGE
-# ============================================================
-
-def _v651_confidence01(value) -> float:
-    """Normalize 0..1 or 0..100 confidence values to 0..1."""
-    try:
-        number = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    if number != number:
-        return 0.0
-    if number > 1.0:
-        number /= 100.0
-    return max(0.0, min(1.0, number))
-
-
-def _v651_directional_model_ai(result: dict, direction: str) -> float:
-    """Convert displayed AI-up probability into confidence for BUY/SELL."""
-    raw_up = None
-    for key in (
-        "combined_up_probability",
-        "ai_up_probability",
-        "ai_up",
-        "up_probability",
-        "prob_up",
-        "probability_up",
-    ):
-        if result.get(key) is not None:
-            raw_up = result.get(key)
-            break
-    if raw_up is None:
-        return 0.0
-    up = _v651_confidence01(raw_up)
-    return up if direction == "BUY" else (1.0 - up)
-
-
-def _v651_norm_symbol(value: str) -> str:
-    """Make EUR/USD, EURUSD=X and EURUSD comparable for watcher matching."""
-    text = str(value or "").upper()
-    for token in ("/", "=", "-", "_", " ", ":"):
-        text = text.replace(token, "")
-    if text.endswith("X") and len(text) > 6:
-        text = text[:-1]
-    return text
-
-
-def _v651_signal_bridge(
-    *,
-    symbol: str,
-    risk_mode: str,
-    balance: float,
-    signal_result: dict,
-) -> dict:
-    """
-    Connect Refresh AI Signal to the autonomous PAPER workflow.
-
-    Safety rule: this bridge NEVER creates fake VERIFIED status. If a matching
-    VERIFIED learning watcher exists, it forces an immediate learning tick.
-    Otherwise it queues Auto Manager so normal discovery + deep validation
-    decides whether the setup deserves a verified watcher.
-    """
-    direction = str(
-        signal_result.get("direction")
-        or signal_result.get("signal")
-        or signal_result.get("decision")
-        or "WAIT"
-    ).upper()
-
-    quant = _v651_confidence01(signal_result.get("confidence"))
-    model_ai = _v651_directional_model_ai(signal_result, direction)
-    normal_pass = quant >= V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
-    ai_pass = model_ai >= V64LearningTradeEngine.AI_MIN_CONFIDENCE
-    directional = direction in {"BUY", "SELL"}
-    eligible = directional and (normal_pass or ai_pass)
-
-    diagnostic = {
-        "version": "6.6.0",
-        "paper_only": True,
-        "live_execution": False,
-        "direction": direction,
-        "normal_confidence_pct": round(quant * 100.0, 2),
-        "normal_threshold_pct": round(
-            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE * 100.0, 2
-        ),
-        "model_ai_directional_confidence_pct": round(model_ai * 100.0, 2),
-        "model_ai_threshold_pct": round(
-            V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0, 2
-        ),
-        "normal_pass": normal_pass,
-        "ai_pass": ai_pass,
-        "eligible_for_verified_watcher_check": eligible,
-        "verified_watcher_found": False,
-        "action": "NO_ACTION",
-        "reason": None,
-    }
-
-    if not eligible:
-        diagnostic["reason"] = "Signal is WAIT or below both PAPER-learning thresholds."
-        return diagnostic
-
-    engine = globals().get("V64_LEARNING_ENGINE")
-    manager = globals().get("V55_AUTO_MANAGER")
-    if engine is None:
-        diagnostic["reason"] = "Learning engine is not initialized."
-        return diagnostic
-
-    wanted_symbol = _v651_norm_symbol(symbol)
-
-    try:
-        watchers = engine.watchers().get("watchers", [])
-        matching = [
-            w for w in watchers
-            if bool(w.get("verified"))
-            and _v651_norm_symbol(w.get("symbol")) == wanted_symbol
-            and str(w.get("direction") or "").upper() == direction
-        ]
-
-        if matching:
-            diagnostic["verified_watcher_found"] = True
-            engine.tick()
-            diagnostic["action"] = "VERIFIED_WATCHER_RECHECKED"
-            diagnostic["reason"] = (
-                "Matching VERIFIED watcher found; learning engine rechecked immediately."
-            )
-            return diagnostic
-
-        if manager is not None:
-            queued = manager.queue_run(source="signal_bridge")
-            diagnostic["action"] = (
-                "AUTO_MANAGER_QUEUED"
-                if queued.get("accepted")
-                else "AUTO_MANAGER_ALREADY_RUNNING"
-            )
-            diagnostic["auto_manager_job_id"] = queued.get("job_id")
-            diagnostic["reason"] = (
-                "Thresholds passed but no matching VERIFIED watcher exists. "
-                "Auto Manager was queued for discovery/deep validation."
-            )
-        else:
-            diagnostic["reason"] = "Thresholds passed but Auto Manager is not initialized."
-    except Exception as exc:
-        diagnostic["action"] = "BRIDGE_ERROR"
-        diagnostic["reason"] = str(exc)
-
-    return diagnostic
-
-
-# ============================================================
-# SIGNAL
-# ============================================================
-
-@app.get("/signal")
-def signal(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    balance: float = 10000.0,
-):
-    """V6.6 app signal plus autonomous PAPER bridge diagnostics."""
-    validate_risk_mode(risk_mode)
-    validate_balance(balance, "balance")
-
-    base_profile = PROFILES[risk_mode]
-    profile = replace(
-        base_profile,
-        min_confidence=V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE,
-    )
-
-    signal_data = build(symbol, period, interval)
-    result = decision(signal_data, profile)
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "suggested_paper_stake": stake_for_balance(
-            balance,
-            base_profile.risk_per_trade,
-        ),
-        "threshold_policy": {
-            "normal_min_confidence": V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE,
-            "normal_min_confidence_pct":
-                V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE * 100.0,
-            "ai_min_confidence": V64LearningTradeEngine.AI_MIN_CONFIDENCE,
-            "ai_min_confidence_pct":
-                V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0,
-                        "paper_only": True,
-        },
-        "live_execution": False,
-    })
-
-    # A manual refresh now participates in the autonomous PAPER workflow.
-    # It can trigger verification/recheck, but never bypass deep validation.
-    result["autonomous_bridge"] = _v651_signal_bridge(
-        symbol=symbol,
-        risk_mode=risk_mode,
-        balance=balance,
-        signal_result=result,
-    )
-
-    return result
-
-
-# ============================================================
-# BACKTEST
-# ============================================================
-
-@app.get("/backtest")
-def run_backtest(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    data = build(
-        symbol,
-        period,
-        interval,
-    )
-
-    result = backtest(
-        data,
-        PROFILES[risk_mode],
-        starting_balance,
-        payout,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "live_execution": False,
-    })
-
-    return result
-
-
-# ============================================================
-# PAPER TRADES
-# ============================================================
-
-@app.post("/paper-trades")
-def create_paper_trade(
-    symbol: str,
-    direction: str,
-    confidence: float,
-    entry_price: float,
-    stake: float,
-    db: Session = Depends(get_db),
-):
-    if direction not in {
-        "BUY",
-        "SELL",
-    }:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Direction must be "
-                "BUY or SELL"
-            ),
-        )
-
-    if stake <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Stake must be "
-                "greater than 0"
-            ),
-        )
-
-    trade = Trade(
-        symbol=symbol,
-        direction=direction,
-        confidence=confidence,
-        entry_price=entry_price,
-        stake=stake,
-        mode="paper",
-    )
-
-    db.add(
-        trade
-    )
-
-    db.commit()
-
-    db.refresh(
-        trade
-    )
-
-    return {
-        "id": trade.id,
-        "status": "recorded",
-        "live_execution": False,
-    }
-
-
-@app.get("/paper-trades")
-def list_paper_trades(
-    db: Session = Depends(get_db),
-):
-    rows = (
-        db.query(Trade)
-        .order_by(
-            Trade.created_at.desc()
-        )
-        .limit(200)
-        .all()
-    )
-
-    return [
-        {
-            "id": row.id,
-            "created_at":
-                row.created_at.isoformat(),
-            "symbol": row.symbol,
-            "direction": row.direction,
-            "confidence": row.confidence,
-            "entry_price": row.entry_price,
-            "stake": row.stake,
-            "result": row.result,
-            "pnl": row.pnl,
-            "closed": row.closed,
-        }
-        for row in rows
-    ]
-
-
-# ============================================================
-# BACKTEST ALL
-# ============================================================
-
-@app.get("/backtest-all")
-def run_backtest_all(
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    profile = PROFILES[
-        risk_mode
-    ]
-
-    results = []
+  }
+
+  // =========================================================
+  // V4.8 ASYNC DEEP VALIDATION JOB
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      deepValidateWithRecovery(
+    Map<String, dynamic> candidate,
+  ) async {
+    final market =
+        candidate['market']
+                ?.toString() ??
+            'UNKNOWN';
+
+    final createUri = Uri.parse(
+      '$apiBase/deep-validation-job',
+    ).replace(
+      queryParameters: {
+        'risk_mode':
+            risk,
+        'starting_balance':
+            balance.text.trim(),
+        'payout':
+            '0.8',
+      },
+    );
+
+    // V4.8 job endpoint accepts ONE candidate object,
+    // not the old one-item list used by /deep-validate.
+    final body = {
+      'market':
+          candidate['market'],
+      'symbol':
+          candidate['symbol'],
+      'fast_score':
+          candidate['fast_score'] ??
+              candidate['score'] ??
+              0.0,
+      'direction':
+          candidate['direction'] ??
+              'WAIT',
+      'status':
+          candidate['status'] ??
+              'UNKNOWN',
+    };
+
+    Object? lastError;
+    String? jobId;
+
+    // ---------------------------------------------------------
+    // 1. CREATE THE BACKGROUND JOB
+    // ---------------------------------------------------------
 
     for (
-        market_name,
-        symbol,
-    ) in MARKETS.items():
-
-        try:
-            data = build(
-                symbol,
-                period,
-                interval,
-            )
-
-            tested = backtest(
-                data,
-                profile,
-                starting_balance,
-                payout,
-            )
-
-            results.append({
-                "market":
-                    market_name,
-                "symbol":
-                    symbol,
-                "trades":
-                    tested.get(
-                        "trades",
-                        0,
-                    ),
-                "wins":
-                    tested.get(
-                        "wins",
-                        0,
-                    ),
-                "losses":
-                    tested.get(
-                        "losses",
-                        0,
-                    ),
-                "win_rate":
-                    tested.get(
-                        "win_rate",
-                        0.0,
-                    ),
-                "return_pct":
-                    tested.get(
-                        "return_pct",
-                        0.0,
-                    ),
-                "max_drawdown":
-                    tested.get(
-                        "max_drawdown",
-                        0.0,
-                    ),
-                "profit_factor":
-                    tested.get(
-                        "profit_factor",
-                        0.0,
-                    ),
-                "average_trade_pnl":
-                    tested.get(
-                        "average_trade_pnl",
-                        0.0,
-                    ),
-            })
-
-        except Exception as exc:
-            results.append({
-                "market":
-                    market_name,
-                "symbol":
-                    symbol,
-                "error":
-                    str(exc),
-            })
-
-    results = sorted(
-        results,
-        key=lambda item:
-            item.get(
-                "return_pct",
-                -999,
-            ),
-        reverse=True,
-    )
-
-    return {
-        "risk_mode":
-            risk_mode,
-        "period":
-            period,
-        "interval":
-            interval,
-        "markets_tested":
-            len(MARKETS),
-        "results":
-            results,
-        "live_execution":
-            False,
-    }
-
-
-# ============================================================
-# THRESHOLD SWEEP
-# ============================================================
-
-@app.get("/threshold-sweep")
-def run_threshold_sweep(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    holding_candles: int = 4,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    raw = get_data(
-        symbol,
-        period,
-        interval,
-    )
-
-    indicators = add_indicators(
-        raw
-    )
-
-    model = train_model(
-        indicators
-    )
-
-    enriched = enrich(
-        indicators,
-        model,
-    )
-
-    result = threshold_sweep(
-        enriched,
-        PROFILES[risk_mode],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-        holding_candles=
-            holding_candles,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "period": period,
-        "interval": interval,
-        "holding_candles":
-            holding_candles,
-        "live_execution": False,
-    })
-
-    return result
-
-
-# ============================================================
-# STRATEGY OPTIMIZER
-# ============================================================
-
-@app.get("/strategy-optimize")
-def run_strategy_optimize(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    period: str = "1mo",
-    interval: str = "15m",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    raw = get_data(
-        symbol,
-        period,
-        interval,
-    )
-
-    indicators = add_indicators(
-        raw
-    )
-
-    model = train_model(
-        indicators
-    )
-
-    enriched = enrich(
-        indicators,
-        model,
-    )
-
-    result = optimise_strategy(
-        enriched,
-        PROFILES[risk_mode],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "period": period,
-        "interval": interval,
-        "live_execution": False,
-    })
-
-    return result
-
-
-# ============================================================
-# OPTIMIZE ALL TIMEFRAMES
-# ============================================================
-
-@app.get("/optimize-timeframes")
-def run_optimize_timeframes(
-    symbol: str = "EURUSD=X",
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    result = optimise_all_timeframes(
-        symbol=symbol,
-        get_data_func=get_data,
-        add_indicators_func=
-            add_indicators,
-        train_model_func=
-            train_model,
-        enrich_func=enrich,
-        profile=
-            PROFILES[risk_mode],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-    )
-
-    result.update({
-        "risk_mode": risk_mode,
-        "live_execution": False,
-    })
-
-    return result
-
-
-# ============================================================
-# SCAN ONE MARKET
-# ============================================================
-
-@app.get("/scan-market")
-def run_scan_market(
-    market: str = "EURUSD",
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    market = market.upper()
-
-    if market not in MARKETS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unknown market: "
-                f"{market}"
-            ),
-        )
-
-    symbol = MARKETS[
-        market
-    ]
-
-    result = optimise_all_timeframes(
-        symbol=symbol,
-        get_data_func=get_data,
-        add_indicators_func=
-            add_indicators,
-        train_model_func=
-            train_model,
-        enrich_func=enrich,
-        profile=
-            PROFILES[risk_mode],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-    )
-
-    best = result.get(
-        "best"
-    )
-
-    if best:
-        trades = int(
-            best.get(
-                "trades",
-                0,
-            )
-        )
-
-        win_rate = float(
-            best.get(
-                "win_rate",
-                0.0,
-            )
-        )
-
-        profit_factor = float(
-            best.get(
-                "profit_factor",
-                0.0,
-            )
-        )
-
-        return_pct = float(
-            best.get(
-                "return_pct",
-                0.0,
-            )
-        )
-
-        max_drawdown = abs(
-            float(
-                best.get(
-                    "max_drawdown",
-                    0.0,
-                )
-            )
-        )
-
-        best["status"] = (
-            classify_result(
-                trades,
-                win_rate,
-                profit_factor,
-                return_pct,
-                max_drawdown,
-            )
-        )
-
-        best["market_score"] = (
-            calculate_market_score(
-                trades,
-                win_rate,
-                profit_factor,
-                return_pct,
-                max_drawdown,
-            )
-        )
-
-    result.update({
-        "market": market,
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "status": (
-            best.get(
-                "status"
-            )
-            if best
-            else "NO_DATA"
-        ),
-        "market_score": (
-            best.get(
-                "market_score",
-                0.0,
-            )
-            if best
-            else 0.0
-        ),
-        "live_execution": False,
-    })
-
-    return result
-
-
-# ============================================================
-# RANK MARKETS
-# ============================================================
-
-@app.post("/rank-markets")
-def rank_markets(
-    results: list = Body(...),
-    top_n: int = 3,
-):
-    if not isinstance(
-        results,
-        list,
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "results must be a list"
-            ),
-        )
-
-    if (
-        top_n < 1
-        or top_n > 9
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "top_n must be between "
-                "1 and 9"
-            ),
-        )
-
-    return build_top_markets(
-        results=results,
-        top_n=top_n,
-    )
-
-
-# ============================================================
-# V5.4 SMART FAST-SCORE LAYER
-# ============================================================
-
-def _v54_quality_tier(score: float) -> str:
-    if score >= 90.0:
-        return "A+"
-    if score >= 82.0:
-        return "A"
-    if score >= 72.0:
-        return "B"
-    if score >= 62.0:
-        return "C"
-    return "REJECT"
-
-
-def _v54_rescore_candidate(
-    candidate: dict,
-) -> dict:
-    """Make Fast Score more discriminating.
-
-    The original scanner remains the discovery engine. V5.4 applies
-    transparent penalties for obvious entry-quality contradictions so a
-    saturated 100/100 does not look like a 100% win probability.
-
-    This score is still a RANKING score only.
-    """
-
-    item = dict(candidate)
-
-    raw_score = float(
-        item.get(
-            "raw_fast_score",
-            item.get("fast_score", 0.0),
-        )
-        or 0.0
-    )
-
-    direction = str(
-        item.get("direction", "WAIT")
-        or "WAIT"
-    ).upper()
-
-    try:
-        rsi = float(
-            item.get("rsi", 50.0)
-            or 50.0
-        )
-    except (TypeError, ValueError):
-        rsi = 50.0
-
-    reasons = [
-        str(reason)
-        for reason in (
-            item.get("reasons")
-            or []
-        )
-    ]
-
-    reason_text = " | ".join(
-        reasons
-    ).lower()
-
-    penalties = []
-    bonuses = []
-
-    # --------------------------------------------------------
-    # RSI extension penalties
-    # --------------------------------------------------------
-
-    if direction == "BUY":
-        if rsi >= 80.0:
-            penalties.append(
-                ("RSI_EXTREME", 24.0)
-            )
-        elif rsi >= 75.0:
-            penalties.append(
-                ("RSI_OVEREXTENDED", 18.0)
-            )
-        elif rsi >= 70.0:
-            penalties.append(
-                ("RSI_ELEVATED", 10.0)
-            )
-        elif 52.0 <= rsi <= 66.0:
-            bonuses.append(
-                ("RSI_HEALTHY_BUY_ZONE", 2.0)
-            )
-
-    elif direction == "SELL":
-        if rsi <= 20.0:
-            penalties.append(
-                ("RSI_EXTREME", 24.0)
-            )
-        elif rsi <= 25.0:
-            penalties.append(
-                ("RSI_OVEREXTENDED", 18.0)
-            )
-        elif rsi <= 30.0:
-            penalties.append(
-                ("RSI_DEPRESSED", 10.0)
-            )
-        elif 34.0 <= rsi <= 48.0:
-            bonuses.append(
-                ("RSI_HEALTHY_SELL_ZONE", 2.0)
-            )
-
-    # --------------------------------------------------------
-    # Indicator contradiction penalties
-    # --------------------------------------------------------
-
-    if (
-        direction == "BUY"
-        and "macd bearish"
-        in reason_text
-    ):
-        penalties.append(
-            ("MACD_CONTRADICTS_BUY", 12.0)
-        )
-
-    if (
-        direction == "SELL"
-        and "macd bullish"
-        in reason_text
-    ):
-        penalties.append(
-            ("MACD_CONTRADICTS_SELL", 12.0)
-        )
-
-    if (
-        direction == "BUY"
-        and "bearish ema"
-        in reason_text
-    ):
-        penalties.append(
-            ("EMA_CONTRADICTS_BUY", 18.0)
-        )
-
-    if (
-        direction == "SELL"
-        and "bullish ema"
-        in reason_text
-    ):
-        penalties.append(
-            ("EMA_CONTRADICTS_SELL", 18.0)
-        )
-
-    if "positive momentum" in reason_text:
-        if direction == "BUY":
-            bonuses.append(
-                ("POSITIVE_MOMENTUM", 2.0)
-            )
-
-    if "negative momentum" in reason_text:
-        if direction == "SELL":
-            bonuses.append(
-                ("NEGATIVE_MOMENTUM", 2.0)
-            )
-
-    penalty_total = sum(
-        amount
-        for _name, amount
-        in penalties
-    )
-
-    bonus_total = sum(
-        amount
-        for _name, amount
-        in bonuses
-    )
-
-    smart_score = max(
-        0.0,
-        min(
-            100.0,
-            raw_score
-            - penalty_total
-            + bonus_total,
-        ),
-    )
-
-    item["raw_fast_score"] = round(
-        raw_score,
-        2,
-    )
-    item["fast_score"] = round(
-        smart_score,
-        2,
-    )
-    item["smart_fast_score"] = round(
-        smart_score,
-        2,
-    )
-    item["quality_tier"] = (
-        _v54_quality_tier(
-            smart_score
-        )
-    )
-    item["score_penalties"] = [
-        {
-            "code": name,
-            "points": amount,
-        }
-        for name, amount
-        in penalties
-    ]
-    item["score_bonuses"] = [
-        {
-            "code": name,
-            "points": amount,
-        }
-        for name, amount
-        in bonuses
-    ]
-    item["ranking_note"] = (
-        "V5.4 Fast Score is a discovery ranking score, "
-        "not a probability of winning."
-    )
-
-    return item
-
-
-def _v54_rescore_fast_scan(
-    result: dict,
-    top_n: int,
-) -> dict:
-    """Re-rank scanner output without changing the discovery engine."""
-
-    output = dict(result)
-
-    raw_ranking = (
-        result.get("ranking")
-        or []
-    )
-
-    rescored = []
-
-    for raw in raw_ranking:
-        if isinstance(raw, dict):
-            rescored.append(
-                _v54_rescore_candidate(
-                    raw
-                )
-            )
-
-    rescored.sort(
-        key=lambda item: (
-            float(
-                item.get(
-                    "fast_score",
-                    0.0,
-                )
-                or 0.0
-            ),
-            float(
-                item.get(
-                    "raw_fast_score",
-                    0.0,
-                )
-                or 0.0
-            ),
-        ),
-        reverse=True,
-    )
-
-    if rescored:
-        output["ranking"] = rescored
-        output["top_candidates"] = (
-            rescored[:top_n]
-        )
-        output["best_candidate"] = (
-            rescored[0]
-        )
-        output["candidates_found"] = len(
-            [
-                item
-                for item in rescored
-                if item.get(
-                    "quality_tier"
-                )
-                != "REJECT"
-            ]
-        )
-
-    output["scanner"] = (
-        "V5.4_SMART_FAST_SCAN"
-    )
-    output["ranking_version"] = (
-        "V5.4"
-    )
-    output["fast_score_is_probability"] = (
-        False
-    )
-
-    return output
-
-
-# ============================================================
-# FAST SCAN
-# ============================================================
-
-@app.get("/fast-scan")
-def run_fast_scan(
-    period: str = "5d",
-    interval: str = "15m",
-    top_n: int = 3,
-):
-    if (
-        top_n < 1
-        or top_n > len(MARKETS)
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"top_n must be between "
-                f"1 and {len(MARKETS)}"
-            ),
-        )
-
-    raw_result = fast_scan_markets(
-        markets=MARKETS,
-        get_data_func=get_data,
-        add_indicators_func=
-            add_indicators,
-        period=period,
-        interval=interval,
-        top_n=top_n,
-    )
-
-    return _v54_rescore_fast_scan(
-        result=raw_result,
-        top_n=top_n,
-    )
-
-
-# ============================================================
-# DEEP VALIDATE
-# ONE CANDIDATE PER REQUEST
-# ============================================================
-
-@app.post("/deep-validate")
-def run_deep_validate(
-    candidates: list[dict],
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    max_candidates: int = 1,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    if not candidates:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No candidates supplied"
-            ),
-        )
-
-    candidate = candidates[
-        0
-    ]
-
-    result = validate_candidates(
-        candidates=[
-            candidate
-        ],
-        optimise_all_timeframes_func=
-            optimise_all_timeframes,
-        get_data_func=get_data,
-        add_indicators_func=
-            add_indicators,
-        train_model_func=
-            train_model,
-        enrich_func=enrich,
-        profile=
-            PROFILES[risk_mode],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-        max_candidates=1,
-    )
-
-    result.update({
-        "requested_candidates":
-            len(candidates),
-        "candidates_processed_this_request":
-            1,
-        "validation_mode":
-            "V4.6_SINGLE_CANDIDATE",
-        "live_execution":
-            False,
-    })
-
-    return result
-# ============================================================
-# V4.8 ASYNC DEEP VALIDATION JOBS
-# ============================================================
-
-import uuid
-
-from fastapi import BackgroundTasks
-
-
-_DEEP_VALIDATION_JOBS = {}
-
-_DEEP_JOB_LOCK = threading.Lock()
-
-DEEP_JOB_MAX_AGE_SECONDS = 3600
-
-
-def _clean_old_deep_jobs():
-    now = time.time()
-
-    with _DEEP_JOB_LOCK:
-        old_ids = []
-
-        for job_id, job in _DEEP_VALIDATION_JOBS.items():
-            created_at = job.get(
-                "created_at",
-                now,
-            )
-
-            if (
-                now - created_at
-                > DEEP_JOB_MAX_AGE_SECONDS
-            ):
-                old_ids.append(
-                    job_id
-                )
-
-        for job_id in old_ids:
-            _DEEP_VALIDATION_JOBS.pop(
-                job_id,
-                None,
-            )
-
-
-def _update_deep_job(
-    job_id,
-    **values,
-):
-    with _DEEP_JOB_LOCK:
-        job = _DEEP_VALIDATION_JOBS.get(
-            job_id
-        )
-
-        if job is None:
-            return
-
-        job.update(
-            values
-        )
-
-
-def _run_deep_validation_job(
-    job_id,
-    candidate,
-    risk_mode,
-    starting_balance,
-    payout,
-):
-    """
-    Heavy deep validation runs here AFTER
-    the mobile request has already received
-    the job_id.
-    """
-
-    _update_deep_job(
-        job_id,
-        status="RUNNING",
-        started_at=time.time(),
-    )
-
-    try:
-        result = validate_candidates(
-            candidates=[
-                candidate
-            ],
-
-            optimise_all_timeframes_func=
-                optimise_all_timeframes,
-
-            get_data_func=
-                get_data,
-
-            add_indicators_func=
-                add_indicators,
-
-            train_model_func=
-                train_model,
-
-            enrich_func=
-                enrich,
-
-            profile=
-                PROFILES[
-                    risk_mode
-                ],
-
-            starting_balance=
-                starting_balance,
-
-            payout=
-                payout,
-
-            max_candidates=
-                1,
-        )
-
-        _update_deep_job(
-            job_id,
-            status="COMPLETED",
-            completed_at=time.time(),
-            result=result,
-            error=None,
-        )
-
-    except Exception as exc:
-        _update_deep_job(
-            job_id,
-            status="FAILED",
-            completed_at=time.time(),
-            result=None,
-            error=str(exc),
-        )
-
-
-@app.post("/deep-validation-job")
-def create_deep_validation_job(
-    candidate: dict,
-    background_tasks: BackgroundTasks,
-
-    risk_mode: str =
-        "Balanced",
-
-    starting_balance: float =
-        10000.0,
-
-    payout: float =
-        0.80,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    if not candidate:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Candidate is required"
-            ),
-        )
-
-    market = candidate.get(
-        "market"
-    )
-
-    symbol = candidate.get(
-        "symbol"
-    )
-
-    if not market or not symbol:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Candidate must contain "
-                "market and symbol"
-            ),
-        )
-
-    _clean_old_deep_jobs()
-
-    job_id = str(
-        uuid.uuid4()
-    )
-
-    with _DEEP_JOB_LOCK:
-        _DEEP_VALIDATION_JOBS[
-            job_id
-        ] = {
-            "job_id":
-                job_id,
-
-            "status":
-                "QUEUED",
-
-            "market":
-                market,
-
-            "symbol":
-                symbol,
-
-            "candidate":
-                candidate,
-
-            "risk_mode":
-                risk_mode,
-
-            "created_at":
-                time.time(),
-
-            "started_at":
-                None,
-
-            "completed_at":
-                None,
-
-            "result":
-                None,
-
-            "error":
-                None,
-        }
-
-    background_tasks.add_task(
-        _run_deep_validation_job,
-        job_id,
-        candidate,
-        risk_mode,
-        starting_balance,
-        payout,
-    )
-
-    return {
-        "job_id":
-            job_id,
-
-        "status":
-            "QUEUED",
-
-        "market":
-            market,
-
-        "symbol":
-            symbol,
-
-        "message":
-            "Deep validation job created",
-
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/deep-validation-job/{job_id}")
-def get_deep_validation_job(
-    job_id: str,
-):
-    with _DEEP_JOB_LOCK:
-        job = _DEEP_VALIDATION_JOBS.get(
-            job_id
-        )
-
-        if job is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Deep validation job "
-                    "not found"
-                ),
-            )
-
-        response = dict(
-            job
-        )
-
-    # Do not unnecessarily return the
-    # original input object every poll.
-    response.pop(
-        "candidate",
-        None,
-    )
-
-    response[
-        "live_execution"
-    ] = False
-
-    return response
-
-
-
-# ============================================================
-# V5.3 VERIFIED WATCHER + FORWARD PAPER ENGINE
-# ============================================================
-
-
-def _v53_live_signal(
-    symbol: str,
-    risk_mode: str,
-    balance: float,
-):
-    """Internal live signal callback used by the watcher engine."""
-
-    base_profile = PROFILES[
-        risk_mode
-    ]
-
-    profile = replace(
-        base_profile,
-        min_confidence=(
-            V64LearningTradeEngine.NORMAL_MIN_CONFIDENCE
-        ),
-    )
-
-    signal_data = build(
-        symbol,
-        "1mo",
-        "15m",
-    )
-
-    result = decision(
-        signal_data,
-        profile,
-    )
-
-    result.update({
-        "symbol": symbol,
-        "risk_mode": risk_mode,
-        "suggested_paper_stake":
-            stake_for_balance(
-                balance,
-                base_profile.risk_per_trade,
-            ),
-        "observed_at": time.time(),
-        "live_execution": False,
-    })
-
-    return result
-
-
-
-def _v63_adaptive_live_signal(
-    symbol: str,
-    risk_mode: str,
-    balance: float,
-):
-    """V6.3 analysis-only live callback for adaptive PAPER entries.
-
-    It uses the same engine/indicators/model as the normal live signal.
-    Only the profile confidence floor is temporarily set to zero so
-    lower-confidence BUY/SELL decisions can be evaluated by the rolling
-    historical qualification gate. The real PROFILES object is untouched.
-    """
-
-    base_profile = PROFILES[
-        risk_mode
-    ]
-
-    adaptive_profile = replace(
-        base_profile,
-        min_confidence=0.0,
-    )
-
-    signal_data = build(
-        symbol,
-        "1mo",
-        "15m",
-    )
-
-    result = decision(
-        signal_data,
-        adaptive_profile,
-    )
-
-    result.update({
-        "symbol":
-            symbol,
-        "risk_mode":
-            risk_mode,
-        "suggested_paper_stake":
-            stake_for_balance(
-                balance,
-                base_profile.risk_per_trade,
-            ),
-        "observed_at":
-            time.time(),
-        "adaptive_analysis_only":
-            True,
-        "live_execution":
-            False,
-    })
-
-    return result
-
-
-def _v53_latest_price(
-    symbol: str,
-) -> float:
-    data = get_data(
-        symbol,
-        "5d",
-        "15m",
-    )
-
-    if data is None or data.empty:
-        raise ValueError(
-            f"No latest price available for {symbol}"
-        )
-
-    return float(
-        data["Close"].iloc[-1]
-    )
-
-
-
-# ============================================================
-# V5.6 FORWARD INTELLIGENCE / STRATEGY HEALTH
-# ============================================================
-
-V56_FORWARD_MIN_TRADES = 10
-V56_QUARANTINE_MIN_TRADES = 15
-
-
-def _v56_forward_health(
-    symbol: str,
-    direction: str | None = None,
-    payout: float = 0.80,
-) -> dict:
-    """Forward paper evidence for a symbol/direction.
-
-    Historical validation remains independent. Forward evidence only starts
-    influencing ranking after enough unseen paper trades have settled.
-    """
-
-    db = SessionLocal()
-
-    try:
-        query = (
-            db.query(Trade)
-            .filter(Trade.mode == "forward")
-            .filter(Trade.closed == True)  # noqa: E712
-            .filter(Trade.symbol == symbol)
-        )
-
-        clean_direction = str(
-            direction or ""
-        ).upper()
-
-        if clean_direction in {
-            "BUY",
-            "SELL",
-        }:
-            query = query.filter(
-                Trade.direction
-                == clean_direction
-            )
-
-        rows = (
-            query
-            .order_by(
-                Trade.created_at.asc()
-            )
-            .all()
-        )
-
-        closed = [
-            row
-            for row in rows
-            if str(
-                getattr(
-                    row,
-                    "result",
-                    "",
-                )
-                or ""
-            ).upper()
-            in {
-                "WIN",
-                "LOSS",
-            }
-        ]
-
-        wins = sum(
-            1
-            for row in closed
-            if str(
-                getattr(
-                    row,
-                    "result",
-                    "",
-                )
-                or ""
-            ).upper()
-            == "WIN"
-        )
-
-        losses = (
-            len(closed)
-            - wins
-        )
-
-        gross_profit = sum(
-            max(
-                float(
-                    getattr(
-                        row,
-                        "pnl",
-                        0.0,
-                    )
-                    or 0.0
-                ),
-                0.0,
-            )
-            for row in closed
-        )
-
-        gross_loss = abs(
-            sum(
-                min(
-                    float(
-                        getattr(
-                            row,
-                            "pnl",
-                            0.0,
-                        )
-                        or 0.0
-                    ),
-                    0.0,
-                )
-                for row in closed
-            )
-        )
-
-        trades = len(
-            closed
-        )
-
-        win_rate = (
-            wins / trades
-            if trades
-            else 0.0
-        )
-
-        profit_factor = (
-            gross_profit
-            / gross_loss
-            if gross_loss > 0
-            else (
-                99.0
-                if gross_profit > 0
-                else 0.0
-            )
-        )
-
-        break_even = (
-            1.0
-            / (
-                1.0
-                + float(
-                    payout
-                )
-            )
-        )
-
-        # ----------------------------------------------------
-        # Strategy health classification
-        # ----------------------------------------------------
-
-        if trades < V56_FORWARD_MIN_TRADES:
-            health = "PROBATION"
-            health_reason = (
-                "Not enough settled forward trades yet."
-            )
-
-        elif (
-            trades
-            >= V56_QUARANTINE_MIN_TRADES
-            and (
-                win_rate
-                < break_even
-                - 0.03
-                or profit_factor
-                < 0.85
-            )
-        ):
-            health = "QUARANTINED"
-            health_reason = (
-                "Forward evidence has fallen materially below "
-                "the configured profitability floor."
-            )
-
-        elif (
-            win_rate
-            >= break_even
-            + 0.08
-            and profit_factor
-            >= 1.30
-        ):
-            health = "HEALTHY"
-            health_reason = (
-                "Forward win rate and profit factor support the "
-                "historical edge."
-            )
-
-        else:
-            health = "DEGRADING"
-            health_reason = (
-                "Forward edge exists or remains inconclusive, but "
-                "does not currently satisfy the HEALTHY threshold."
-            )
-
-        health_adjustment = {
-            "PROBATION": 0.0,
-            "HEALTHY": 6.0,
-            "DEGRADING": -6.0,
-            "QUARANTINED": -30.0,
-        }[
-            health
-        ]
-
-        return {
-            "symbol":
-                symbol,
-            "direction":
-                clean_direction
-                or None,
-            "trades":
-                trades,
-            "wins":
-                wins,
-            "losses":
-                losses,
-            "win_rate":
-                round(
-                    win_rate,
-                    4,
-                ),
-            "win_rate_pct":
-                round(
-                    win_rate
-                    * 100.0,
-                    1,
-                ),
-            "profit_factor":
-                round(
-                    profit_factor,
-                    4,
-                ),
-            "break_even_win_rate":
-                round(
-                    break_even,
-                    4,
-                ),
-            "break_even_win_rate_pct":
-                round(
-                    break_even
-                    * 100.0,
-                    1,
-                ),
-            "health":
-                health,
-            "health_reason":
-                health_reason,
-            "ranking_adjustment":
-                health_adjustment,
-            "evidence_active":
-                trades
-                >= V56_FORWARD_MIN_TRADES,
-            "quarantined":
-                health
-                == "QUARANTINED",
-        }
-
-    finally:
-        db.close()
-
-
-def _v55_symbol_forward_stats(
-    symbol: str,
-    payout: float = 0.80,
-) -> dict:
-    """Backward-compatible V5.5 symbol-level forward stats."""
-
-    return _v56_forward_health(
-        symbol=symbol,
-        direction=None,
-        payout=payout,
-    )
-
-
-def _v56_adaptive_candidate_score(
-    candidate: dict,
-    payout: float = 0.80,
-) -> dict:
-    """V5.6 ranking = Smart Fast Score + direction-specific forward health."""
-
-    item = dict(
-        candidate
-    )
-
-    base_score = float(
-        item.get(
-            "smart_fast_score",
-            item.get(
-                "fast_score",
-                0.0,
-            ),
-        )
-        or 0.0
-    )
-
-    symbol = str(
-        item.get(
-            "symbol"
-        )
-        or ""
-    )
-
-    direction = str(
-        item.get(
-            "direction"
-        )
-        or ""
-    ).upper()
-
-    health = _v56_forward_health(
-        symbol=symbol,
-        direction=direction,
-        payout=payout,
-    )
-
-    adjustment = float(
-        health.get(
-            "ranking_adjustment",
-            0.0,
-        )
-        or 0.0
-    )
-
-    adaptive_score = max(
-        0.0,
-        min(
-            100.0,
-            base_score
-            + adjustment,
-        ),
-    )
-
-    item[
-        "adaptive_rank_score"
-    ] = round(
-        adaptive_score,
-        2,
-    )
-
-    item[
-        "forward_evidence_adjustment"
-    ] = round(
-        adjustment,
-        2,
-    )
-
-    item[
-        "forward_evidence_active"
-    ] = bool(
-        health.get(
-            "evidence_active",
-            False,
-        )
-    )
-
-    # Keep the old key so V5.5.x UI/code remains compatible.
-    item[
-        "forward_symbol_stats"
-    ] = health
-
-    item[
-        "strategy_health"
-    ] = health.get(
-        "health"
-    )
-
-    item[
-        "strategy_health_reason"
-    ] = health.get(
-        "health_reason"
-    )
-
-    item[
-        "strategy_quarantined"
-    ] = bool(
-        health.get(
-            "quarantined",
-            False,
-        )
-    )
-
-    return item
-
-
-def _v55_adaptive_candidate_score(
-    candidate: dict,
-    payout: float = 0.80,
-) -> dict:
-    """Backward-compatible name, now powered by V5.6 health."""
-
-    return _v56_adaptive_candidate_score(
-        candidate=candidate,
-        payout=payout,
-    )
-
-
-def _v55_rank_candidates(
-    candidates: list[dict],
-    payout: float = 0.80,
-) -> list[dict]:
-    ranked = [
-        _v56_adaptive_candidate_score(
-            candidate=item,
-            payout=payout,
-        )
-        for item
-        in candidates
-        if isinstance(
-            item,
-            dict,
-        )
-    ]
-
-    ranked.sort(
-        key=lambda item: (
-            bool(
-                not item.get(
-                    "strategy_quarantined",
-                    False,
-                )
-            ),
-            float(
-                item.get(
-                    "adaptive_rank_score",
-                    0.0,
-                )
-                or 0.0
-            ),
-            float(
-                item.get(
-                    "smart_fast_score",
-                    item.get(
-                        "fast_score",
-                        0.0,
-                    ),
-                )
-                or 0.0
-            ),
-        ),
-        reverse=True,
-    )
-
-    return ranked
-
-
-V61_CONFIDENCE_REPLAY = ConfidenceReplayEngine(
-    markets=MARKETS,
-    get_data_func=get_data,
-    add_indicators_func=add_indicators,
-    train_model_func=train_model,
-    enrich_func=enrich,
-    decision_func=decision,
-    profiles=PROFILES,
-)
-
-V62_CONFIDENCE_WR_ANALYZER = ConfidenceWinRateAnalyzer(
-    markets=MARKETS,
-    get_data_func=get_data,
-    add_indicators_func=add_indicators,
-    train_model_func=train_model,
-    enrich_func=enrich,
-    decision_func=decision,
-    profiles=PROFILES,
-)
-
-# -----------------------------------------------------------------------------
-# V6.3.1 ADAPTIVE CONFIDENCE GATE -- PAPER ONLY
-# -----------------------------------------------------------------------------
-adaptive_confidence_gate = AdaptiveConfidenceGate(
-    state_path="/tmp/adaptive_confidence_state.json",
-    target_win_rate=0.65,
-    min_profit_factor=1.50,
-    min_trades=20,
-    max_age_hours=24.0,
-    absolute_min_confidence=0.30,
-)
-
-
-def _v66_fx_correlation_matrix():
-    """Recent 15-minute FX return correlations for portfolio gating.
-
-    Uses only past/current market data. If a symbol cannot be loaded it is
-    skipped and the portfolio gate falls back to currency-exposure controls.
-    """
-
-    returns = {}
-
-    for market, symbol in MARKETS.items():
-        try:
-            df = get_data(
-                symbol,
-                "5d",
-                "15m",
-            )
-
-            if (
-                df is None
-                or df.empty
-                or "Close" not in df
-            ):
-                continue
-
-            series = (
-                df["Close"]
-                .astype(float)
-                .pct_change()
-                .dropna()
-                .tail(300)
-            )
-
-            if len(series) >= 30:
-                returns[
-                    symbol.upper()
-                ] = series
-
-        except Exception:
-            continue
-
-    symbols = list(
-        returns.keys()
-    )
-
-    matrix = {
-        symbol: {}
-        for symbol in symbols
-    }
-
-    for i, left in enumerate(symbols):
-        for right in symbols[
-            i + 1:
-        ]:
-            aligned = (
-                returns[left]
-                .to_frame("left")
-                .join(
-                    returns[right]
-                    .to_frame("right"),
-                    how="inner",
-                )
-                .dropna()
-            )
-
-            if len(aligned) < 30:
-                continue
-
-            corr = float(
-                aligned["left"]
-                .corr(
-                    aligned["right"]
-                )
-            )
-
-            if corr != corr:
-                continue
-
-            matrix[left][right] = corr
-            matrix[right][left] = corr
-
-    return matrix
-
-
-V66_INTELLIGENCE = V66Intelligence(
-    forward_quarantine_min_trades=8,
-    forward_mature_min_trades=20,
-    forward_min_win_rate=0.56,
-    forward_min_profit_factor=1.00,
-    max_currency_exposure=2,
-    max_highly_correlated_open=1,
-    high_correlation_abs=0.80,
-)
-
-V60_RISK_GATEWAY = RiskGateway(
-    max_open_trades=2, max_daily_loss_pct=0.04, max_drawdown_pct=0.10, max_consecutive_losses=3,
-    max_assumed_spread_bps=3.0, max_price_age_seconds=180,
-)
-V60_EXECUTION_GATEWAY = ExecutionGateway(mode="PAPER", allow_live_execution=False)
-V61_STATE_STORE = PersistentStateStore("data/jasong_v61_state.json")
-
-V53_WATCHER_ENGINE = TradeWatcherEngine(
-    session_factory=SessionLocal, trade_model=Trade, signal_func=_v53_live_signal, price_func=_v53_latest_price, profiles=PROFILES,
-    risk_gateway=V60_RISK_GATEWAY,
-    execution_gateway=V60_EXECUTION_GATEWAY,
-    state_store=V61_STATE_STORE,
-    adaptive_signal_func=_v63_adaptive_live_signal,
-    adaptive_confidence_gate=adaptive_confidence_gate,
-    v66_intelligence=V66_INTELLIGENCE,
-    correlation_func=_v66_fx_correlation_matrix,
-)
-
-V53_WATCHER_ENGINE.start()
-
-
-# ============================================================
-# V5.5 AUTOMATED TRADE MANAGER
-# ============================================================
-
-def _v62_next_fx_batch(
-    batch_size: int = FX_DISCOVERY_BATCH_SIZE,
-) -> dict[str, str]:
-    """V6.6.5 Phase-1 IG DEMO discovery universe.
-
-    Keep the first 10 broker-demo trades on nine liquid core FX pairs.
-    This avoids wasting IG historical-data allowance across an 80-pair
-    rotating universe while Yahoo/Twelve Data are degraded.
-    """
-    return dict(CORE_MARKETS)
-
-
-def _v55_scan_candidates(
-    top_n: int = 9,
-    payout: float = 0.80,
-) -> list[dict]:
-    """V6.2 rotating multi-source FX discovery scan."""
-
-    scan_markets = _v62_next_fx_batch(
-        batch_size=FX_DISCOVERY_BATCH_SIZE
-    )
-
-    if not scan_markets:
-        scan_markets = dict(CORE_MARKETS)
-
-    effective_top_n = max(
-        1,
-        min(
-            int(top_n),
-            len(scan_markets),
-        ),
-    )
-
-    raw_result = fast_scan_markets(
-        markets=scan_markets,
-        get_data_func=get_discovery_market_data,
-        add_indicators_func=add_indicators,
-        period="5d",
-        interval="15m",
-        top_n=effective_top_n,
-    )
-
-    raw = _v54_rescore_fast_scan(
-        result=raw_result,
-        top_n=effective_top_n,
-    )
-
-    candidates = (
-        raw.get("ranking")
-        or raw.get("top_candidates")
-        or []
-    )
-
-    ranked = _v55_rank_candidates(
-        candidates=[
-            dict(item)
-            for item in candidates
-            if isinstance(item, dict)
-        ],
-        payout=payout,
-    )
-
-    universe_size = len(
-        CORE_MARKETS
-    )
-
-    for candidate in ranked:
-        candidate["discovery_version"] = (
-            "V6.6.5_IG_DEMO_CORE9"
-        )
-        candidate["discovery_universe_size"] = (
-            universe_size
-        )
-        candidate["discovery_batch_size"] = len(
-            scan_markets
-        )
-
-    return ranked
-
-
-def _v55_validate_candidate(
-    candidate: dict,
-    risk_mode: str,
-    starting_balance: float,
-    payout: float,
-) -> dict:
-    result = validate_candidates(
-        candidates=[
-            candidate
-        ],
-        optimise_all_timeframes_func=
-            optimise_all_timeframes,
-        get_data_func=get_data,
-        add_indicators_func=
-            add_indicators,
-        train_model_func=
-            train_model,
-        enrich_func=enrich,
-        profile=
-            PROFILES[
-                risk_mode
-            ],
-        starting_balance=
-            starting_balance,
-        payout=payout,
-        max_candidates=1,
-    )
-
-    final_market = (
-        result.get(
-            "final_market"
-        )
-    )
-
-    if isinstance(
-        final_market,
-        dict,
-    ):
-        return dict(
-            final_market
-        )
-
-    return {
-        "market":
-            candidate.get(
-                "market"
-            ),
-        "symbol":
-            candidate.get(
-                "symbol"
-            ),
-        "status":
-            result.get(
-                "final_status",
-                "NOT_VERIFIED",
-            ),
-        "verified":
-            False,
-        "explanation":
-            "No verified market returned by deep validation.",
-    }
-
-
-V64_LEARNING_ENGINE = AI40OnlyLearningTradeEngine(
-    signal_func=_v63_adaptive_live_signal,
-    price_func=_v53_latest_price,
-    state_store=V61_STATE_STORE,
-    max_watchers=6,
-    max_open_trades=1,
-    watcher_refresh_seconds=30,
-    starting_balance=10000.0,
-    payout=0.80,
-    default_stake_pct=0.01,
-)
-V64_LEARNING_ENGINE.start()
-
-# AI-learning experiment: disable the N30 entry path inside V64.
-# Only the AI40 model path may open an autonomous learning PAPER trade.
-V64_LEARNING_ENGINE.NORMAL_MIN_CONFIDENCE = 1.01
-V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = PAPER_AI_MIN_CONFIDENCE
-
-# ============================================================
-# IG DEMO BROKER EXECUTION BRIDGE
-# ============================================================
-# Strictly demo-only. The broker class hard-codes demo-api.ig.com
-# and has no production IG URL.
-IG_DEMO_BROKER = get_ig_demo_broker()
-IG_DEMO_MIRROR = IGDemoMirror(
-    broker=IG_DEMO_BROKER,
-    trade_source=lambda: V64_LEARNING_ENGINE.trades(
-        limit=200,
-    ),
-)
-IG_DEMO_MIRROR.start()
-
-
-
-V55_AUTO_MANAGER = AutomatedTradeManager(
-    scan_candidates_func=
-        _v55_scan_candidates,
-    validate_candidate_func=
-        _v55_validate_candidate,
-    watcher_engine=
-        V53_WATCHER_ENGINE,
-    state_store=V61_STATE_STORE,
-    learning_engine=V64_LEARNING_ENGINE,
-)
-
-V55_AUTO_MANAGER.start_thread()
-
-
-# ============================================================
-# V6.2 ALWAYS-ON AUTO MANAGER
-# ============================================================
-
-def _v62_ensure_auto_manager() -> None:
-    """Migrate persisted Auto Manager state to the V6.6 learning cadence.
-
-    Risk mode, balance and payout are preserved where available, while the
-    sourcing cadence/watch capacity is upgraded to the V6.6 defaults.
-    """
-
-    try:
-        state = V55_AUTO_MANAGER.status()
-        V55_AUTO_MANAGER.enable(
-            risk_mode=str(state.get("risk_mode", "Balanced")),
-            starting_balance=float(state.get("starting_balance", 10000.0) or 10000.0),
-            payout=float(state.get("payout", 0.80) or 0.80),
-            scan_interval_minutes=2,
-            target_active_watchers=6,
-            scan_top_n=9,
-        )
-        V55_AUTO_MANAGER.start_thread()
-
-    except Exception as exc:
-        print(
-            "[V6.6 AUTO START ERROR]",
-            exc,
-        )
-
-
-_v62_ensure_auto_manager()
-
-
-V60_CONTROLLER = AutonomousController(
-    auto_manager=V55_AUTO_MANAGER, watcher_engine=V53_WATCHER_ENGINE, risk_gateway=V60_RISK_GATEWAY,
-    execution_gateway=V60_EXECUTION_GATEWAY, starting_balance=10000.0,
-)
-V60_CONTROLLER.start_thread()
-
-
-
-@app.post("/watchers")
-def create_verified_watcher(
-    candidate: dict = Body(...),
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    """Create a server-side watcher for one VERIFIED historical setup."""
-
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    try:
-        watcher = V53_WATCHER_ENGINE.create(
-            candidate=candidate,
-            risk_mode=risk_mode,
-            starting_balance=starting_balance,
-            payout=payout,
-        )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-    return {
-        "status": "WATCHER_CREATED",
-        "watcher": watcher,
-        "live_execution": False,
-    }
-
-
-@app.get("/watchers")
-def list_verified_watchers():
-    watchers = (
-        V53_WATCHER_ENGINE.list()
-    )
-
-    active_statuses = {
-        "WATCHING",
-        "READY",
-        "RISK_BLOCKED",
-        "OPEN",
-    }
-
-    active = [
-        item
-        for item in watchers
-        if item.get("status")
-        in active_statuses
-    ]
-
-    return {
-        "watchers": watchers,
-        "active_watchers": len(active),
-        "portfolio_mode":
-            "V5.4_MULTI_CANDIDATE",
-        "max_open_trades":
-            V53_WATCHER_ENGINE.MAX_OPEN_TRADES,
-        "live_execution": False,
-    }
-
-
-@app.get("/watchers/{watcher_id}")
-def get_verified_watcher(
-    watcher_id: str,
-):
-    watcher = V53_WATCHER_ENGINE.get(
-        watcher_id
-    )
-
-    if watcher is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Watcher not found",
-        )
-
-    return {
-        "watcher": watcher,
-        "live_execution": False,
-    }
-
-
-@app.post("/watchers/{watcher_id}/check")
-def check_verified_watcher_now(
-    watcher_id: str,
-):
-    watcher = V53_WATCHER_ENGINE.check_now(
-        watcher_id
-    )
-
-    if watcher is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Watcher not found",
-        )
-
-    return {
-        "watcher": watcher,
-        "live_execution": False,
-    }
-
-
-
-# ============================================================
-# V5.5 AUTO MANAGER API
-# ============================================================
-
-@app.get("/auto-manager")
-def get_auto_manager_status():
-    return {
-        "manager":
-            V55_AUTO_MANAGER.status(),
-        "live_execution":
-            False,
-    }
-
-
-@app.post("/auto-manager/start")
-def start_auto_manager(
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-    scan_interval_minutes: int = 3,
-    target_active_watchers: int = 6,
-    scan_top_n: int = 9,
-):
-    validate_risk_mode(
-        risk_mode
-    )
-
-    validate_balance(
-        starting_balance
-    )
-
-    try:
-        state = V55_AUTO_MANAGER.enable(
-            risk_mode=
-                risk_mode,
-            starting_balance=
-                starting_balance,
-            payout=
-                payout,
-            scan_interval_minutes=
-                scan_interval_minutes,
-            target_active_watchers=
-                target_active_watchers,
-            scan_top_n=
-                scan_top_n,
-        )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-    return {
-        "status":
-            "AUTO_MANAGER_ENABLED",
-        "manager":
-            state,
-        "live_execution":
-            False,
-    }
-
-
-@app.post("/auto-manager/stop")
-def stop_auto_manager():
-    state = (
-        V55_AUTO_MANAGER.disable()
-    )
-
-    return {
-        "status":
-            "AUTO_MANAGER_DISABLED",
-        "manager":
-            state,
-        "live_execution":
-            False,
-    }
-
-
-@app.post("/auto-manager/run-now")
-def run_auto_manager_now():
-    queued = (
-        V55_AUTO_MANAGER.queue_run(
-            source="manual",
-        )
-    )
-
-    return {
-        "status": (
-            "AUTO_RUN_QUEUED"
-            if queued.get(
-                "accepted"
-            )
-            else "AUTO_RUN_ALREADY_RUNNING"
-        ),
-        "accepted":
-            bool(
-                queued.get(
-                    "accepted",
-                    False,
-                )
-            ),
-        "job_id":
-            queued.get(
-                "job_id"
-            ),
-        "job":
-            queued.get(
-                "job"
-            ),
-        "manager":
-            V55_AUTO_MANAGER.status(),
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/auto-manager/job/{job_id}")
-def get_auto_manager_job(
-    job_id: str,
-):
-    job = (
-        V55_AUTO_MANAGER.get_job(
-            job_id
-        )
-    )
-
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Auto Manager job not found"
-            ),
-        )
-
-    return {
-        "job":
-            job,
-        "manager":
-            V55_AUTO_MANAGER.status(),
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/auto-manager/jobs")
-def list_auto_manager_jobs():
-    return {
-        "jobs":
-            V55_AUTO_MANAGER.list_jobs(),
-        "manager":
-            V55_AUTO_MANAGER.status(),
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/adaptive-ranking")
-def get_adaptive_ranking(
-    top_n: int = 9,
-    payout: float = 0.80,
-):
-    if (
-        top_n < 1
-        or top_n > len(MARKETS)
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"top_n must be between "
-                f"1 and {len(MARKETS)}"
-            ),
-        )
-
-    candidates = (
-        _v55_scan_candidates(
-            top_n=top_n,
-            payout=payout,
-        )
-    )
-
-    return {
-        "ranking":
-            candidates[
-                :top_n
-            ],
-        "forward_evidence_min_trades":
-            V56_FORWARD_MIN_TRADES,
-        "note":
-            (
-                "V5.7 adaptive ranking uses direction-specific forward paper evidence "
-                "after the configured minimum settled trades. "
-                "Deep validation remains mandatory before watching."
-            ),
-        "live_execution":
-            False,
-    }
-
-
-
-
-
-# ============================================================
-# V6.2.2 RAW CONFIDENCE CALIBRATION ANALYZER
-# ============================================================
-
-@app.post("/confidence-wr/start")
-def start_confidence_wr_analysis(
-    risk_mode: str = "Balanced",
-    days: int = 7,
-    interval: str = "15m",
-    holding_candles: int = 4,
-    stride_candles: int = 1,
-    target_win_rate: float = 0.65,
-    min_profit_factor: float = 1.50,
-    min_trades_qualified: int = 20,
-    min_trades_promising: int = 10,
-    minimum_trade_confidence: float = 0.30,
-):
-    """Raw confidence calibration from 30% upward against realised win rate.\n\n    One frozen pre-test model is used per market; the legacy high-confidence gate is not used by V6.5 PAPER learning.\n    This endpoint never opens a trade.\n    """
-    validate_risk_mode(risk_mode)
-
-    try:
-        return V62_CONFIDENCE_WR_ANALYZER.create_job(
-            risk_mode=risk_mode,
-            days=days,
-            interval=interval,
-            holding_candles=holding_candles,
-            stride_candles=stride_candles,
-            target_win_rate=target_win_rate,
-            min_profit_factor=min_profit_factor,
-            min_trades_qualified=min_trades_qualified,
-            min_trades_promising=min_trades_promising,
-            minimum_trade_confidence=minimum_trade_confidence,
-            markets=list(MARKETS.keys()),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-
-@app.get("/confidence-wr/{job_id}")
-def get_confidence_wr_analysis(
-    job_id: str,
-):
-    job = V62_CONFIDENCE_WR_ANALYZER.get_job(
-        job_id
-    )
-
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Confidence/WR job not found",
-        )
-
-    return job
-
-
-# ============================================================
-# V6.1 SEVEN-DAY LIVE CONFIDENCE REPLAY
-# ============================================================
-
-@app.post("/confidence-replay/start")
-def start_confidence_replay(
-    risk_mode: str = "Balanced",
-    days: int = 7,
-    interval: str = "15m",
-    threshold: float | None = None,
-    stride_candles: int = 1,
-):
-    """Start an asynchronous no-future-data confidence replay.
-
-    stride_candles=1 checks every 15m candle and is the thorough test.
-    It is CPU intensive because the model is rebuilt at every replay point.
-    """
-    validate_risk_mode(risk_mode)
-
-    try:
-        return V61_CONFIDENCE_REPLAY.create_job(
-            risk_mode=risk_mode,
-            days=days,
-            interval=interval,
-            threshold=threshold,
-            stride_candles=stride_candles,
-            markets=list(MARKETS.keys()),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-
-@app.get("/confidence-replay/{job_id}")
-def get_confidence_replay(
-    job_id: str,
-):
-    job = V61_CONFIDENCE_REPLAY.get_job(
-        job_id
-    )
-
-    if job is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Confidence replay job not found",
-        )
-
-    return job
-
-
-# ============================================================
-# V6.0 AUTONOMOUS / RISK / EXECUTION CONTROL
-# ============================================================
-
-@app.get("/v6/status")
-def v6_status():
-    return {"version":"6.1.0","controller":V60_CONTROLLER.status(),"live_execution":False}
-
-@app.post("/v6/start")
-def v6_start(starting_balance:float=10000.0, risk_mode:str="Balanced", payout:float=0.80,
-             scan_interval_minutes:int=15, target_active_watchers:int=3, scan_top_n:int=9, overnight_mode:bool=True):
-    validate_balance(starting_balance); validate_risk_mode(risk_mode)
-    V60_EXECUTION_GATEWAY.set_mode("PAPER")
-    controller=V60_CONTROLLER.enable(starting_balance=starting_balance,overnight_mode=overnight_mode)
-    manager=V55_AUTO_MANAGER.enable(risk_mode=risk_mode,starting_balance=starting_balance,payout=payout,
-        scan_interval_minutes=scan_interval_minutes,target_active_watchers=target_active_watchers,scan_top_n=scan_top_n)
-    return {"status":"V6_AUTONOMOUS_PAPER_ENABLED","controller":controller,"auto_manager":manager,"execution_mode":"PAPER","live_execution":False}
-
-@app.post("/v6/stop")
-def v6_stop():
-    return {"status":"V6_STOPPED","controller":V60_CONTROLLER.disable(reason="MANUAL_STOP"),"live_execution":False}
-
-@app.post("/v6/emergency-stop")
-def v6_emergency_stop(reason:str="MANUAL_EMERGENCY_STOP"):
-    return {"status":"V6_EMERGENCY_STOPPED","controller":V60_CONTROLLER.emergency_stop(reason=reason),"live_execution":False}
-
-@app.post("/v6/clear-kill-switch")
-def v6_clear_kill_switch():
-    return {"status":"KILL_SWITCH_CLEARED","risk":V60_RISK_GATEWAY.clear_kill_switch(),"live_execution":False}
-
-@app.get("/risk-status")
-def v6_risk_status():
-    return {"version":"6.1.0","risk":V60_RISK_GATEWAY.status(),"live_execution":False}
-
-@app.get("/execution-status")
-def v6_execution_status():
-    return {"version":"6.1.0","execution":V60_EXECUTION_GATEWAY.status(),"live_execution":False}
-
-@app.get("/execution-orders")
-def v6_execution_orders(limit:int=200):
-    return {"version":"6.1.0","orders":V60_EXECUTION_GATEWAY.list_orders(limit=limit),"live_execution":False}
-
-@app.get("/overnight-report")
-def v6_overnight_report():
-    return V60_CONTROLLER.report()
-
-
-# ============================================================
-# V5.5.3 AUTO MODE DASHBOARD / TRADE LIFECYCLE
-# ============================================================
-
-
-@app.get("/strategy-health")
-def get_strategy_health(
-    payout: float = 0.80,
-):
-    """V5.7 forward health table for all configured market directions."""
-
-    output = []
-
-    for market, symbol in MARKETS.items():
-        for direction in (
-            "BUY",
-            "SELL",
-        ):
-            output.append(
-                {
-                    "market":
-                        market,
-                    **_v56_forward_health(
-                        symbol=symbol,
-                        direction=direction,
-                        payout=payout,
-                    ),
-                }
-            )
-
-    health_order = {
-        "HEALTHY": 0,
-        "PROBATION": 1,
-        "DEGRADING": 2,
-        "QUARANTINED": 3,
-    }
-
-    output.sort(
-        key=lambda item: (
-            health_order.get(
-                item.get(
-                    "health"
-                ),
-                9,
-            ),
-            -int(
-                item.get(
-                    "trades",
-                    0,
-                )
-                or 0
-            ),
-        )
-    )
-
-    return {
-        "version":
-            "6.6.0",
-        "minimum_forward_trades":
-            V56_FORWARD_MIN_TRADES,
-        "quarantine_minimum_trades":
-            V56_QUARANTINE_MIN_TRADES,
-        "strategies":
-            output,
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/auto-dashboard")
-def get_auto_dashboard(
-    starting_balance: float = 10000.0,
-):
-    """One lightweight snapshot for the mobile Auto Mode dashboard."""
-
-    validate_balance(
-        starting_balance
-    )
-
-    manager = (
-        V55_AUTO_MANAGER.status()
-    )
-
-    watchers = (
-        V53_WATCHER_ENGINE.list()
-    )
-
-    forward = (
-        V53_WATCHER_ENGINE.forward_stats(
-            starting_balance=
-                starting_balance
-        )
-    )
-
-    learning_status = V64_LEARNING_ENGINE.status()
-    learning_watchers_payload = V64_LEARNING_ENGINE.watchers()
-    learning_watchers = learning_watchers_payload.get("watchers", [])
-    learning_trades_payload = V64_LEARNING_ENGINE.trades(limit=100)
-    learning_trades = learning_trades_payload.get("trades", [])
-
-    active_statuses = {
-        "WATCHING",
-        "READY",
-        "RISK_BLOCKED",
-        "OPEN",
-    }
-
-    terminal_statuses = {
-        "WIN",
-        "LOSS",
-        "EXPIRED",
-        "INVALIDATED",
-        "SUPERSEDED",
-    }
-
-    active = [
-        item
-        for item in watchers
-        if item.get(
-            "status"
-        )
-        in active_statuses
-    ]
-
-    open_watchers = [
-        item
-        for item in watchers
-        if item.get(
-            "status"
-        )
-        == "OPEN"
-    ]
-
-    watching = [
-        item
-        for item in watchers
-        if item.get(
-            "status"
-        )
-        in {
-            "WATCHING",
-            "READY",
-            "RISK_BLOCKED",
-        }
-    ]
-
-    completed = [
-        item
-        for item in watchers
-        if item.get(
-            "status"
-        )
-        in terminal_statuses
-    ]
-
-    def lifecycle_rank(
-        item: dict,
-    ) -> tuple:
-        status = str(
-            item.get(
-                "status",
-                "",
-            )
-        )
-
-        priority = {
-            "OPEN": 100,
-            "READY": 90,
-            "WATCHING": 80,
-            "RISK_BLOCKED": 70,
-            "WIN": 60,
-            "LOSS": 55,
-            "EXPIRED": 40,
-            "INVALIDATED": 30,
-            "SUPERSEDED": 20,
-        }.get(
-            status,
-            0,
-        )
-
-        timestamp = float(
-            item.get(
-                "created_at",
-                0.0,
-            )
-            or 0.0
-        )
-
-        return (
-            priority,
-            timestamp,
-        )
-
-    lifecycle = sorted(
-        [
-            dict(item)
-            for item in watchers
-        ],
-        key=lifecycle_rank,
-        reverse=True,
-    )
-
-    # --------------------------------------------------------
-    # V6.7 MOBILE PAPER TRADE JOURNAL
-    # --------------------------------------------------------
-    # Only actual opened/settled PAPER trades are included here.
-    # WATCHING/EXPIRED candidates are intentionally excluded so
-    # the phone clearly separates "candidate" from "trade".
-    now_ts = time.time()
-
-    paper_trade_rows = []
-
-    for item in watchers:
-        status = str(
-            item.get("status")
-            or ""
-        ).upper()
-
-        trade_id = item.get(
-            "trade_id"
-        )
-
-        if (
-            not trade_id
-            and status
-            not in {
-                "OPEN",
-                "WIN",
-                "LOSS",
-            }
-        ):
-            continue
-
-        snapshot = (
-            item.get(
-                "entry_snapshot"
-            )
-            or {}
-        )
-
-        entry_confidence = (
-            snapshot.get(
-                "live_confidence"
-            )
-        )
-
-        if entry_confidence is None:
-            entry_confidence = (
-                (
-                    item.get(
-                        "last_live_signal"
-                    )
-                    or {}
-                ).get(
-                    "confidence"
-                )
-            )
-
-        due_at = (
-            item.get(
-                "settlement_due_at"
-            )
-            or item.get(
-                "target_exit_at"
-            )
-        )
-
-        remaining_minutes = None
-
-        if (
-            status == "OPEN"
-            and due_at is not None
-        ):
-            try:
-                remaining_minutes = max(
-                    0.0,
-                    (
-                        float(
-                            due_at
-                        )
-                        - now_ts
-                    )
-                    / 60.0,
-                )
-            except Exception:
-                remaining_minutes = None
-
-        paper_trade_rows.append({
-            "trade_id":
-                trade_id,
-            "watcher_id":
-                item.get(
-                    "watcher_id"
-                ),
-            "market":
-                item.get(
-                    "market"
-                ),
-            "symbol":
-                item.get(
-                    "symbol"
-                ),
-            "direction":
-                item.get(
-                    "direction"
-                ),
-            "status":
-                status,
-            "entry_path":
-                item.get(
-                    "entry_path"
-                ),
-            "entry_confidence":
-                entry_confidence,
-            "entry_price":
-                (
-                    item.get(
-                        "entry_price_effective"
-                    )
-                    or item.get(
-                        "entry_price"
-                    )
-                ),
-            "entry_time":
-                item.get(
-                    "entry_time"
-                ),
-            "entry_time_iso":
-                item.get(
-                    "entry_time_iso"
-                ),
-            "settlement_due_at":
-                due_at,
-            "target_exit_at_iso":
-                item.get(
-                    "target_exit_at_iso"
-                ),
-            "remaining_minutes":
-                (
-                    round(
-                        remaining_minutes,
-                        1,
-                    )
-                    if remaining_minutes
-                    is not None
-                    else None
-                ),
-            "exit_price":
-                (
-                    item.get(
-                        "exit_price_effective"
-                    )
-                    or item.get(
-                        "exit_price"
-                    )
-                ),
-            "closed_at":
-                item.get(
-                    "closed_at"
-                ),
-            "closed_at_iso":
-                item.get(
-                    "closed_at_iso"
-                ),
-            "result":
-                item.get(
-                    "result"
-                ),
-            "pnl":
-                item.get(
-                    "pnl"
-                ),
-            "stake":
-                snapshot.get(
-                    "stake"
-                ),
-            "payout":
-                item.get(
-                    "payout"
-                ),
-            "historical_win_rate":
-                snapshot.get(
-                    "historical_win_rate"
-                ),
-            "historical_trades":
-                snapshot.get(
-                    "historical_trades"
-                ),
-            "historical_profit_factor":
-                snapshot.get(
-                    "historical_profit_factor"
-                ),
-            "live_ai_up":
-                snapshot.get(
-                    "live_ai_up"
-                ),
-            "live_rsi":
-                snapshot.get(
-                    "live_rsi"
-                ),
-            "adaptive_gate":
-                item.get(
-                    "adaptive_gate"
-                ),
-            "v66_forward_gate":
-                item.get(
-                    "v66_forward_gate"
-                ),
-            "v66_portfolio_gate":
-                item.get(
-                    "v66_portfolio_gate"
-                ),
-            "forward_protocol":
-                item.get(
-                    "forward_protocol"
-                ),
-        })
-
-    # V6.6 learning-engine PAPER trades are genuine forward PAPER entries too.
-    for trade in learning_trades:
-        status = str(trade.get("status") or "").upper()
-        if status not in {"OPEN", "CLOSED"}:
-            continue
-        paper_trade_rows.append({
-            "source": "V66_LEARNING_ENGINE",
-            "trade_id": trade.get("trade_id"),
-            "watcher_id": None,
-            "market": trade.get("market"),
-            "symbol": trade.get("symbol"),
-            "direction": trade.get("direction"),
-            "status": "OPEN" if status == "OPEN" else str(trade.get("result") or "CLOSED"),
-            "entry_path": trade.get("entry_class"),
-            "historical_grade": trade.get("historical_grade"),
-            "entry_confidence": trade.get("quant_confidence"),
-            "model_ai_confidence": trade.get("model_ai_confidence"),
-            "entry_price": trade.get("entry_price"),
-            "entry_time": trade.get("opened_at"),
-            "settlement_due_at": trade.get("scheduled_close_at"),
-            "exit_price": trade.get("exit_price"),
-            "closed_at": trade.get("closed_at"),
-            "result": trade.get("result"),
-            "pnl": trade.get("pnl"),
-            "stake": trade.get("stake"),
-            "paper_only": True,
-        })
-
-    paper_trade_rows.sort(
-        key=lambda row: float(
-            row.get(
-                "entry_time"
-            )
-            or 0.0
-        ),
-        reverse=True,
-    )
-
-    v66_forward = (
-        V66_INTELLIGENCE
-        .forward_performance(
-            watchers
-        )
-    )
-
-    return {
-        "version":
-            "6.1.0",
-        "auto_mode":
-            bool(
-                manager.get(
-                    "enabled",
-                    False,
-                )
-            ),
-        "manager":
-            manager,
-        "summary": {
-            "active_watchers":
-                max(len(active), int(learning_status.get("active_watchers", 0) or 0)),
-            "watching":
-                len(watching),
-            "open_trades":
-                len(open_watchers) + int(learning_status.get("open_trades", 0) or 0),
-            "completed_watchers":
-                len(completed),
-            "target_active_watchers":
-                int(
-                    manager.get(
-                        "target_active_watchers",
-                        3,
-                    )
-                    or 3
-                ),
-            "next_scan_at":
-                manager.get(
-                    "next_run_at"
-                ),
-            "last_scan_at":
-                manager.get(
-                    "last_run_at"
-                ),
-            "current_stage":
-                manager.get(
-                    "progress_stage",
-                    "IDLE",
-                ),
-            "current_message":
-                manager.get(
-                    "progress_message",
-                    "Waiting",
-                ),
-            "current_candidate":
-                manager.get(
-                    "progress_candidate"
-                ),
-            "progress_percent":
-                int(
-                    manager.get(
-                        "progress_percent",
-                        0,
-                    )
-                    or 0
-                ),
-        },
-        "forward":
-            forward,
-        "learning": learning_status,
-        "learning_watchers": learning_watchers[:20],
-        "paper_trades":
-            paper_trade_rows[:50],
-        "v66_forward_intelligence":
-            v66_forward,
-        "strategy_health": [
-            {
-                "market": item.get("market"),
-                "symbol": item.get("symbol"),
-                "direction": item.get("direction"),
-                **_v56_forward_health(
-                    symbol=str(item.get("symbol") or ""),
-                    direction=str(item.get("direction") or ""),
-                    payout=float(item.get("payout") or 0.80),
-                ),
-            }
-            for item in active
-        ],
-        "open_positions":
-            open_watchers,
-        "watching_positions":
-            watching,
-        "lifecycle":
-            lifecycle[:20],
-        "forward_protocol":
-            "V6_GENUINE_FORWARD",
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/forward-journal")
-def get_forward_journal(
-    limit: int = 100,
-):
-    """Immutable-observation view of V5.7 genuine forward entries/outcomes."""
-    return V53_WATCHER_ENGINE.forward_journal(
-        limit=limit
-    )
-
-
-@app.get("/forward-stats")
-def get_forward_stats(
-    starting_balance: float = 10000.0,
-):
-    validate_balance(
-        starting_balance
-    )
-
-    return V53_WATCHER_ENGINE.forward_stats(
-        starting_balance=starting_balance
-    )
-
-
-
-# ============================================================
-# V6.5 PAPER LEARNING THRESHOLD POLICY
-# ============================================================
-
-@app.get("/v65/threshold-policy")
-def v65_threshold_policy():
-    return {
-        "version": "6.6.0",
-        "normal_min_confidence": PAPER_NORMAL_MIN_CONFIDENCE,
-        "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
-        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
-        "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
-                "entry_rule": (
-            "VERIFIED setup may enter PAPER through normal confidence >=30% "
-            "with live direction agreement OR AI confidence >=40% with "
-            "AI approval and direction agreement."
-        ),
-        "shadow_learning": True,
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "live_execution": False,
-    }
-
-
-# ============================================================
-# V6.4 HIGH-THROUGHPUT PAPER LEARNING API
-# ============================================================
-
-@app.get("/v64/learning-status")
-def v64_learning_status():
-    return V64_LEARNING_ENGINE.status()
-
-
-@app.get("/v64/learning-watchers")
-def v64_learning_watchers():
-    return V64_LEARNING_ENGINE.watchers()
-
-
-@app.get("/v64/learning-journal")
-def v64_learning_journal(limit: int = 200):
-    return V64_LEARNING_ENGINE.journal(limit=limit)
-
-
-@app.post("/v64/learning/run-now")
-def v64_learning_run_now():
-    return V64_LEARNING_ENGINE.tick()
-
-
-@app.post("/v64/learning/enable")
-def v64_learning_enable():
-    return V64_LEARNING_ENGINE.enable()
-
-
-@app.post("/v64/learning/pause")
-def v64_learning_pause():
-    return V64_LEARNING_ENGINE.pause()
-
-
-# ============================================================
-# V6.6 DIRECT AUTONOMOUS AI40 PAPER LEARNING API
-# ============================================================
-
-_AI_LEARNING_RUN_LOCK = threading.Lock()
-
-
-def _ai_learning_candidate_direction(candidate: dict) -> str:
-    return str(
-        candidate.get("direction")
-        or candidate.get("signal")
-        or candidate.get("decision")
-        or candidate.get("side")
-        or "WAIT"
-    ).upper().strip()
-
-
-def _ai_learning_live_direction(live: dict) -> str:
-    return str(
-        live.get("direction")
-        or live.get("signal")
-        or live.get("decision")
-        or "WAIT"
-    ).upper().strip()
-
-
-def _ai_learning_candidate_score(candidate: dict) -> float:
-    for key in (
-        "adaptive_rank_score",
-        "smart_fast_score",
-        "fast_score",
-        "score",
-        "market_score",
-    ):
-        try:
-            value = candidate.get(key)
-            if value is not None:
-                return float(value)
-        except (TypeError, ValueError):
-            pass
-    return 0.0
-
-
-def _ai_learning_call_with_timeout(
-    func,
-    *args,
-    timeout_seconds: float = 25.0,
-):
-    """Run a read/analysis function with a hard request-side timeout.
-
-    The worker is daemonised. A timeout does not open or mutate a trade;
-    it only abandons that market evaluation so /ai-learning/run-now can
-    always release its lock and return a diagnostic response.
-    """
-    box = {
-        "done": False,
-        "result": None,
-        "error": None,
-    }
-
-    def worker():
-        try:
-            box["result"] = func(*args)
-        except Exception as exc:
-            box["error"] = exc
-        finally:
-            box["done"] = True
-
-    thread = threading.Thread(
-        target=worker,
-        name="jasong-ai-learning-eval",
-        daemon=True,
-    )
-    thread.start()
-    thread.join(timeout=max(1.0, float(timeout_seconds)))
-
-    if thread.is_alive():
-        return {
-            "ok": False,
-            "timeout": True,
-            "result": None,
-            "error": (
-                f"Timed out after {timeout_seconds:.0f}s"
-            ),
-        }
-
-    if box["error"] is not None:
-        exc = box["error"]
-        return {
-            "ok": False,
-            "timeout": False,
-            "result": None,
-            "error": (
-                f"{type(exc).__name__}: {exc}"
-            ),
-        }
-
-    return {
-        "ok": True,
-        "timeout": False,
-        "result": box["result"],
-        "error": None,
-    }
-
-
-def _v66_ai_learning_cycle() -> dict:
-    """
-    Immediate autonomous PAPER-only AI40 evaluation of the learning watchers.
-
-    V6.6.1 FIX:
-    - Uses the existing V64 learning watchers already being fed by Auto Manager.
-    - Does NOT run another full FX discovery scan inside this request.
-    - Does NOT call V64.tick() synchronously.
-    - Each live-signal evaluation has a hard timeout.
-    - Opens at most one PAPER trade.
-    - Normal/N30 path remains disabled for this AI-learning experiment.
-    - Broker/live execution remains disabled.
-    """
-
-    cycle_started_at = time.time()
-
-    if not _AI_LEARNING_RUN_LOCK.acquire(blocking=False):
-        return {
-            "status": "AI_LEARNING_BUSY",
-            "paper_only": True,
-            "live_execution": False,
-            "message": (
-                "Another bounded AI-learning evaluation is still running. "
-                "This version will release automatically after its watcher "
-                "evaluations finish or time out."
-            ),
-        }
-
-    try:
-        V64_LEARNING_ENGINE.enable()
-
-        current = V64_LEARNING_ENGINE.status()
-        open_count = int(
-            current.get("open_trades", 0)
-            or 0
-        )
-
-        if open_count >= 1:
-            return {
-                "status": "WAIT_EXISTING_TRADE",
-                "paper_only": True,
-                "live_execution": False,
-                "open_trades": open_count,
-                "learning": current,
-            }
-
-        balance = float(
-            current.get("paper_balance", 10000.0)
-            or 10000.0
-        )
-
-        watcher_payload = V64_LEARNING_ENGINE.watchers()
-        watchers = (
-            watcher_payload.get("watchers", [])
-            if isinstance(watcher_payload, dict)
-            else []
-        )
-
-        watchers = [
-            dict(item)
-            for item in watchers
-            if isinstance(item, dict)
-        ][:6]
-
-        if not watchers:
-            return {
-                "status": "NO_LEARNING_WATCHERS",
-                "paper_only": True,
-                "live_execution": False,
-                "watchers": 0,
-                "message": (
-                    "Auto Manager has not supplied a candidate to the "
-                    "AI-learning engine yet."
-                ),
-                "learning": current,
-            }
-
-        evaluated = []
-        qualified = []
-
-        for rank, watcher in enumerate(watchers, start=1):
-            symbol = str(
-                watcher.get("symbol")
-                or ""
-            ).strip()
-
-            market = str(
-                watcher.get("market")
-                or symbol
-            ).strip()
-
-            wanted = str(
-                watcher.get("direction")
-                or ""
-            ).upper().strip()
-
-            row = {
-                "rank": rank,
-                "watcher_id": watcher.get("watcher_id"),
-                "market": market,
-                "symbol": symbol,
-                "candidate_direction": wanted,
-                "deep_status": watcher.get("deep_status"),
-                "verified": bool(watcher.get("verified")),
-                "experimental": bool(watcher.get("experimental")),
-                "live_direction": None,
-                "quant_confidence_pct": None,
-                "model_ai_directional_confidence_pct": None,
-                "direction_match": False,
-                "ai40_pass": False,
-                "entry_class": None,
-                "passed": False,
-                "timed_out": False,
-                "reason": None,
-            }
-
-            if not symbol or wanted not in {"BUY", "SELL"}:
-                row["reason"] = "Watcher has no valid BUY/SELL symbol."
-                evaluated.append(row)
-                continue
-
-            # When IG DEMO autotrade is enabled, broker availability becomes
-            # a hard execution preflight. This prevents the AI from opening
-            # an internal learning trade that cannot be mirrored to IG DEMO.
-            ig_preflight = IG_DEMO_MIRROR.preflight_symbol(
-                symbol
-            )
-            row["ig_demo_preflight"] = ig_preflight
-            if (
-                ig_preflight.get("required")
-                and not ig_preflight.get("ok")
-            ):
-                row["reason"] = (
-                    "IG DEMO market unavailable: "
-                    f"{ig_preflight.get('reason')}"
-                )
-                evaluated.append(row)
-                continue
-
-            live_result = _ai_learning_call_with_timeout(
-                _v63_adaptive_live_signal,
-                symbol,
-                watcher.get("risk_mode", "Balanced"),
-                balance,
-                timeout_seconds=25.0,
-            )
-
-            if not live_result["ok"]:
-                row["timed_out"] = bool(
-                    live_result["timeout"]
-                )
-                row["reason"] = (
-                    "Live signal timeout"
-                    if live_result["timeout"]
-                    else f"Live signal error: {live_result['error']}"
-                )
-                evaluated.append(row)
-                continue
-
-            live = dict(
-                live_result["result"]
-                or {}
-            )
-
-            live_direction = _ai_learning_live_direction(
-                live
-            )
-
-            quant = V64_LEARNING_ENGINE._confidence01(
-                live.get("confidence")
-            )
-
-            model_ai = (
-                V64_LEARNING_ENGINE
-                ._directional_model_ai_confidence(
-                    live,
-                    wanted,
-                )
-            )
-
-            # ---------------------------------------------------------
-            # V6.6.2 AI-LEARNING SHADOW PROMOTION
-            #
-            # Normal production logic intentionally keeps NO_TRADE
-            # candidates as SHADOW_WATCH and trade_eligible=False.
-            #
-            # For the PAPER-ONLY AI-learning experiment we allow a
-            # high-quality Auto Manager shadow candidate to be evaluated
-            # as an EXPERIMENTAL watcher, but only inside this request.
-            #
-            # The stored production watcher is NOT mutated and the normal
-            # verified/watch pipeline is NOT weakened.
-            # ---------------------------------------------------------
-            candidate_meta = (
-                watcher.get("candidate")
-                if isinstance(
-                    watcher.get("candidate"),
-                    dict,
-                )
-                else {}
-            )
-
-            smart_score = _ai_learning_candidate_score(
-                candidate_meta
-            )
-
-            quality_tier = str(
-                candidate_meta.get("quality_tier")
-                or ""
-            ).upper().strip()
-
-            quarantined = bool(
-                candidate_meta.get(
-                    "strategy_quarantined",
-                    False,
-                )
-            )
-
-            source_trade_eligible = bool(
-                watcher.get(
-                    "trade_eligible",
-                    False,
-                )
-            )
-
-            source_deep_status = str(
-                watcher.get(
-                    "deep_status"
-                )
-                or ""
-            ).upper().strip()
-
-            shadow_promotable = bool(
-                (not source_trade_eligible)
-                and (not quarantined)
-                and source_deep_status
-                    in {
-                        "NO_TRADE",
-                        "NOT_VERIFIED",
-                        "WATCH",
-                        "NEAR_VERIFIED",
-                    }
-                and (
-                    quality_tier
-                    in {
-                        "A+",
-                        "A",
-                    }
-                    or smart_score
-                    >= 90.0
-                )
-            )
-
-            evaluation_watcher = dict(
-                watcher
-            )
-
-            if shadow_promotable:
-                evaluation_watcher[
-                    "experimental"
-                ] = True
-                evaluation_watcher[
-                    "trade_eligible"
-                ] = True
-                evaluation_watcher[
-                    "deep_status"
-                ] = (
-                    "AI_LEARNING_SHADOW_PROMOTION"
-                )
-
-            # Use V64's own classifier. NORMAL_MIN_CONFIDENCE is
-            # deliberately disabled for this AI-learning engine, so a
-            # promoted shadow can open only through model-AI >= 40%
-            # with matching live direction. That produces EM.
-            decision = V64_LEARNING_ENGINE._entry_class(
-                evaluation_watcher,
-                live,
-            )
-
-            direction_match = (
-                live_direction == wanted
-            )
-            ai40_pass = (
-                model_ai
-                >= PAPER_AI_MIN_CONFIDENCE
-            )
-
-            entry_class = str(
-                decision.get("class")
-                or "S"
-            ).upper()
-
-            # AI-learning experiment accepts only M/EM.
-            passed = bool(
-                decision.get("enter")
-                and entry_class in {"M", "EM"}
-                and direction_match
-                and ai40_pass
-            )
-
-            row.update({
-                "live_direction": live_direction,
-                "quant_confidence_pct": round(
-                    quant * 100.0,
-                    2,
-                ),
-                "model_ai_directional_confidence_pct": round(
-                    model_ai * 100.0,
-                    2,
-                ),
-                "direction_match": direction_match,
-                "ai40_pass": ai40_pass,
-                "entry_class": entry_class,
-                "source_trade_eligible":
-                    source_trade_eligible,
-                "source_deep_status":
-                    source_deep_status,
-                "quality_tier":
-                    quality_tier,
-                "smart_fast_score":
-                    smart_score,
-                "shadow_promotable":
-                    shadow_promotable,
-                "shadow_promoted_for_ai_learning":
-                    bool(
-                        shadow_promotable
-                        and entry_class
-                        in {
-                            "EM",
-                            "M",
-                        }
-                    ),
-                "passed": passed,
-                "reason": decision.get("reason"),
-            })
-
-            evaluated.append(row)
-
-            if passed:
-                qualified.append({
-                    "watcher":
-                        evaluation_watcher,
-                    "source_watcher":
-                        watcher,
-                    "live":
-                        live,
-                    "decision":
-                        decision,
-                    "row":
-                        row,
-                    "model_ai":
-                        model_ai,
-                    "quant":
-                        quant,
-                })
-
-        if not qualified:
-            return {
-                "status": "NO_AI40_SETUP",
-                "paper_only": True,
-                "live_execution": False,
-                "watchers_evaluated": len(evaluated),
-                "qualified": 0,
-                "elapsed_seconds": round(
-                    time.time() - cycle_started_at,
-                    2,
-                ),
-                "evaluated": evaluated,
-                "learning": V64_LEARNING_ENGINE.status(),
-            }
-
-        qualified.sort(
-            key=lambda item: (
-                float(item["model_ai"]),
-                float(item["quant"]),
-            ),
-            reverse=True,
-        )
-
-        selected = qualified[0]
-        watcher = selected["watcher"]
-        live = selected["live"]
-        decision = selected["decision"]
-
-        before = V64_LEARNING_ENGINE.trades(
-            limit=200
-        )
-        before_rows = (
-            before.get("trades", [])
-            if isinstance(before, dict)
-            else []
-        )
-        before_ids = {
-            str(item.get("trade_id"))
-            for item in before_rows
-            if isinstance(item, dict)
-            and item.get("trade_id") is not None
-        }
-
-        # Open directly through the existing PAPER engine. This preserves
-        # its stake sizing, duplicate protection, max-open limit, journal
-        # and settlement format without invoking another market-data tick.
-        V64_LEARNING_ENGINE._open_trade(
-            watcher,
-            live,
-            decision,
-        )
-        V64_LEARNING_ENGINE._persist()
-
-        after = V64_LEARNING_ENGINE.trades(
-            limit=200
-        )
-        after_rows = (
-            after.get("trades", [])
-            if isinstance(after, dict)
-            else []
-        )
-
-        new_trades = [
-            item
-            for item in after_rows
-            if isinstance(item, dict)
-            and str(item.get("trade_id")) not in before_ids
-        ]
-
-        ai_trades = [
-            item
-            for item in new_trades
-            if str(
-                item.get("entry_class")
-                or ""
-            ).upper()
-            in {"M", "EM"}
-        ]
-
-        if ai_trades:
-            return {
-                "status": "PAPER_TRADE_OPENED",
-                "paper_only": True,
-                "live_execution": False,
-                "selected": selected["row"],
-                "trade": ai_trades[0],
-                "elapsed_seconds": round(
-                    time.time() - cycle_started_at,
-                    2,
-                ),
-                "evaluated": evaluated,
-                "learning": V64_LEARNING_ENGINE.status(),
-            }
-
-        return {
-            "status": "ENTRY_NOT_CREATED",
-            "paper_only": True,
-            "live_execution": False,
-            "selected": selected["row"],
-            "elapsed_seconds": round(
-                time.time() - cycle_started_at,
-                2,
-            ),
-            "evaluated": evaluated,
-            "message": (
-                "The watcher passed AI40 but the V64 PAPER engine did not "
-                "create a new trade, usually because of duplicate/open-limit "
-                "protection."
-            ),
-            "learning": V64_LEARNING_ENGINE.status(),
-        }
-
-    except Exception as exc:
-        return {
-            "status": "ERROR",
-            "paper_only": True,
-            "live_execution": False,
-            "elapsed_seconds": round(
-                time.time() - cycle_started_at,
-                2,
-            ),
-            "error": (
-                f"{type(exc).__name__}: {exc}"
-            ),
-        }
-
-    finally:
-        _AI_LEARNING_RUN_LOCK.release()
-
-
-
-# ============================================================
-# V6.6.4 OVERNIGHT IG DEMO CONTROL
-# ============================================================
-
-def _v664_overnight_demo_snapshot() -> dict:
-    """Combined mobile control-plane status for DEMO-only overnight learning."""
-    manager = V55_AUTO_MANAGER.status()
-    learning = V64_LEARNING_ENGINE.status()
-    ig_demo = IG_DEMO_MIRROR.status()
-    broker = dict(ig_demo.get("broker") or {})
-
-    environment = str(broker.get("environment") or "").upper()
-    demo_only = bool(
-        environment == "DEMO"
-        and broker.get("demo_execution") is True
-        and broker.get("live_money_execution") is not True
-        and ig_demo.get("live_money_execution") is not True
-        and learning.get("live_execution") is not True
-    )
-
-    manager_enabled = bool(manager.get("enabled"))
-    learning_enabled = bool(learning.get("enabled"))
-    mirror_enabled = bool(ig_demo.get("enabled"))
-    phase_complete = bool(ig_demo.get("phase_complete"))
-    internal_open = int(learning.get("open_trades") or 0)
-    broker_open = int(ig_demo.get("open_broker_positions") or 0)
-
-    if phase_complete:
-        run_state = "PHASE_COMPLETE"
-    elif demo_only and manager_enabled and learning_enabled and mirror_enabled:
-        run_state = "ACTIVE"
-    elif (not manager_enabled) and (internal_open > 0 or broker_open > 0):
-        run_state = "DRAINING"
-    else:
-        run_state = "PAUSED"
-
-    trade_payload = V64_LEARNING_ENGINE.trades(limit=50)
-    trade_rows = [
-        dict(item)
-        for item in trade_payload.get("trades", [])
-        if isinstance(item, dict)
-    ]
-    current_trade = next(
-        (
-            item for item in trade_rows
-            if str(item.get("status") or "").upper() == "OPEN"
-        ),
-        None,
-    )
-    latest_settled = next(
-        (
-            item for item in trade_rows
-            if str(item.get("status") or "").upper() == "CLOSED"
-        ),
-        None,
-    )
-
-    return {
-        "version": "6.6.4-OVERNIGHT-DEMO",
-        "status": run_state,
-        "demo_only": demo_only,
-        "safe_to_run": bool(
-            demo_only
-            and broker.get("configured") is True
-            and broker.get("connected") is True
-        ),
-        "scanner_universe": "CURATED_LEARNING_FX",
-        "risk_mode": str(manager.get("risk_mode") or "Balanced"),
-        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
-        "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
-        "summary": {
-            "phase_target": int(ig_demo.get("phase_target") or 10),
-            "phase_accepted_trades": int(ig_demo.get("phase_accepted_trades") or 0),
-            "phase_remaining": int(ig_demo.get("phase_remaining") or 0),
-            "phase_complete": phase_complete,
-            "active_watchers": int(learning.get("active_watchers") or 0),
-            "max_watchers": int(learning.get("max_watchers") or 0),
-            "internal_open_trades": internal_open,
-            "max_internal_open_trades": int(learning.get("max_open_trades") or 0),
-            "open_broker_positions": broker_open,
-            "max_broker_positions": int(ig_demo.get("max_open_positions") or 0),
-            "paper_balance": float(learning.get("paper_balance") or 0.0),
-            "wins": int((learning.get("actual") or {}).get("wins") or 0),
-            "losses": int((learning.get("actual") or {}).get("losses") or 0),
-            "win_rate_pct": float((learning.get("actual") or {}).get("win_rate_pct") or 0.0),
-            "total_pnl": float((learning.get("actual") or {}).get("total_pnl") or 0.0),
-        },
-        "current_trade": current_trade,
-        "latest_settled_trade": latest_settled,
-        "manager": manager,
-        "learning": learning,
-        "ig_demo": ig_demo,
-        "environment": "DEMO",
-        "live_money_execution": False,
-    }
-
-
-@app.get("/overnight-demo/status")
-def overnight_demo_status():
-    return _v664_overnight_demo_snapshot()
-
-
-@app.post("/overnight-demo/start")
-def overnight_demo_start(
-    risk_mode: str = "Balanced",
-    starting_balance: float = 10000.0,
-    payout: float = 0.80,
-):
-    """Start the autonomous Phase-1 workflow, hard locked to IG DEMO."""
-    validate_risk_mode(risk_mode)
-    validate_balance(starting_balance)
-
-    try:
-        broker = IG_DEMO_BROKER.connect()
-    except IGDemoError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    if (
-        str(broker.get("environment") or "").upper() != "DEMO"
-        or broker.get("demo_execution") is not True
-        or broker.get("live_money_execution") is True
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Overnight mode refused: broker is not hard-locked to IG DEMO.",
-        )
-
-    V64_LEARNING_ENGINE.enable()
-    V64_LEARNING_ENGINE.start()
-
-    V55_AUTO_MANAGER.enable(
-        risk_mode=risk_mode,
-        starting_balance=starting_balance,
-        payout=payout,
-        scan_interval_minutes=2,
-        target_active_watchers=6,
-        scan_top_n=9,
-    )
-    V55_AUTO_MANAGER.start_thread()
-
-    IG_DEMO_MIRROR.set_enabled(True)
-    IG_DEMO_MIRROR.start()
-
-    queued = V55_AUTO_MANAGER.queue_run(
-        source="overnight-demo",
-    )
-
-    result = _v664_overnight_demo_snapshot()
-    result["launch_job"] = queued
-    result["message"] = (
-        "Overnight IG DEMO mode started. The backend will keep scanning, "
-        "validating, learning and mirroring qualifying trades while the app is closed."
-    )
-    return result
-
-
-@app.post("/overnight-demo/stop")
-def overnight_demo_stop():
-    """Stop NEW overnight entries while allowing any current DEMO trade to settle."""
-    V55_AUTO_MANAGER.disable()
-
-    # Remove learning watchers so no new internal entry can be opened while
-    # an already-open learning/IG DEMO position is allowed to settle safely.
-    try:
-        with V64_LEARNING_ENGINE._lock:
-            V64_LEARNING_ENGINE._state["watchers"] = []
-        V64_LEARNING_ENGINE._persist()
-    except Exception:
-        pass
-
-    learning = V64_LEARNING_ENGINE.status()
-    ig_demo = IG_DEMO_MIRROR.status()
-    internal_open = int(learning.get("open_trades") or 0)
-    broker_open = int(ig_demo.get("open_broker_positions") or 0)
-
-    if internal_open == 0 and broker_open == 0:
-        V64_LEARNING_ENGINE.pause()
-        IG_DEMO_MIRROR.set_enabled(False)
-        message = "Overnight IG DEMO mode stopped. No positions are open."
-    else:
-        # Keep learning + mirror alive only to settle/close current DEMO trades.
-        V64_LEARNING_ENGINE.enable()
-        IG_DEMO_MIRROR.set_enabled(True)
-        IG_DEMO_MIRROR.start()
-        message = (
-            "New overnight entries stopped. Existing DEMO positions will be "
-            "allowed to settle and close automatically."
-        )
-
-    result = _v664_overnight_demo_snapshot()
-    result["message"] = message
-    return result
-
-
-# ============================================================
-# IG DEMO BROKER API
-# ============================================================
-
-@app.get("/ig-demo/status")
-def ig_demo_status():
-    return IG_DEMO_MIRROR.status()
-
-
-@app.post("/ig-demo/connect")
-def ig_demo_connect():
-    try:
-        broker = IG_DEMO_BROKER.connect()
-        mirror = IG_DEMO_MIRROR.sync_once()
-        return {
-            "status": "IG_DEMO_CONNECTED",
-            "broker": broker,
-            "mirror": mirror,
-            "live_money_execution": False,
-        }
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.post("/ig-demo/autotrade")
-def ig_demo_set_autotrade(
-    enabled: bool = True,
-):
-    state = IG_DEMO_MIRROR.set_enabled(
-        enabled
-    )
-    if enabled:
-        IG_DEMO_MIRROR.start()
-    return {
-        "status": (
-            "IG_DEMO_AUTOTRADE_ENABLED"
-            if enabled
-            else "IG_DEMO_AUTOTRADE_DISABLED"
-        ),
-        "mirror": state,
-        "live_money_execution": False,
-    }
-
-
-@app.post("/ig-demo/sync-now")
-def ig_demo_sync_now():
-    try:
-        return IG_DEMO_MIRROR.sync_once()
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.get("/ig-demo/accounts")
-def ig_demo_accounts():
-    try:
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "accounts": IG_DEMO_BROKER.accounts(),
-            "live_money_execution": False,
-        }
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.get("/ig-demo/market")
-def ig_demo_market(
-    symbol: str,
-):
-    try:
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "market":
-                IG_DEMO_BROKER.resolve_market(
-                    symbol,
-                    require_tradeable=False,
-                ),
-            "live_money_execution": False,
-        }
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        )
-
-
-@app.get("/ig-demo/positions")
-def ig_demo_positions():
-    try:
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "positions":
-                IG_DEMO_BROKER.positions(),
-            "live_money_execution": False,
-        }
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.post("/ig-demo/open-test")
-def ig_demo_open_test(
-    symbol: str,
-    direction: str,
-    size: float | None = None,
-):
-    """Manual IG DEMO smoke-test order only; never targets IG live."""
-    try:
-        return IG_DEMO_BROKER.open_market_position(
-            symbol=symbol,
-            direction=direction,
-            size=size,
-        )
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.post("/ig-demo/close/{deal_id}")
-def ig_demo_close(
-    deal_id: str,
-):
-    try:
-        return IG_DEMO_BROKER.close_position(
-            deal_id
-        )
-    except IGDemoError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.get("/ai-learning/status")
-def ai_learning_status():
-    return {
-        "mode": "DIRECT_AI40_SHADOW_PROMOTION_V662",
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "normal_path_disabled_for_ai_learning": True,
-        "shadow_promotion_for_ai_learning": True,
-        "ig_demo": IG_DEMO_MIRROR.status(),
-        "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
-        "ai_min_confidence_pct":
-            PAPER_AI_MIN_CONFIDENCE * 100.0,
-        "learning": V64_LEARNING_ENGINE.status(),
-    }
-
-
-@app.get("/ai-learning/trades")
-def ai_learning_trades(limit: int = 100):
-    return V64_LEARNING_ENGINE.trades(limit=limit)
-
-
-@app.get("/ai-learning/watchers")
-def ai_learning_watchers():
-    return V64_LEARNING_ENGINE.watchers()
-
-
-@app.get("/ai-learning/journal")
-def ai_learning_journal(limit: int = 100):
-    return V64_LEARNING_ENGINE.journal(limit=limit)
-
-
-@app.post("/ai-learning/start")
-def ai_learning_start():
-    V64_LEARNING_ENGINE.enable()
-    V64_LEARNING_ENGINE.start()
-    return {
-        "status": "AI_LEARNING_ENABLED",
-        "paper_only": True,
-        "live_execution": False,
-        "learning": V64_LEARNING_ENGINE.status(),
-    }
-
-
-@app.post("/ai-learning/run-now")
-def ai_learning_run_now():
-    return _v66_ai_learning_cycle()
-
-
-@app.post("/ai-learning/stop")
-def ai_learning_stop():
-    return {
-        "status": "AI_LEARNING_PAUSED",
-        "paper_only": True,
-        "live_execution": False,
-        "learning": V64_LEARNING_ENGINE.pause(),
-    }
-
-
-@app.get("/v64/learning-universe")
-def v64_learning_universe(limit: int = 80):
-    rows = get_learning_universe(limit=limit)
-    return {
-        "version": "6.6.0",
-        "target_full_rotation_minutes": 12,
-        "batch_size": FX_DISCOVERY_BATCH_SIZE,
-        "scan_interval_minutes": 3,
-        "returned": len(rows),
-        "markets": rows,
-        "live_execution": False,
-    }
-
-
-@app.get("/persistent-state")
-def persistent_state_status():
-    snapshot = V61_STATE_STORE.snapshot()
-    return {
-        "status": "ok",
-        "version": "6.6.0",
-        "path": str(V61_STATE_STORE.path),
-        "namespaces": sorted(k for k in snapshot.keys() if k != "_meta"),
-        "meta": snapshot.get("_meta", {}),
-        "live_execution": False,
-    }
-
-
-
-# -----------------------------------------------------------------------------
-# V6.3 ADAPTIVE CONFIDENCE API -- PAPER ONLY
-# -----------------------------------------------------------------------------
-
-@app.get("/adaptive-confidence/status")
-def adaptive_confidence_status():
-    """Show currently qualified market/direction/confidence buckets."""
-    adaptive_confidence_gate.load()
-    return adaptive_confidence_gate.snapshot()
-
-
-@app.post("/adaptive-confidence/load")
-def adaptive_confidence_load(payload: dict):
-    """
-    Load a COMPLETED V6.2.2 calibration result into the V6.3 adaptive gate.
-
-    Send the full JSON returned by GET /confidence-wr/{job_id}.
-    This changes PAPER eligibility only. It never enables broker execution.
-    """
-    snapshot = adaptive_confidence_gate.update_from_calibration_job(payload)
-    adaptive_confidence_gate.load()
-    return {
-        "status": "LOADED",
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "adaptive": snapshot,
-    }
-
-
-@app.post("/adaptive-confidence/check")
-def adaptive_confidence_check(payload: dict):
-    adaptive_confidence_gate.load()
-    """
-    Diagnostic check for one prospective signal.
-
-    Example:
-      {
-        "market": "GBPJPY",
-        "direction": "BUY",
-        "confidence": 0.37,
-        "normal_min_confidence": 0.30
+      int attempt = 1;
+      attempt <= maximumAttempts;
+      attempt++
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
+        );
       }
-    """
-    market = str(payload.get("market") or "").upper()
-    direction = str(payload.get("direction") or "").upper()
-    confidence = float(payload.get("confidence") or 0.0)
-    normal_floor = float(payload.get("normal_min_confidence") or 0.30)
 
-    if direction not in {"BUY", "SELL"}:
-        return {
-            "allowed_by_confidence": False,
-            "path": "REJECT",
-            "reason": "Direction must be BUY or SELL.",
-            "paper_only": True,
+      setState(() {
+        currentAttempt =
+            attempt;
+
+        currentValidationMarket =
+            'Starting deep validation for $market';
+
+        networkStatus =
+            'Creating validation job '
+            '(attempt $attempt/$maximumAttempts)...';
+      });
+
+      try {
+        final created =
+            await postJsonOnce(
+          createUri,
+          body,
+          timeoutSeconds: 60,
+        );
+
+        jobId =
+            created['job_id']
+                ?.toString();
+
+        if (jobId == null ||
+            jobId.isEmpty) {
+          throw const FormatException(
+            'Validation server did not return a job_id',
+          );
         }
 
-    result = adaptive_confidence_gate.evaluate(
-        market=market,
-        direction=direction,
-        confidence=confidence,
-        normal_min_confidence=normal_floor,
-    )
-    result["paper_only"] = True
-    result["broker_execution_enabled"] = False
-    return result
+        if (mounted) {
+          setState(() {
+            currentAttempt = 0;
+            currentValidationMarket =
+                'Deep validating $market';
 
-
-
-# ============================================================
-# V6.9 SYSTEM HEALTH & OPERATIONS DASHBOARD
-# ============================================================
-
-def _v69_system_overview():
-    """
-    Read-only operational health snapshot.
-
-    This endpoint does not modify trading decisions or execution state.
-    It is designed to answer:
-      - Is Jasong AI alive?
-      - Is Auto Manager running?
-      - How far is the current search?
-      - Is calibration fresh?
-      - Are market data and OpenAI available?
-      - Are there current watchers/trades/errors?
-    """
-
-    now = time.time()
-
-    manager = V55_AUTO_MANAGER.status()
-    watchers = V53_WATCHER_ENGINE.list()
-
-    adaptive_confidence_gate.load()
-    adaptive = adaptive_confidence_gate.snapshot()
-
-    cache = cache_stats()
-
-    active_statuses = {
-        "WATCHING",
-        "READY",
-        "RISK_BLOCKED",
-        "OPEN",
-    }
-
-    active_watchers = [
-        item
-        for item in watchers
-        if str(
-            item.get("status")
-            or ""
-        ).upper()
-        in active_statuses
-    ]
-
-    watching = [
-        item
-        for item in watchers
-        if str(
-            item.get("status")
-            or ""
-        ).upper()
-        in {
-            "WATCHING",
-            "READY",
-            "RISK_BLOCKED",
+            networkStatus =
+                'Validation job queued. '
+                'Waiting for the server...';
+          });
         }
-    ]
 
-    open_trades = [
-        item
-        for item in watchers
-        if str(
-            item.get("status")
-            or ""
-        ).upper()
-        == "OPEN"
-    ]
+        break;
+      } catch (e) {
+        lastError = e;
 
-    settled = [
-        item
-        for item in watchers
-        if str(
-            item.get("status")
-            or ""
-        ).upper()
-        in {
-            "WIN",
-            "LOSS",
+        if (!isNetworkError(e)) {
+          rethrow;
         }
-    ]
 
-    wins = sum(
-        1
-        for item in settled
-        if str(
-            item.get("status")
-            or item.get("result")
-            or ""
-        ).upper()
-        == "WIN"
-    )
+        if (attempt >=
+            maximumAttempts) {
+          break;
+        }
 
-    losses = len(settled) - wins
-
-    settled_wr = (
-        wins / len(settled)
-        if settled
-        else 0.0
-    )
-
-    total_pnl = sum(
-        float(
-            item.get("pnl")
-            or 0.0
-        )
-        for item in settled
-    )
-
-    manager_enabled = bool(
-        manager.get(
-            "enabled",
-            False,
-        )
-    )
-
-    run_in_progress = bool(
-        manager.get(
-            "run_in_progress",
-            False,
-        )
-    )
-
-    scan_interval_minutes = int(
-        manager.get(
-            "scan_interval_minutes",
-            15,
-        )
-        or 15
-    )
-
-    next_run_at = manager.get(
-        "next_run_at"
-    )
-
-    last_run_at = manager.get(
-        "last_run_at"
-    )
-
-    next_scan_seconds = None
-
-    if next_run_at is not None:
-        try:
-            next_scan_seconds = round(
-                float(next_run_at)
-                - now,
-                1,
-            )
-        except Exception:
-            next_scan_seconds = None
-
-    last_scan_age_seconds = None
-
-    if last_run_at is not None:
-        try:
-            last_scan_age_seconds = max(
-                0.0,
-                round(
-                    now
-                    - float(last_run_at),
-                    1,
-                ),
-            )
-        except Exception:
-            last_scan_age_seconds = None
-
-    scheduler_overdue = False
-
-    if (
-        manager_enabled
-        and not run_in_progress
-        and next_scan_seconds is not None
-        and next_scan_seconds
-        < -300.0
-    ):
-        scheduler_overdue = True
-
-    progress_stage = str(
-        manager.get(
-            "progress_stage",
-            "IDLE",
-        )
-        or "IDLE"
-    ).upper()
-
-    progress_percent = int(
-        manager.get(
-            "progress_percent",
-            0,
-        )
-        or 0
-    )
-
-    progress_candidate = manager.get(
-        "progress_candidate"
-    )
-
-    last_error = (
-        manager.get(
-            "last_error"
-        )
-    )
-
-    yahoo_cooldown = bool(
-        cache.get(
-            "yahoo_cooldown_active",
-            False,
-        )
-    )
-
-    calibration_fresh = not bool(
-        adaptive.get(
-            "stale",
-            True,
-        )
-    )
-
-    copilot_connected = bool(
-        COPILOT.configured()
-    )
-
-    issues = []
-
-    if last_error:
-        issues.append({
-            "severity": "RED",
-            "component": "AUTO_MANAGER",
-            "message": str(last_error),
-        })
-
-    if scheduler_overdue:
-        issues.append({
-            "severity": "RED",
-            "component": "SCHEDULER",
-            "message": (
-                "Auto Manager is enabled but the scheduled cycle is overdue."
-            ),
-        })
-
-    if not calibration_fresh:
-        issues.append({
-            "severity": "AMBER",
-            "component": "CALIBRATION",
-            "message": (
-                "Adaptive confidence calibration is stale or missing."
-            ),
-        })
-
-    if yahoo_cooldown:
-        issues.append({
-            "severity": "AMBER",
-            "component": "MARKET_DATA",
-            "message": (
-                "Yahoo market-data cooldown is active."
-            ),
-        })
-
-    if not copilot_connected:
-        issues.append({
-            "severity": "AMBER",
-            "component": "OPENAI_COPILOT",
-            "message": (
-                "OpenAI copilot is not configured."
-            ),
-        })
-
-    if any(
-        issue["severity"] == "RED"
-        for issue in issues
-    ):
-        overall = "RED"
-        overall_label = "SYSTEM ERROR"
-
-    elif issues:
-        overall = "AMBER"
-        overall_label = "RUNNING - ATTENTION"
-
-    elif manager_enabled:
-        overall = "GREEN"
-        overall_label = "SYSTEM HEALTHY"
-
-    else:
-        overall = "GREY"
-        overall_label = "SYSTEM ONLINE - AUTO MODE IDLE"
-
-    if run_in_progress:
-        activity = (
-            f"{progress_stage}"
-            + (
-                f" • {progress_candidate}"
-                if progress_candidate
-                else ""
-            )
-            + f" • {progress_percent}%"
-        )
-
-    elif manager_enabled:
-        activity = "Waiting for next automatic cycle"
-
-    else:
-        activity = "Auto Manager is disabled"
-
-    return {
-        "version": "V6.9",
-        "generated_at": now,
-        "overall": {
-            "status": overall,
-            "label": overall_label,
-            "issues_count": len(issues),
-        },
-        "backend": {
-            "status": "ONLINE",
-            "healthy": True,
-            "live_execution": False,
-        },
-        "auto_manager": {
-            "enabled": manager_enabled,
-            "status": (
-                "RUNNING"
-                if run_in_progress
-                else (
-                    "ENABLED"
-                    if manager_enabled
-                    else "IDLE"
-                )
-            ),
-            "runs": int(
-                manager.get(
-                    "runs",
-                    0,
-                )
-                or 0
-            ),
-            "scan_interval_minutes": scan_interval_minutes,
-            "last_run_at": last_run_at,
-            "last_scan_age_seconds": last_scan_age_seconds,
-            "next_run_at": next_run_at,
-            "next_scan_seconds": next_scan_seconds,
-            "scheduler_overdue": scheduler_overdue,
-            "last_error": last_error,
-        },
-        "search": {
-            "run_in_progress": run_in_progress,
-            "stage": progress_stage,
-            "message": manager.get(
-                "progress_message",
-                "Waiting for next cycle",
-            ),
-            "percent": progress_percent,
-            "candidate": progress_candidate,
-            "active_job_id": manager.get(
-                "active_job_id"
-            ),
-            "queued_or_running_jobs": int(
-                manager.get(
-                    "queued_or_running_jobs",
-                    0,
-                )
-                or 0
-            ),
-            "activity": activity,
-        },
-        "watchers": {
-            "active": len(active_watchers),
-            "watching": len(watching),
-            "target": int(
-                manager.get(
-                    "target_active_watchers",
-                    3,
-                )
-                or 3
-            ),
-            "open_trades": len(open_trades),
-            "total_records": len(watchers),
-        },
-        "forward_performance": {
-            "settled_trades": len(settled),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(
-                settled_wr,
-                6,
-            ),
-            "win_rate_pct": round(
-                settled_wr * 100.0,
-                2,
-            ),
-            "total_pnl": round(
-                total_pnl,
-                2,
-            ),
-        },
-        "calibration": {
-            "status": (
-                "FRESH"
-                if calibration_fresh
-                else "STALE"
-            ),
-            "fresh": calibration_fresh,
-            "qualified_count": int(
-                adaptive.get(
-                    "qualified_count",
-                    0,
-                )
-                or 0
-            ),
-            "source_job_id": adaptive.get(
-                "source_job_id"
-            ),
-            "updated_at": adaptive.get(
-                "updated_at"
-            ),
-        },
-        "market_data": {
-            "status": (
-                "DEGRADED"
-                if yahoo_cooldown
-                else "HEALTHY"
-            ),
-            "yahoo_cooldown_active": yahoo_cooldown,
-            "yahoo_cooldown_remaining": cache.get(
-                "yahoo_cooldown_remaining",
-                0.0,
-            ),
-            "cache_entries": cache.get(
-                "entries",
-                0,
-            ),
-        },
-        "copilot": {
-            "status": (
-                "CONNECTED"
-                if copilot_connected
-                else "DISCONNECTED"
-            ),
-            "configured": copilot_connected,
-            "model": COPILOT.model,
-            "advisory_only": True,
-        },
-        "issues": issues,
-        "paper_only": True,
-        "broker_execution_enabled": False,
+        await waitForBackendRecovery(
+          market,
+          attempt,
+        );
+      }
     }
 
-
-@app.get("/v69/system-overview")
-def v69_system_overview():
-    return _v69_system_overview()
-
-
-@app.get("/v69/diagnostic")
-def v69_system_diagnostic():
-    """
-    Performs a read-only diagnostic including one lightweight market-data probe.
-    No trade is created or modified.
-    """
-
-    checks = []
-
-    overview = _v69_system_overview()
-
-    checks.append({
-        "component": "BACKEND",
-        "passed": True,
-        "message": "Backend endpoint is responding.",
-    })
-
-    checks.append({
-        "component": "AUTO_MANAGER",
-        "passed": not bool(
-            overview[
-                "auto_manager"
-            ][
-                "scheduler_overdue"
-            ]
-        )
-        and not bool(
-            overview[
-                "auto_manager"
-            ][
-                "last_error"
-            ]
-        ),
-        "message": (
-            "Auto Manager scheduler is responsive."
-            if (
-                not overview[
-                    "auto_manager"
-                ][
-                    "scheduler_overdue"
-                ]
-                and not overview[
-                    "auto_manager"
-                ][
-                    "last_error"
-                ]
-            )
-            else "Auto Manager needs attention."
-        ),
-    })
-
-    checks.append({
-        "component": "CALIBRATION",
-        "passed": bool(
-            overview[
-                "calibration"
-            ][
-                "fresh"
-            ]
-        ),
-        "message": (
-            "Adaptive calibration is fresh."
-            if overview[
-                "calibration"
-            ][
-                "fresh"
-            ]
-            else "Adaptive calibration is stale or missing."
-        ),
-    })
-
-    checks.append({
-        "component": "OPENAI_COPILOT",
-        "passed": bool(
-            COPILOT.configured()
-        ),
-        "message": (
-            "OpenAI copilot is configured."
-            if COPILOT.configured()
-            else "OpenAI copilot is not configured."
-        ),
-    })
-
-    market_probe = {
-        "passed": False,
-        "rows": 0,
-        "latest_price": None,
-        "error": None,
+    if (jobId == null ||
+        jobId.isEmpty) {
+      throw NetworkValidationException(
+        market: market,
+        message:
+            lastError?.toString() ??
+                'Could not create validation job',
+      );
     }
 
-    try:
-        probe = get_data(
-            "EURUSD=X",
-            "5d",
-            "15m",
-        )
+    // ---------------------------------------------------------
+    // 2. POLL THE JOB
+    //
+    // Deep validation can take several minutes. Each GET is
+    // short; a temporary network failure does NOT reject the
+    // candidate and does NOT create a second validation job.
+    // ---------------------------------------------------------
 
-        market_probe[
-            "rows"
-        ] = int(
-            len(probe)
-        )
+    final pollUri = Uri.parse(
+      '$apiBase/deep-validation-job/$jobId',
+    );
 
-        market_probe[
-            "latest_price"
-        ] = float(
-            probe[
-                "Close"
-            ].iloc[
-                -1
-            ]
-        )
+    const pollDelay =
+        Duration(seconds: 5);
 
-        market_probe[
-            "passed"
-        ] = bool(
-            len(probe) >= 80
-        )
+    const maxPollingTime =
+        Duration(minutes: 12);
 
-    except Exception as exc:
-        market_probe[
-            "error"
-        ] = str(exc)
+    final stopwatch =
+        Stopwatch()..start();
 
-    checks.append({
-        "component": "MARKET_DATA",
-        "passed": bool(
-            market_probe[
-                "passed"
-            ]
-        ),
-        "message": (
-            "EURUSD 15m market-data probe passed."
-            if market_probe[
-                "passed"
-            ]
-            else (
-                "Market-data probe failed: "
-                + str(
-                    market_probe[
-                        "error"
-                    ]
-                    or "insufficient rows"
-                )
-            )
-        ),
-        "details": market_probe,
-    })
+    int consecutiveNetworkErrors = 0;
 
-    failed = [
-        item
-        for item in checks
-        if not bool(
-            item.get(
-                "passed"
-            )
-        )
-    ]
+    while (
+      stopwatch.elapsed <
+          maxPollingTime
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
+        );
+      }
 
-    red_components = {
-        "BACKEND",
-        "AUTO_MANAGER",
-        "MARKET_DATA",
+      try {
+        final job =
+            await getJson(
+          pollUri,
+          timeoutSeconds: 45,
+        );
+
+        consecutiveNetworkErrors = 0;
+
+        final status =
+            job['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                'UNKNOWN';
+
+        if (status == 'COMPLETED') {
+          stopwatch.stop();
+
+          final rawResult =
+              job['result'];
+
+          if (rawResult is! Map) {
+            throw const FormatException(
+              'Completed validation job '
+              'did not contain a result',
+            );
+          }
+
+          final result =
+              Map<String, dynamic>.from(
+            rawResult,
+          );
+
+          if (mounted) {
+            setState(() {
+              currentValidationMarket =
+                  '$market validation complete';
+
+              networkStatus =
+                  'Deep validation result received';
+            });
+          }
+
+          return result;
+        }
+
+        if (status == 'FAILED' ||
+            status == 'ERROR') {
+          stopwatch.stop();
+
+          final jobError =
+              job['error']
+                      ?.toString() ??
+                  'Deep validation job failed';
+
+          throw Exception(
+            jobError,
+          );
+        }
+
+        final elapsedSeconds =
+            stopwatch.elapsed.inSeconds;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                '$status • '
+                '${elapsedSeconds}s elapsed • '
+                'checking again in '
+                '${pollDelay.inSeconds}s';
+          });
+        }
+
+        await Future.delayed(
+          pollDelay,
+        );
+      } catch (e) {
+        if (!isNetworkError(e)) {
+          rethrow;
+        }
+
+        consecutiveNetworkErrors++;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                'Connection interrupted while '
+                'checking the job. '
+                'The server job is still running. '
+                'Retrying...';
+          });
+        }
+
+        // Keep the SAME job_id. Never restart the validation
+        // merely because one polling request lost connection.
+        final retryDelay =
+            Duration(
+          seconds:
+              consecutiveNetworkErrors >= 3
+                  ? 15
+                  : 8,
+        );
+
+        await Future.delayed(
+          retryDelay,
+        );
+      }
     }
 
-    critical_failed = any(
-        item[
-            "component"
-        ]
-        in red_components
-        for item in failed
-    )
+    stopwatch.stop();
 
-    if critical_failed:
-        status = "RED"
-        label = "SYSTEM DIAGNOSTIC FAILED"
+    throw NetworkValidationException(
+      market: market,
+      message:
+          'Validation job $jobId did not finish '
+          'within ${maxPollingTime.inMinutes} minutes. '
+          'The job may still be running on the server.',
+    );
+  }
 
-    elif failed:
-        status = "AMBER"
-        label = "SYSTEM RUNNING WITH WARNINGS"
 
-    else:
-        status = "GREEN"
-        label = "SYSTEM CHECK PASSED"
+  // =========================================================
+  // REFRESH LIVE SIGNAL
+  // =========================================================
 
-    return {
-        "version": "V6.9",
-        "status": status,
-        "label": label,
-        "passed_checks": len(
-            checks
-        )
-        - len(
-            failed
-        ),
-        "total_checks": len(
-            checks
-        ),
-        "checks": checks,
-        "paper_only": True,
-        "broker_execution_enabled": False,
+  Future<void> refreshSignal() async {
+    if (busy) {
+      return;
     }
 
+    setState(() {
+      busy = true;
+      error = null;
+    });
 
-# ============================================================
-# V6.8 INTELLIGENCE COPILOT
-# ============================================================
+    try {
+      final uri = Uri.parse(
+        '$apiBase/signal',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'risk_mode':
+              risk,
+          'balance':
+              balance.text.trim(),
+        },
+      );
 
-def _v68_copilot_context():
-    """
-    Read-only evidence bundle for the OpenAI copilot.
-    Uses the existing V6.6 watcher engine and adaptive gate.
-    The copilot receives no broker credentials and has no execution tools.
-    """
+      final result = await getJson(
+        uri,
+      );
 
-    # Existing V5.3/V6.x watcher engine is the source of truth.
-    watchers = V53_WATCHER_ENGINE.list()
+      if (!mounted) {
+        return;
+      }
 
-    # Existing V6.6 forward intelligence summarizes genuine settled trades.
-    v66_forward = (
-        V66_INTELLIGENCE
-        .forward_performance(
-            watchers
-        )
-    )
+      setState(() {
+        sig = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
 
-    # Existing V6.3 adaptive gate persists the currently-qualified buckets.
-    adaptive_confidence_gate.load()
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
 
-    paper_trades = []
+  // =========================================================
+  // BACKTEST
+  // =========================================================
 
-    for item in watchers:
-        status = str(
-            item.get("status")
-            or ""
-        ).upper()
+  Future<void> runBacktest() async {
+    if (busy) {
+      return;
+    }
 
-        if (
-            item.get("trade_id")
-            or status in {
-                "OPEN",
-                "WIN",
-                "LOSS",
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/backtest',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'risk_mode':
+              risk,
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 180,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        bt = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // FAST SCAN REQUEST
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      runFastScanRequest() async {
+    final uri = Uri.parse(
+      '$apiBase/fast-scan',
+    ).replace(
+      queryParameters: {
+        'period': '5d',
+        'interval': '15m',
+        'top_n': '9',
+      },
+    );
+
+    return getJson(
+      uri,
+      timeoutSeconds: 180,
+    );
+  }
+
+  // =========================================================
+  // FAST SCAN BUTTON
+  // =========================================================
+
+  Future<void> scanAllMarkets() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      scanningMarkets = true;
+      error = null;
+    });
+
+    try {
+      final result =
+          await runFastScanRequest();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        fastScan = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Fast scan failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          scanningMarkets = false;
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // FIND VERIFIED TRADE
+  // =========================================================
+
+  Future<void> findVerifiedTrade() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+
+      scanningMarkets = true;
+
+      findingVerifiedTrade = true;
+
+      verifiedTrade = null;
+
+      liveEntryAssessment = null;
+      serverWatcher = null;
+      serverWatchers = [];
+      forwardStats = null;
+      watcherPollTimer?.cancel();
+
+      validationHistory = [];
+
+      error = null;
+
+      networkStatus = null;
+
+      currentAttempt = 0;
+
+      currentValidationMarket =
+          'Scanning all markets...';
+    });
+
+    try {
+      // =====================================================
+      // 1. FAST SCAN
+      // =====================================================
+
+      final scanResult =
+          await runFastScanRequest();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        fastScan = scanResult;
+        scanningMarkets = false;
+      });
+
+      final rawCandidates =
+          scanResult[
+                  'top_candidates']
+              as List?;
+
+      if (rawCandidates == null ||
+          rawCandidates.isEmpty) {
+        throw Exception(
+          'Fast scanner returned '
+          'no candidates',
+        );
+      }
+
+      final candidates = <
+          Map<String, dynamic>>[];
+
+      for (final item
+          in rawCandidates) {
+        if (item is Map) {
+          candidates.add(
+            Map<String, dynamic>.from(
+              item,
+            ),
+          );
+        }
+      }
+
+      if (candidates.isEmpty) {
+        throw Exception(
+          'No valid candidate '
+          'records received',
+        );
+      }
+
+      final count =
+          candidates.length > 3
+              ? 3
+              : candidates.length;
+
+      // =====================================================
+      // 2. DEEP VALIDATE EACH MARKET
+      // =====================================================
+
+      for (
+        int index = 0;
+        index < count;
+        index++
+      ) {
+        final candidate =
+            candidates[index];
+
+        final market =
+            candidate['market']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          currentValidationMarket =
+              'Deep validating '
+              '#${index + 1} $market';
+
+          networkStatus =
+              'Preparing validation...';
+        });
+
+        Map<String, dynamic> deep;
+
+        try {
+          deep =
+              await deepValidateWithRecovery(
+            candidate,
+          );
+        } on NetworkValidationException catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'NETWORK_ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.message,
+            });
+
+            currentValidationMarket =
+                '$market validation '
+                'could not complete';
+
+            networkStatus =
+                'Network connection failed '
+                'after $maximumAttempts attempts.';
+          });
+
+          // IMPORTANT:
+          // Do NOT move to candidate #2 after a
+          // network failure.
+          throw NetworkValidationException(
+            market:
+                market,
+            message:
+                e.message,
+          );
+        } catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.toString(),
+            });
+          });
+
+          // Non-network backend error:
+          // stop rather than falsely treating the
+          // candidate as rejected.
+          break;
+        }
+
+        // ===================================================
+        // PARSE V4.6 RESPONSE
+        // ===================================================
+
+        final finalStatus =
+            deep['final_status']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        Map<String, dynamic>?
+            finalMarket;
+
+        final rawFinalMarket =
+            deep['final_market'];
+
+        if (rawFinalMarket is Map) {
+          finalMarket =
+              Map<String, dynamic>.from(
+            rawFinalMarket,
+          );
+        }
+
+        final verified =
+            finalMarket?[
+                        'verified'] ==
+                    true ||
+                finalStatus ==
+                    'VERIFIED_TRADE';
+
+        final deepStatus =
+            finalMarket?[
+                        'status']
+                    ?.toString() ??
+                finalStatus;
+
+        final history = <
+            String, dynamic>{
+          'position':
+              index + 1,
+
+          'market':
+              market,
+
+          'symbol':
+              candidate[
+                  'symbol'],
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              candidate[
+                  'direction'],
+
+          'deep_status':
+              deepStatus,
+
+          'verified':
+              verified,
+
+          'deep_score':
+              finalMarket?[
+                  'deep_score'],
+
+          'trades':
+              finalMarket?[
+                  'trades'],
+
+          'wins':
+              finalMarket?[
+                  'wins'],
+
+          'losses':
+              finalMarket?[
+                  'losses'],
+
+          'win_rate':
+              finalMarket?[
+                  'win_rate'],
+
+          'profit_factor':
+              finalMarket?[
+                  'profit_factor'],
+
+          'return_pct':
+              finalMarket?[
+                  'return_pct'],
+
+          'max_drawdown':
+              finalMarket?[
+                  'max_drawdown'],
+
+          'interval':
+              finalMarket?[
+                  'interval'],
+
+          'period':
+              finalMarket?[
+                  'period'],
+
+          'threshold_pct':
+              finalMarket?[
+                  'threshold_pct'],
+
+          'holding_candles':
+              finalMarket?[
+                  'holding_candles'],
+
+          'sample_reliability_pct':
+              finalMarket?[
+                  'sample_reliability_pct'],
+
+          'wilson_lower_win_rate_pct':
+              finalMarket?[
+                  'wilson_lower_win_rate_pct'],
+
+          'reliability_adjusted_score':
+              finalMarket?[
+                  'reliability_adjusted_score'],
+
+          'near_verified':
+              finalMarket?[
+                  'near_verified'] == true,
+
+          'primary_reason':
+              finalMarket?[
+                  'primary_reason'],
+
+          'rejection_reasons':
+              finalMarket?[
+                  'rejection_reasons'],
+
+          'explanation':
+              finalMarket?[
+                  'explanation'],
+        };
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          validationHistory.add(
+            history,
+          );
+
+          networkStatus =
+              '$market validation complete';
+        });
+
+        // ===================================================
+        // NOT VERIFIED
+        // ===================================================
+
+        if (!verified ||
+            finalMarket == null) {
+          continue;
+        }
+
+        // ===================================================
+        // DIRECTION AGREEMENT
+        // ===================================================
+
+        final fastDirection =
+            candidate[
+                    'direction']
+                ?.toString();
+
+        final deepDirection =
+            finalMarket[
+                    'direction']
+                ?.toString();
+
+        if (fastDirection !=
+            deepDirection) {
+          setState(() {
+            validationHistory.last[
+                    'verified'] =
+                false;
+
+            validationHistory.last[
+                    'deep_status'] =
+                'DIRECTION_MISMATCH';
+          });
+
+          continue;
+        }
+
+        // ===================================================
+        // VERIFIED
+        // ===================================================
+
+        final result = <
+            String, dynamic>{
+          ...finalMarket,
+
+          'fast_rank':
+              index + 1,
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              fastDirection,
+
+          'direction_agreement':
+              true,
+        };
+
+        setState(() {
+          verifiedTrade ??=
+              result;
+
+          currentValidationMarket =
+              '$market VERIFIED';
+
+          networkStatus =
+              'Deep validation passed • '
+              'adding candidate to V5.4 watch portfolio';
+        });
+
+        await createServerWatcher(
+          result,
+        );
+
+        // V5.4 intentionally continues through the remaining
+        // shortlisted candidates. Multiple VERIFIED setups can
+        // be watched simultaneously, so a waiting/overextended
+        // #1 candidate does not block a better live entry in #2/#3.
+      }
+    } on NetworkValidationException catch (_) {
+      // Already shown in the validation card.
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified trade search '
+            'failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          scanningMarkets = false;
+          findingVerifiedTrade = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // V5.5.3 AUTO MANAGER / FORWARD LIFECYCLE
+  // =========================================================
+
+  Future<void> askJasongCopilot({
+    String? presetQuestion,
+    String mode = 'GENERAL',
+  }) async {
+    final question = (presetQuestion ?? copilotController.text).trim();
+    if (question.isEmpty) return;
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await postJsonOnce(
+        Uri.parse('$apiBase/v68/ask'),
+        {
+          'question': question,
+          'mode': mode,
+        },
+        timeoutSeconds: 90,
+      );
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
+
+  Future<void> runOvernightReview() async {
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/v68/overnight-review'),
+        timeoutSeconds: 90,
+      );
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No overnight analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
+
+  Future<void> loadSystemOverview() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/system-overview',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemOverview = response;
+      });
+    } catch (_) {
+      // Keep the previous snapshot visible if a single poll fails.
+    }
+  }
+
+  Future<void> runSystemDiagnostic() async {
+    if (systemDiagnosticBusy) {
+      return;
+    }
+
+    setState(() {
+      systemDiagnosticBusy = true;
+      systemDiagnostic = null;
+    });
+
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/diagnostic',
+        ),
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = response;
+      });
+
+      await loadSystemOverview();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = {
+          'status': 'RED',
+          'label': 'DIAGNOSTIC REQUEST FAILED',
+          'checks': [
+            {
+              'component': 'MOBILE_TO_BACKEND',
+              'passed': false,
+              'message': e.toString(),
             }
-        ):
-            snapshot = (
-                item.get(
-                    "entry_snapshot"
-                )
-                or {}
-            )
+          ],
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          systemDiagnosticBusy = false;
+        });
+      }
+    }
+  }
 
-            paper_trades.append({
-                "trade_id":
-                    item.get("trade_id"),
-                "market":
-                    item.get("market"),
-                "symbol":
-                    item.get("symbol"),
-                "direction":
-                    item.get("direction"),
-                "status":
-                    status,
-                "entry_path":
-                    item.get("entry_path"),
-                "entry_confidence":
-                    snapshot.get(
-                        "live_confidence"
-                    )
-                    or (
-                        item.get(
-                            "last_live_signal"
-                        )
-                        or {}
-                    ).get(
-                        "confidence"
-                    ),
-                "entry_price":
-                    item.get(
-                        "entry_price_effective"
-                    )
-                    or item.get(
-                        "entry_price"
-                    ),
-                "exit_price":
-                    item.get(
-                        "exit_price_effective"
-                    )
-                    or item.get(
-                        "exit_price"
-                    ),
-                "result":
-                    item.get("result"),
-                "pnl":
-                    item.get("pnl"),
-                "entry_time_iso":
-                    item.get(
-                        "entry_time_iso"
-                    ),
-                "closed_at_iso":
-                    item.get(
-                        "closed_at_iso"
-                    ),
-                "historical_win_rate":
-                    item.get(
-                        "win_rate"
-                    ),
-                "historical_profit_factor":
-                    item.get(
-                        "profit_factor"
-                    ),
-                "historical_trades":
-                    item.get(
-                        "trades"
-                    ),
-                "adaptive_gate":
-                    item.get(
-                        "adaptive_gate"
-                    ),
-                "v66_forward_gate":
-                    item.get(
-                        "v66_forward_gate"
-                    ),
-                "v66_portfolio_gate":
-                    item.get(
-                        "v66_portfolio_gate"
-                    ),
-            })
+  Color systemStatusColor(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Colors.greenAccent;
+      case 'AMBER':
+        return Colors.amberAccent;
+      case 'RED':
+        return Colors.redAccent;
+      case 'GREY':
+      default:
+        return Colors.white54;
+    }
+  }
 
-    paper_trades.sort(
-        key=lambda row: str(
-            row.get(
-                "entry_time_iso"
-            )
-            or ""
+  IconData systemStatusIcon(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Icons.check_circle;
+      case 'AMBER':
+        return Icons.warning_amber_rounded;
+      case 'RED':
+        return Icons.error;
+      case 'GREY':
+      default:
+        return Icons.pause_circle;
+    }
+  }
+
+  String formatCountdownSeconds(
+    dynamic value,
+  ) {
+    final seconds = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (seconds == null) {
+      return '-';
+    }
+
+    if (seconds <= 0) {
+      return 'Due now';
+    }
+
+    final total = seconds.round();
+    final minutes = total ~/ 60;
+    final remainder = total % 60;
+
+    if (minutes > 0) {
+      return '${minutes}m ${remainder}s';
+    }
+
+    return '${remainder}s';
+  }
+
+  String formatEpochCountdown(
+    dynamic value,
+  ) {
+    final epoch = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (epoch == null || epoch <= 0) {
+      return '-';
+    }
+
+    final now =
+        DateTime.now().millisecondsSinceEpoch /
+            1000.0;
+
+    return formatCountdownSeconds(
+      epoch - now,
+    );
+  }
+
+  Future<void> loadOvernightDemoStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/overnight-demo/status',
         ),
-        reverse=True,
-    )
+        timeoutSeconds: 45,
+      );
 
-    active_watchers = []
+      if (!mounted) {
+        return;
+      }
 
-    for item in watchers:
-        status = str(
-            item.get("status")
-            or ""
-        ).upper()
+      setState(() {
+        overnightDemoStatus = response;
+      });
+    } catch (_) {
+      // Keep the last server-side overnight snapshot visible.
+    }
+  }
 
-        if status in {
-            "WATCHING",
-            "OPEN",
-            "RISK_BLOCKED",
-        }:
-            active_watchers.append({
-                "market":
-                    item.get("market"),
-                "symbol":
-                    item.get("symbol"),
-                "direction":
-                    item.get("direction"),
-                "status":
-                    status,
-                "entry_path":
-                    item.get("entry_path"),
-                "last_reason":
-                    item.get(
-                        "last_reason"
-                    ),
-                "last_live_signal":
-                    item.get(
-                        "last_live_signal"
-                    ),
-                "adaptive_gate":
-                    item.get(
-                        "adaptive_gate"
-                    ),
-                "v66_timing":
-                    item.get(
-                        "v66_timing"
-                    ),
-            })
+  Future<void> startOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
+    }
 
-    return {
-        "engine": {
-            "version":
-                "V6.8.1",
-            "paper_only":
-                True,
-            "broker_execution_enabled":
-                False,
-            "copilot_advisory_only":
-                True,
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/overnight-demo/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
         },
-        "adaptive_confidence":
-            adaptive_confidence_gate.snapshot(),
-        "v66_forward_intelligence":
-            v66_forward,
-        "paper_trades":
-            paper_trades[:50],
-        "active_watchers":
-            active_watchers,
+      );
+
+      final response = await postJsonOnce(
+        uri,
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+        networkStatus =
+            'Overnight IG DEMO is running on the server.';
+      });
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not start Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
     }
 
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
 
-class V68CopilotRequest(BaseModel):
-    question: str
-    mode: str = "GENERAL"
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/overnight-demo/stop',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+        networkStatus = response['message']
+                ?.toString() ??
+            'Overnight DEMO stopped.';
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not stop Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadAiLearningStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/ai-learning/status',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningStatus = response;
+
+        final learning =
+            response['learning'];
+
+        if (learning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            learning,
+          );
+        }
+      });
+    } catch (_) {
+      // Keep the previous AI-learning snapshot visible.
+    }
+  }
+
+  Future<void> runAiLearningNow() async {
+    if (aiLearningBusy) {
+      return;
+    }
+
+    setState(() {
+      aiLearningBusy = true;
+      error = null;
+    });
+
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/ai-learning/run-now',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = response;
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = {
+          'status': 'ERROR',
+          'paper_only': true,
+          'live_execution': false,
+          'error': e.toString(),
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          aiLearningBusy = false;
+        });
+      } else {
+        aiLearningBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadAutoDashboard() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-dashboard',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        autoDashboard = response;
+
+        final rawWatchers =
+            response['lifecycle'];
+
+        if (rawWatchers is List) {
+          serverWatchers = rawWatchers
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    Map<String, dynamic>.from(
+                  item,
+                ),
+              )
+              .toList();
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            serverWatchers,
+          );
+        }
+
+        final rawForward =
+            response['forward'];
+
+        if (rawForward is Map) {
+          forwardStats =
+              Map<String, dynamic>.from(
+            rawForward,
+          );
+        }
+
+        final rawPaperTrades =
+            response['paper_trades'];
+
+        if (rawPaperTrades is List) {
+          paperTrades =
+              rawPaperTrades
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
+        final rawLearning =
+            response['learning'];
+
+        if (rawLearning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            rawLearning,
+          );
+        }
+
+        final rawLearningWatchers =
+            response['learning_watchers'];
+
+        if (rawLearningWatchers is List) {
+          aiLearningWatchers =
+              rawLearningWatchers
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
+        final rawV66Forward =
+            response[
+                'v66_forward_intelligence'];
+
+        if (rawV66Forward is Map) {
+          v66ForwardIntelligence =
+              Map<String, dynamic>.from(
+            rawV66Forward,
+          );
+        }
+      });
+    } catch (_) {
+      // Auto dashboard is supplemental.
+    }
+  }
+
+  void startAutoDashboardPolling() {
+    autoDashboardPollTimer?.cancel();
+
+    autoDashboardPollTimer =
+        Timer.periodic(
+      const Duration(
+        seconds: 20,
+      ),
+      (_) {
+        loadAutoDashboard();
+        loadSystemOverview();
+        loadAiLearningStatus();
+        loadOvernightDemoStatus();
+      },
+    );
+
+    Future.microtask(
+      loadAutoDashboard,
+    );
+
+    Future.microtask(
+      loadSystemOverview,
+    );
+
+    Future.microtask(
+      loadAiLearningStatus,
+    );
+
+    Future.microtask(
+      loadOvernightDemoStatus,
+    );
+  }
+
+  Future<void> startAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+          'scan_interval_minutes':
+              '2',
+          'target_active_watchers':
+              '6',
+          'scan_top_n': '9',
+        },
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not start Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/stop',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not stop Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> runAutoManagerNow() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/run-now',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: '
+          '${response.body}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(
+        response.body,
+      );
+
+      if (decoded is Map &&
+          mounted) {
+        setState(() {
+          autoManagerJob =
+              Map<String, dynamic>.from(
+            decoded,
+          );
+        });
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Auto Manager run failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  String formatEpochTime(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final seconds =
+        double.tryParse(
+      value.toString(),
+    );
+
+    if (seconds == null ||
+        seconds <= 0) {
+      return '-';
+    }
+
+    final dt = DateTime
+        .fromMillisecondsSinceEpoch(
+      (seconds * 1000).round(),
+      isUtc: true,
+    )
+        .toLocal();
+
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String watcherLifecycleSubtitle(
+    Map<String, dynamic> watcher,
+  ) {
+    final status =
+        watcher['status']
+                ?.toString() ??
+            '-';
+
+    final health =
+        watcher['strategy_health']
+                ?.toString() ??
+            'PROBATION';
+
+    if (status == 'OPEN') {
+      return '$health • Entry ${formatPrice(watcher['entry_price'])} • '
+          'Exit target ${watcher['target_exit_at_iso'] ?? '-'}';
+    }
+
+    if (status == 'WIN' ||
+        status == 'LOSS') {
+      return '$health • P&L ${watcher['pnl'] ?? '-'} • '
+          'Entry ${formatPrice(watcher['entry_price'])} → '
+          '${formatPrice(watcher['exit_price'])}';
+    }
+
+    final reason =
+        watcher['last_reason']
+                ?.toString() ??
+            'Awaiting next lifecycle update';
+
+    return '$health • $reason';
+  }
+
+  // =========================================================
+  // V5.3 SERVER VERIFIED WATCHER
+  // =========================================================
+
+  Future<void> createServerWatcher(
+    Map<String, dynamic> verified,
+  ) async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+        },
+      );
+
+      final response =
+          await postJsonOnce(
+        uri,
+        verified,
+        timeoutSeconds: 60,
+      );
+
+      final rawWatcher =
+          response['watcher'];
+
+      if (rawWatcher is! Map) {
+        throw const FormatException(
+          'Watcher server did not return a watcher object',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final created =
+          Map<String, dynamic>.from(
+        rawWatcher,
+      );
+
+      setState(() {
+        serverWatchers.removeWhere(
+          (item) =>
+              item['watcher_id'] ==
+              created['watcher_id'],
+        );
+
+        serverWatchers.add(
+          created,
+        );
+
+        serverWatcher =
+            _selectPrimaryWatcher(
+          serverWatchers,
+        );
+      });
+
+      startWatcherPolling();
+      await loadForwardStats();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified setup passed, but server watcher could not start: $e';
+      });
+    }
+  }
+
+  void startWatcherPolling() {
+    watcherPollTimer?.cancel();
+
+    watcherPollTimer =
+        Timer.periodic(
+      const Duration(
+        seconds: 20,
+      ),
+      (_) {
+        refreshServerWatchers();
+      },
+    );
+
+    Future.microtask(
+      refreshServerWatchers,
+    );
+  }
+
+  Map<String, dynamic>? _selectPrimaryWatcher(
+    List<Map<String, dynamic>> watchers,
+  ) {
+    if (watchers.isEmpty) {
+      return null;
+    }
+
+    int priority(
+      Map<String, dynamic> item,
+    ) {
+      switch (
+          item['status']
+                  ?.toString() ??
+              '') {
+        case 'OPEN':
+          return 100;
+        case 'READY':
+          return 90;
+        case 'WATCHING':
+          return 80;
+        case 'RISK_BLOCKED':
+          return 70;
+        case 'WIN':
+          return 60;
+        case 'LOSS':
+          return 50;
+        case 'EXPIRED':
+          return 30;
+        case 'INVALIDATED':
+          return 20;
+        case 'SUPERSEDED':
+          return 10;
+        default:
+          return 0;
+      }
+    }
+
+    final sorted = [
+      ...watchers,
+    ];
+
+    sorted.sort(
+      (a, b) =>
+          priority(b).compareTo(
+        priority(a),
+      ),
+    );
+
+    return sorted.first;
+  }
+
+  Future<void> refreshServerWatchers() async {
+    if (watcherBusy) {
+      return;
+    }
+
+    watcherBusy = true;
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers',
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      final raw =
+          response['watchers'];
+
+      if (raw is List &&
+          mounted) {
+        final updated = <
+            Map<String, dynamic>>[];
+
+        for (final item in raw) {
+          if (item is Map) {
+            updated.add(
+              Map<String, dynamic>.from(
+                item,
+              ),
+            );
+          }
+        }
+
+        setState(() {
+          serverWatchers = updated;
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            updated,
+          );
+        });
+      }
+
+      await loadForwardStats();
+    } catch (_) {
+      // Watchers remain active on the server.
+    } finally {
+      watcherBusy = false;
+    }
+  }
+
+  Future<void> refreshServerWatcher() async {
+    await refreshServerWatchers();
+  }
+
+  Future<void> checkServerWatcherNow() async {
+    if (watcherBusy ||
+        serverWatcher == null) {
+      return;
+    }
+
+    final watcherId =
+        serverWatcher!['watcher_id']
+            ?.toString();
+
+    if (watcherId == null ||
+        watcherId.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      watcherBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers/$watcherId/check',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 120,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'HTTP ${response.statusCode}: ${response.body}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(response.body);
+
+      if (decoded is! Map ||
+          decoded['watcher'] is! Map) {
+        throw const FormatException(
+          'Unexpected watcher response',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final checked =
+          Map<String, dynamic>.from(
+        decoded['watcher'] as Map,
+      );
+
+      setState(() {
+        final index =
+            serverWatchers.indexWhere(
+          (item) =>
+              item['watcher_id'] ==
+              checked['watcher_id'],
+        );
+
+        if (index >= 0) {
+          serverWatchers[index] =
+              checked;
+        } else {
+          serverWatchers.add(
+            checked,
+          );
+        }
+
+        serverWatcher =
+            _selectPrimaryWatcher(
+          serverWatchers,
+        );
+      });
+
+      await refreshServerWatchers();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Watcher check failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          watcherBusy = false;
+        });
+      } else {
+        watcherBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadForwardStats() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/forward-stats',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final stats = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (mounted) {
+        setState(() {
+          forwardStats = stats;
+        });
+      }
+    } catch (_) {
+      // Forward stats are supplemental. Do not interrupt
+      // an active watcher when this request fails.
+    }
+  }
+
+  Color watcherStatusColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'WATCHING':
+      case 'READY':
+      case 'RISK_BLOCKED':
+        return Colors.amberAccent;
+      case 'LOSS':
+      case 'EXPIRED':
+      case 'INVALIDATED':
+      case 'SUPERSEDED':
+        return Colors.redAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData watcherStatusIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+        return Icons.play_circle_fill;
+      case 'WIN':
+        return Icons.emoji_events;
+      case 'LOSS':
+        return Icons.cancel;
+      case 'WATCHING':
+        return Icons.visibility;
+      case 'RISK_BLOCKED':
+        return Icons.shield;
+      case 'EXPIRED':
+        return Icons.timer_off;
+      case 'INVALIDATED':
+        return Icons.block;
+      default:
+        return Icons.sync;
+    }
+  }
 
 
-@app.get("/v68/status")
-def v68_status():
-    return {
-        "version": "V6.8.1",
-        "openai_configured": COPILOT.configured(),
-        "model": COPILOT.model,
-        "copilot_advisory_only": True,
-        "can_execute_trades": False,
-        "paper_only": True,
-        "broker_execution_enabled": False,
-        "features": [
-            "ASK_JASONG_AI",
-            "OVERNIGHT_TRADE_REVIEW",
-            "LOSS_PATTERN_ANALYSIS",
-            "FORWARD_VS_HISTORICAL_REVIEW",
-            "TRADE_EXPLANATION",
+  Color paperTradeColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'LOSS':
+        return Colors.redAccent;
+      case 'OPEN':
+        return Colors.lightBlueAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData paperTradeIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Icons.trending_up;
+      case 'LOSS':
+        return Icons.trending_down;
+      case 'OPEN':
+        return Icons.hourglass_top;
+      default:
+        return Icons.receipt_long;
+    }
+  }
+
+  String paperTradeHeadline(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return 'WIN';
+      case 'LOSS':
+        return 'LOSS';
+      case 'OPEN':
+        return 'LIVE PAPER TRADE';
+      default:
+        return status;
+    }
+  }
+
+  String formatMoney(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final number =
+        value is num
+            ? value.toDouble()
+            : double.tryParse(
+                  value.toString(),
+                ) ??
+                0.0;
+
+    final sign =
+        number > 0
+            ? '+'
+            : '';
+
+    return '$sign${number.toStringAsFixed(2)}';
+  }
+
+
+  // =========================================================
+  // ANALYSE MARKET
+  // =========================================================
+
+  Future<void> analyseMarket(
+    Map<String, dynamic> market,
+  ) async {
+    final selected =
+        market['symbol']
+            ?.toString();
+
+    if (selected == null ||
+        selected.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      symbol.text =
+          selected;
+
+      error = null;
+    });
+
+    await refreshSignal();
+  }
+
+  double _profileMinConfidence() {
+    switch (risk) {
+      case 'Conservative':
+        return 0.72;
+      case 'Aggressive':
+        return 0.62;
+      case 'Balanced':
+      default:
+        return 0.67;
+    }
+  }
+
+  int _intervalMinutes(
+    dynamic interval,
+  ) {
+    final text =
+        interval?.toString().trim().toLowerCase() ?? '';
+
+    if (text.endsWith('m')) {
+      return int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          15;
+    }
+
+    if (text.endsWith('h')) {
+      final hours = int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          1;
+
+      return hours * 60;
+    }
+
+    return 15;
+  }
+
+  Future<void>
+      analyseVerifiedTrade() async {
+    if (verifiedTrade == null ||
+        busy) {
+      return;
+    }
+
+    final selectedSymbol =
+        verifiedTrade!['symbol']
+            ?.toString();
+
+    if (selectedSymbol == null ||
+        selectedSymbol.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+      liveEntryAssessment = null;
+      symbol.text = selectedSymbol;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/signal',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              selectedSymbol,
+          'risk_mode':
+              risk,
+          'balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 120,
+      );
+
+      final verifiedDirection =
+          verifiedTrade!['direction']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final liveDecision =
+          result['decision']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final confidence =
+          ((result['confidence'] ?? 0)
+                  as num)
+              .toDouble();
+
+      final aiUp =
+          ((result[
+                      'combined_up_probability'] ??
+                  0.50)
+              as num)
+              .toDouble();
+
+      final rsi =
+          ((result['rsi'] ?? 50)
+                  as num)
+              .toDouble();
+
+      final price =
+          result['price'];
+
+      final minConfidence =
+          _profileMinConfidence();
+
+      final reasons = <String>[];
+
+      String entryStatus =
+          'WAIT_CONFIRMATION';
+
+      String headline =
+          'WAIT FOR CONFIRMATION';
+
+      // -----------------------------------------------------
+      // 1. Opposite live signal with meaningful confidence
+      // -----------------------------------------------------
+
+      final oppositeSignal =
+          (verifiedDirection == 'BUY' &&
+                  liveDecision == 'SELL') ||
+              (verifiedDirection == 'SELL' &&
+                  liveDecision == 'BUY');
+
+      if (oppositeSignal &&
+          confidence >=
+              minConfidence) {
+        entryStatus =
+            'SETUP_INVALIDATED';
+
+        headline =
+            'SETUP INVALIDATED';
+
+        reasons.add(
+          'The live AI signal now points '
+          'against the verified historical direction.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 2. Overextended RSI: wait for pullback
+      // -----------------------------------------------------
+
+      else if (
+          verifiedDirection == 'BUY' &&
+          rsi >= 70.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'BUY setup is historically verified, '
+          'but RSI is overextended at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      } else if (
+          verifiedDirection == 'SELL' &&
+          rsi <= 30.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'SELL setup is historically verified, '
+          'but RSI is oversold at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 3. Live direction + confidence + AI probability agree
+      // -----------------------------------------------------
+
+      else {
+        final directionMatches =
+            liveDecision ==
+                verifiedDirection;
+
+        final confidencePass =
+            confidence >=
+                minConfidence;
+
+        final probabilityPass =
+            verifiedDirection == 'BUY'
+                ? aiUp >= 0.60
+                : aiUp <= 0.40;
+
+        if (directionMatches &&
+            confidencePass &&
+            probabilityPass) {
+          entryStatus =
+              'ENTER_NOW';
+
+          headline =
+              'ENTRY CONFIRMED';
+
+          reasons.add(
+            'Historical validation and the '
+            'current live AI signal agree.',
+          );
+
+          reasons.add(
+            'Live confidence passed the '
+            '${(minConfidence * 100).toStringAsFixed(0)}% '
+            '$risk threshold.',
+          );
+        } else {
+          entryStatus =
+              'WAIT_CONFIRMATION';
+
+          headline =
+              'WAIT FOR CONFIRMATION';
+
+          if (!directionMatches) {
+            reasons.add(
+              'The live signal is $liveDecision '
+              'while the verified setup is '
+              '$verifiedDirection.',
+            );
+          }
+
+          if (!confidencePass) {
+            reasons.add(
+              'Live confidence '
+              '${(confidence * 100).toStringAsFixed(1)}% '
+              'is below the '
+              '${(minConfidence * 100).toStringAsFixed(0)}% '
+              '$risk threshold.',
+            );
+          }
+
+          if (!probabilityPass) {
+            reasons.add(
+              'The live AI probability has not '
+              'confirmed the verified direction strongly enough.',
+            );
+          }
+        }
+      }
+
+      final intervalMinutes =
+          _intervalMinutes(
+        verifiedTrade!['interval'],
+      );
+
+      final holdingCandles =
+          int.tryParse(
+                '${verifiedTrade!['holding_candles'] ?? 0}',
+              ) ??
+              0;
+
+      final historicalHoldingMinutes =
+          intervalMinutes *
+              holdingCandles;
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        sig = result;
+
+        liveEntryAssessment = {
+          'status':
+              entryStatus,
+
+          'headline':
+              headline,
+
+          'verified_direction':
+              verifiedDirection,
+
+          'live_decision':
+              liveDecision,
+
+          'confidence':
+              confidence,
+
+          'ai_up_probability':
+              aiUp,
+
+          'rsi':
+              rsi,
+
+          'price':
+              price,
+
+          'signal_reason':
+              result['reason'],
+
+          'reasons':
+              reasons,
+
+          'interval_minutes':
+              intervalMinutes,
+
+          'recheck_minutes':
+              intervalMinutes,
+
+          'historical_holding_minutes':
+              historicalHoldingMinutes,
+        };
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Live entry confirmation failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  Color liveEntryColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Colors.greenAccent;
+
+      case 'WAIT_PULLBACK':
+        return Colors.amberAccent;
+
+      case 'WAIT_CONFIRMATION':
+        return Colors.amberAccent;
+
+      case 'SETUP_INVALIDATED':
+        return Colors.redAccent;
+
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData liveEntryIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Icons.play_circle_fill;
+
+      case 'WAIT_PULLBACK':
+        return Icons.trending_down;
+
+      case 'WAIT_CONFIRMATION':
+        return Icons.hourglass_top;
+
+      case 'SETUP_INVALIDATED':
+        return Icons.block;
+
+      default:
+        return Icons.info_outline;
+    }
+  }
+
+
+  // =========================================================
+  // PAPER TRADE
+  // =========================================================
+
+  Future<void>
+      recordPaperTrade() async {
+    if (busy || sig == null) {
+      return;
+    }
+
+    final direction =
+        sig!['decision']
+            ?.toString();
+
+    if (direction != 'BUY' &&
+        direction != 'SELL') {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/paper-trades',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'direction':
+              direction!,
+          'confidence':
+              '${sig!['confidence']}',
+          'entry_price':
+              '${sig!['price']}',
+          'stake':
+              '${sig!['suggested_paper_stake']}',
+        },
+      );
+
+      final response =
+          await http
+              .post(uri)
+              .timeout(
+                const Duration(
+                  seconds: 30,
+                ),
+              );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          response.body,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
+        const SnackBar(
+          content:
+              Text(
+            'Paper trade recorded',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // INIT
+  // =========================================================
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    Future.microtask(
+      refreshSignal,
+    );
+
+    Future.microtask(
+      loadForwardStats,
+    );
+
+    Future.microtask(
+      loadAutoDashboard,
+    );
+
+    startAutoDashboardPolling();
+  }
+
+  @override
+  void didChangeAppLifecycleState(
+    AppLifecycleState state,
+  ) {
+    if (state == AppLifecycleState.resumed) {
+      // The backend/IG connection is authoritative. Whenever Android resumes
+      // the UI, immediately rebuild the phone view from server + IG truth.
+      startAutoDashboardPolling();
+      Future.microtask(loadOvernightDemoStatus);
+      Future.microtask(loadAutoDashboard);
+      Future.microtask(loadAiLearningStatus);
+      Future.microtask(loadSystemOverview);
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    watcherPollTimer?.cancel();
+    autoDashboardPollTimer?.cancel();
+    symbol.dispose();
+    balance.dispose();
+    copilotController.dispose();
+
+    super.dispose();
+  }
+
+  // =========================================================
+  // FORMATTERS
+  // =========================================================
+
+  Color decisionColor(
+    String value,
+  ) {
+    if (value == 'BUY') {
+      return Colors.greenAccent;
+    }
+
+    if (value == 'SELL') {
+      return Colors.redAccent;
+    }
+
+    return Colors.amberAccent;
+  }
+
+  Color statusColor(
+    String value,
+  ) {
+    switch (value) {
+      case 'VERIFIED':
+      case 'VERIFIED_TRADE':
+      case 'STRONG':
+        return Colors.greenAccent;
+
+      case 'NEAR_VERIFIED':
+        return Colors.amberAccent;
+
+      case 'WATCH':
+        return Colors.amberAccent;
+
+      case 'NETWORK_ERROR':
+        return Colors.orangeAccent;
+
+      case 'DIRECTION_MISMATCH':
+        return Colors.orangeAccent;
+
+      case 'REJECT':
+      case 'ERROR':
+        return Colors.redAccent;
+
+      default:
+        return Colors.white70;
+    }
+  }
+
+  String formatPrice(
+    dynamic value,
+  ) {
+    if (value is num) {
+      if (value >= 100) {
+        return value
+            .toDouble()
+            .toStringAsFixed(3);
+      }
+
+      return value
+          .toDouble()
+          .toStringAsFixed(5);
+    }
+
+    return '-';
+  }
+
+  String formatNumber(
+    dynamic value, {
+    int decimals = 2,
+  }) {
+    if (value is num) {
+      return value
+          .toDouble()
+          .toStringAsFixed(
+            decimals,
+          );
+    }
+
+    return '-';
+  }
+
+  String formatPercent(
+    dynamic value, {
+    int decimals = 1,
+  }) {
+    if (value is num) {
+      return (
+        value.toDouble() * 100
+      ).toStringAsFixed(
+        decimals,
+      );
+    }
+
+    return '0.0';
+  }
+
+  // =========================================================
+  // METRIC
+  // =========================================================
+
+  Widget metric(
+    String label,
+    String value,
+  ) {
+    return Expanded(
+      child: Card(
+        child: Padding(
+          padding:
+              const EdgeInsets.all(
+            14,
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style:
+                    const TextStyle(
+                  fontSize: 12,
+                ),
+              ),
+
+              const SizedBox(
+                height: 6,
+              ),
+
+              Text(
+                value,
+                textAlign:
+                    TextAlign.center,
+                style:
+                    const TextStyle(
+                  fontSize: 19,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // VALIDATION CARD
+  // =========================================================
+
+  Widget validationCard(
+    Map<String, dynamic> item,
+  ) {
+    final status =
+        item['deep_status']
+                ?.toString() ??
+            'UNKNOWN';
+
+    final verified =
+        item['verified'] == true;
+
+    final nearVerified =
+        item['near_verified'] == true ||
+            status == 'NEAR_VERIFIED';
+
+    final errorMessage =
+        item['error']
+            ?.toString();
+
+    final explanation =
+        item['explanation']
+            ?.toString();
+
+    final primaryReason =
+        item['primary_reason']
+            ?.toString();
+
+    return Card(
+      child: Padding(
+        padding:
+            const EdgeInsets.all(
+          16,
+        ),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '#${item['position']} '
+                    '${item['market']}',
+                    style:
+                        const TextStyle(
+                      fontSize: 20,
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Icon(
+                  verified
+                      ? Icons.verified
+                      : nearVerified
+                          ? Icons
+                              .verified_outlined
+                          : status ==
+                                  'NETWORK_ERROR'
+                              ? Icons.wifi_off
+                              : Icons
+                                  .cancel_outlined,
+                  color:
+                      verified
+                          ? Colors
+                              .greenAccent
+                          : statusColor(
+                              status,
+                            ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            Text(
+              status.replaceAll(
+                '_',
+                ' ',
+              ),
+              style:
+                  TextStyle(
+                fontSize: 16,
+                fontWeight:
+                    FontWeight.bold,
+                color:
+                    statusColor(
+                  status,
+                ),
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Deep score: '
+                    '${formatNumber(item['deep_score'])}',
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    'Reliable score: '
+                    '${formatNumber(item['reliability_adjusted_score'])}',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 4,
+            ),
+
+            Text(
+              'Historical: '
+              '${item['wins'] ?? '-'} wins / '
+              '${item['losses'] ?? '-'} losses '
+              '(${formatPercent(item['win_rate'])}% WR)',
+            ),
+
+            Text(
+              'Trades: ${item['trades'] ?? '-'}'
+              ' • PF ${formatNumber(item['profit_factor'])}'
+              ' • Max DD '
+              '${formatPercent(item['max_drawdown'])}%',
+            ),
+
+            Text(
+              'Reliability: '
+              '${formatNumber(item['sample_reliability_pct'], decimals: 1)}%'
+              ' • Conservative WR: '
+              '${formatNumber(item['wilson_lower_win_rate_pct'], decimals: 1)}%',
+            ),
+
+            if (item['interval'] != null ||
+                item['period'] != null)
+              Text(
+                'Setup: '
+                '${item['interval'] ?? '-'}'
+                ' • ${item['period'] ?? '-'}'
+                ' • Hold '
+                '${item['holding_candles'] ?? '-'} candles',
+              ),
+
+            if (primaryReason != null &&
+                primaryReason.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                'Reason: '
+                '${primaryReason.replaceAll('_', ' ')}',
+                style:
+                    TextStyle(
+                  color:
+                      statusColor(
+                    status,
+                  ),
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+
+            if (explanation != null &&
+                explanation.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                explanation,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+
+            if (errorMessage != null) ...[
+              const SizedBox(
+                height: 10,
+              ),
+              Text(
+                errorMessage,
+                style:
+                    const TextStyle(
+                  fontSize: 12,
+                  color:
+                      Colors.orangeAccent,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+
+  // =========================================================
+  // FAST MARKET CARD
+  // =========================================================
+
+  Widget fastMarketCard(
+    Map<String, dynamic> market,
+    int rank,
+  ) {
+    final marketName =
+        market['market']
+                ?.toString() ??
+            '-';
+
+    final direction =
+        market['direction']
+                ?.toString() ??
+            'WAIT';
+
+    final status =
+        market['status']
+                ?.toString() ??
+            '-';
+
+    final rawScore =
+        market['fast_score'] ??
+            0.0;
+
+    final score =
+        rawScore is num
+            ? rawScore.toDouble()
+            : 0.0;
+
+    final reasons =
+        (market['reasons']
+                    as List?) ??
+            const [];
+
+    return Card(
+      child: InkWell(
+        onTap:
+            busy
+                ? null
+                : () {
+                    analyseMarket(
+                      market,
+                    );
+                  },
+        child: Padding(
+          padding:
+              const EdgeInsets.all(
+            16,
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '#$rank $marketName',
+                      style:
+                          const TextStyle(
+                        fontSize: 20,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+
+                  Text(
+                    direction,
+                    style:
+                        TextStyle(
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          decisionColor(
+                        direction,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 8,
+              ),
+
+              Row(
+                children: [
+                  Text(
+                    status,
+                    style:
+                        TextStyle(
+                      color:
+                          statusColor(
+                        status,
+                      ),
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+
+                  const Spacer(),
+
+                  Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        'Smart Score '
+                        '${score.toStringAsFixed(1)}/100',
+                        style:
+                            const TextStyle(
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                      if (market[
+                              'quality_tier'] !=
+                          null)
+                        Text(
+                          'Tier '
+                          '${market['quality_tier']}'
+                          '${market['raw_fast_score'] != null ? ' • Raw ${formatNumber(market['raw_fast_score'], decimals: 1)}' : ''}',
+                          style:
+                              const TextStyle(
+                            fontSize: 11,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 8,
+              ),
+
+              Text(
+                'Price '
+                '${formatPrice(market['price'])}'
+                ' • RSI '
+                '${formatNumber(market['rsi'])}',
+              ),
+
+              Text(
+                '${market['interval'] ?? '-'}'
+                ' • '
+                '${market['period'] ?? '-'}',
+              ),
+
+              if (reasons.isNotEmpty) ...[
+                const SizedBox(
+                  height: 8,
+                ),
+
+                Text(
+                  reasons
+                      .take(3)
+                      .join(' • '),
+                  style:
+                      const TextStyle(
+                    fontSize: 12,
+                    color:
+                        Colors.white70,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // BUILD
+  // =========================================================
+
+  @override
+  Widget build(
+    BuildContext context,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+
+    final liveDecision =
+        sig?['decision']?.toString().toUpperCase() ?? 'WAIT';
+    final confidence = formatPercent(sig?['confidence']);
+    final aiUp = formatPercent(sig?['combined_up_probability']);
+
+    final dashboard = autoDashboard ?? <String, dynamic>{};
+    final manager = dashboard['manager'] is Map
+        ? Map<String, dynamic>.from(dashboard['manager'] as Map)
+        : <String, dynamic>{};
+    final summary = dashboard['summary'] is Map
+        ? Map<String, dynamic>.from(dashboard['summary'] as Map)
+        : <String, dynamic>{};
+
+    final autoOn = dashboard['auto_mode'] == true ||
+        manager['enabled'] == true ||
+        systemOverview?['auto_manager_enabled'] == true;
+
+    final stage = summary['current_stage']?.toString() ??
+        manager['progress_stage']?.toString() ??
+        'IDLE';
+    final stageMessage = summary['current_message']?.toString() ??
+        manager['progress_message']?.toString() ??
+        'Waiting for next automatic cycle';
+    final progress = double.tryParse(
+          '${summary['progress_percent'] ?? manager['progress_percent'] ?? 0}',
+        ) ??
+        0.0;
+
+    final activeWatchers = int.tryParse(
+          '${summary['active_watchers'] ?? serverWatchers.length}',
+        ) ??
+        serverWatchers.length;
+    final targetWatchers = int.tryParse(
+          '${summary['target_active_watchers'] ?? 6}',
+        ) ??
+        6;
+    final openTrades = int.tryParse(
+          '${summary['open_trades'] ?? paperTrades.where((t) => t['status'] == 'OPEN').length}',
+        ) ??
+        0;
+
+    final forwardTrades = forwardStats?['forward_trades'] ??
+        forwardStats?['trades'] ??
+        0;
+    final paperBalance = forwardStats?['paper_balance'] ?? balance.text.trim();
+    final totalPnl = forwardStats?['total_pnl'] ??
+        forwardStats?['pnl'] ??
+        0;
+    final forwardWr = forwardStats?['win_rate_pct'] ??
+        forwardStats?['forward_win_rate_pct'] ??
+        0;
+
+    final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
+    final ranking = (fastScan?['ranking'] as List?) ?? const [];
+
+    Color sideColor(String value) {
+      final v = value.toUpperCase();
+      if (v == 'BUY' || v == 'WIN' || v == 'OPEN') {
+        return const Color(0xFF67F0C1);
+      }
+      if (v == 'SELL' || v == 'LOSS') {
+        return const Color(0xFFFF6B75);
+      }
+      return const Color(0xFFFFD75E);
+    }
+
+    Widget glassCard({
+      required Widget child,
+      EdgeInsets padding = const EdgeInsets.all(16),
+      Color? glow,
+    }) {
+      return Container(
+        padding: padding,
+        decoration: BoxDecoration(
+          color: const Color(0xFF0E1A24).withValues(alpha: .94),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: glow?.withValues(alpha: .28) ?? const Color(0xFF18313C),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: (glow ?? Colors.black).withValues(alpha: .08),
+              blurRadius: 26,
+              offset: const Offset(0, 12),
+            ),
+          ],
+        ),
+        child: child,
+      );
+    }
+
+    Widget sectionTitle(String title, {String? subtitle}) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .2,
+                    ),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget statTile(
+      String label,
+      String value,
+      IconData icon, {
+      Color? valueColor,
+    }) {
+      return Expanded(
+        child: glassCard(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: cs.primary, size: 20),
+              const SizedBox(height: 14),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                  color: valueColor ?? Colors.white,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget pill(
+      String text, {
+      IconData? icon,
+      Color? color,
+    }) {
+      final c = color ?? cs.primary;
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: c.withValues(alpha: .20)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 13, color: c),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              text,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                color: c,
+                letterSpacing: .25,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget watcherCard(Map<String, dynamic> w) {
+      final market = w['market']?.toString() ?? w['symbol']?.toString() ?? 'MARKET';
+      final direction = w['direction']?.toString().toUpperCase() ?? 'WAIT';
+      final status = w['status']?.toString().toUpperCase() ?? 'WATCHING';
+      final conf = formatPercent(w['confidence']);
+      final reason = w['last_reason']?.toString() ?? watcherLifecycleSubtitle(w);
+      return glassCard(
+        glow: sideColor(direction),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: sideColor(direction).withValues(alpha: .12),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Icon(Icons.currency_exchange_rounded, color: sideColor(direction)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          market,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        direction,
+                        style: TextStyle(
+                          color: sideColor(direction),
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      pill(status, color: watcherStatusColor(status)),
+                      const SizedBox(width: 7),
+                      if (conf != '0.0')
+                        Text(
+                          '$conf%',
+                          style: const TextStyle(
+                            color: Colors.white60,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    reason,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget dashboardPage() {
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(26),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  cs.primary.withValues(alpha: .22),
+                  const Color(0xFF0D2630),
+                  const Color(0xFF0B1620),
+                ],
+              ),
+              border: Border.all(color: cs.primary.withValues(alpha: .25)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    pill(
+                      autoOn ? 'AUTO MANAGER ON' : 'AUTO MANAGER OFF',
+                      icon: autoOn ? Icons.bolt_rounded : Icons.pause_rounded,
+                      color: autoOn ? cs.primary : const Color(0xFFFFD75E),
+                    ),
+                    const Spacer(),
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: systemOverview != null || autoDashboard != null
+                            ? const Color(0xFF67F0C1)
+                            : const Color(0xFFFFD75E),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'V6.5',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  stage.replaceAll('_', ' '),
+                  style: const TextStyle(
+                    fontSize: 27,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .2,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  stageMessage,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(99),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0, 100) / 100,
+                    minHeight: 7,
+                    backgroundColor: Colors.white10,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                      'Next scan ${formatEpochTime(summary['next_scan_at'])}',
+                      style: const TextStyle(color: Colors.white54, fontSize: 11),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${progress.round()}%',
+                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              statTile('Paper balance', '$paperBalance', Icons.account_balance_wallet_outlined),
+              const SizedBox(width: 10),
+              statTile('Open trades', '$openTrades / 3', Icons.swap_horiz_rounded),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile('Watchers', '$activeWatchers / $targetWatchers', Icons.visibility_outlined),
+              const SizedBox(width: 10),
+              statTile('Forward trades', '$forwardTrades', Icons.show_chart_rounded),
+            ],
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Live intelligence', subtitle: 'Current signal for ${symbol.text.trim()}'),
+          glassCard(
+            glow: sideColor(liveDecision),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      liveDecision,
+                      style: TextStyle(
+                        fontSize: 34,
+                        fontWeight: FontWeight.w900,
+                        color: sideColor(liveDecision),
+                      ),
+                    ),
+                    const Spacer(),
+                    pill(risk.toUpperCase(), icon: Icons.shield_outlined),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  sig?['reason']?.toString() ?? 'Waiting for signal...',
+                  style: const TextStyle(color: Colors.white60, height: 1.35),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(child: _midnightValue('Quant', '$confidence%')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _midnightValue('AI up', '$aiUp%')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _midnightValue('RSI', formatNumber(sig?['rsi']))),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: busy ? null : scanAllMarkets,
+                  icon: const Icon(Icons.radar_rounded),
+                  label: const Text('Scan markets'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: busy ? null : findVerifiedTrade,
+                  icon: const Icon(Icons.verified_rounded),
+                  label: const Text('Find setup'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Active watchers', subtitle: 'Verified setups under live observation'),
+          if (serverWatchers.isEmpty)
+            glassCard(
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.visibility_off_outlined, color: Colors.white38),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'No watcher snapshot loaded yet. Auto Manager will populate this automatically.',
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            ...serverWatchers.take(4).map((w) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: watcherCard(w),
+                )),
+          const SizedBox(height: 10),
+          sectionTitle('V6.5 learning policy'),
+          glassCard(
+            child: const Column(
+              children: [
+                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Verified + live direction agrees'),
+                Divider(height: 24),
+                _MidnightRuleRow('AI PAPER path', '≥ 40%', 'AI approves + direction agrees'),
+                Divider(height: 24),
+                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
+              ],
+            ),
+          ),
+          if (error != null) ...[
+            const SizedBox(height: 14),
+            glassCard(
+              glow: const Color(0xFFFF6B75),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.error_outline_rounded, color: Color(0xFFFF6B75)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      error!,
+                      style: const TextStyle(color: Color(0xFFFF9098), fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
+      );
     }
 
-
-@app.post("/v68/ask")
-def v68_ask(request: V68CopilotRequest):
-    question = (request.question or "").strip()
-
-    if not question:
-        raise HTTPException(
-            status_code=400,
-            detail="question is required",
-        )
-
-    if not COPILOT.configured():
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI is not configured on the backend.",
-        )
-
-    try:
-        return COPILOT.analyze(
-            question=question,
-            context=_v68_copilot_context(),
-            mode=request.mode,
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-@app.get("/v68/overnight-review")
-def v68_overnight_review():
-    if not COPILOT.configured():
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI is not configured on the backend.",
-        )
-
-    question = (
-        "Review the genuine PAPER trading performance in this evidence "
-        "for the most recent overnight session. Separate settled trades "
-        "from open/watch-only setups. Include wins, losses, WR, PF and "
-        "P&L where supported. Identify repeated loss patterns and say "
-        "whether the sample is large enough to justify changing the strategy."
-    )
-
-    try:
-        return COPILOT.analyze(
-            question=question,
-            context=_v68_copilot_context(),
-            mode="OVERNIGHT_REVIEW",
-        )
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        )
-
-
-# ============================================================
-# V6.6 INTELLIGENT FORWARD ENGINE
-# ============================================================
-
-@app.get("/v66/status")
-def v66_status():
-    return {
-        "engine": V66_INTELLIGENCE.status(),
-        "adaptive_confidence":
-            adaptive_confidence_gate.snapshot(),
-        "live_execution": False,
-    }
-
-
-@app.get("/v66/forward-intelligence")
-def v66_forward_intelligence():
-    watchers = V53_WATCHER_ENGINE.list()
-
-    return V66_INTELLIGENCE.forward_performance(
-        watchers
-    )
-
-
-@app.get("/v66/correlation")
-def v66_correlation():
-    matrix = _v66_fx_correlation_matrix()
-
-    return {
-        "version":
-            "V6.6_FX_CORRELATION",
-        "threshold_abs":
-            V66_INTELLIGENCE.high_correlation_abs,
-        "matrix":
-            matrix,
-        "live_execution":
-            False,
-    }
-
-
-@app.get("/v66/portfolio")
-def v66_portfolio():
-    watchers = V53_WATCHER_ENGINE.list()
-
-    open_watchers = [
-        item
-        for item in watchers
-        if str(
-            item.get("status")
-            or ""
-        ).upper()
-        == "OPEN"
-    ]
-
-    exposure = {}
-
-    for item in open_watchers:
-        signed = (
-            V66_INTELLIGENCE
-            .currency_signed_exposure(
-                item.get("symbol"),
-                item.get("direction"),
+    Widget marketsPage() {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          sectionTitle('Market scanner', subtitle: 'Fast ranking across the configured FX universe'),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: busy ? null : scanAllMarkets,
+                  icon: scanningMarkets
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.radar_rounded),
+                  label: Text(scanningMarkets ? 'Scanning...' : 'Fast scan'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: busy ? null : findVerifiedTrade,
+                  icon: const Icon(Icons.verified_rounded),
+                  label: const Text('Deep verify'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (topCandidates.isEmpty)
+            glassCard(
+              child: const Text(
+                'Run a market scan to populate ranked opportunities.',
+                style: TextStyle(color: Colors.white54),
+              ),
             )
-        )
+          else ...[
+            sectionTitle('Top opportunities'),
+            ...topCandidates.take(6).whereType<Map>().map((raw) {
+              final item = Map<String, dynamic>.from(raw);
+              final market = item['market']?.toString() ?? item['symbol']?.toString() ?? '-';
+              final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
+              final score = item['smart_fast_score'] ?? item['fast_score'] ?? item['score'] ?? '-';
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(22),
+                  onTap: () => analyseMarket(item),
+                  child: glassCard(
+                    glow: sideColor(direction),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(market, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+                              const SizedBox(height: 4),
+                              Text(
+                                item['reason']?.toString() ?? item['status']?.toString() ?? 'Ranked opportunity',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: Colors.white54, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(direction, style: TextStyle(color: sideColor(direction), fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text('$score', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+          if (ranking.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            sectionTitle('Full ranking'),
+            glassCard(
+              child: Column(
+                children: ranking.take(20).whereType<Map>().toList().asMap().entries.map((entry) {
+                  final item = Map<String, dynamic>.from(entry.value);
+                  final market = item['market']?.toString() ?? item['symbol']?.toString() ?? '-';
+                  final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
+                  final score = item['smart_fast_score'] ?? item['score'] ?? item['fast_score'] ?? '-';
+                  return Column(
+                    children: [
+                      if (entry.key > 0) const Divider(height: 18),
+                      Row(
+                        children: [
+                          SizedBox(width: 30, child: Text('#${entry.key + 1}', style: const TextStyle(color: Colors.white38))),
+                          Expanded(child: Text(market, style: const TextStyle(fontWeight: FontWeight.w800))),
+                          Text(direction, style: TextStyle(color: sideColor(direction), fontWeight: FontWeight.w800)),
+                          const SizedBox(width: 12),
+                          SizedBox(width: 48, child: Text('$score', textAlign: TextAlign.right, style: const TextStyle(color: Colors.white60))),
+                        ],
+                      ),
+                    ],
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
+          if (validationHistory.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            sectionTitle('Deep validation history'),
+            ...validationHistory.take(8).map((item) {
+              final ok = item['verified'] == true;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: glassCard(
+                  glow: ok ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
+                  child: Row(
+                    children: [
+                      Icon(ok ? Icons.verified_rounded : Icons.manage_search_rounded, color: ok ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(item['market']?.toString() ?? '-', style: const TextStyle(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 3),
+                            Text(item['deep_status']?.toString() ?? '-', style: const TextStyle(color: Colors.white54, fontSize: 11)),
+                          ],
+                        ),
+                      ),
+                      if (item['win_rate'] != null)
+                        Text('${formatPercent(item['win_rate'])}%', style: const TextStyle(fontWeight: FontWeight.w800)),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ],
+        ],
+      );
+    }
 
-        for currency, value in signed.items():
-            exposure[
-                currency
-            ] = (
-                exposure.get(
-                    currency,
-                    0,
+    Widget tradesPage() {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          sectionTitle('Trade performance', subtitle: 'Forward PAPER + reconciled IG DEMO broker journal'),
+          Row(
+            children: [
+              statTile('Forward trades', '$forwardTrades', Icons.receipt_long_outlined),
+              const SizedBox(width: 10),
+              statTile('Forward WR', '${formatPercent(forwardWr)}%', Icons.percent_rounded),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile('Total P&L', formatMoney(totalPnl), Icons.payments_outlined, valueColor: (double.tryParse('$totalPnl') ?? 0) >= 0 ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75)),
+              const SizedBox(width: 10),
+              statTile('Balance', '$paperBalance', Icons.account_balance_wallet_outlined),
+            ],
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Trade journal'),
+          if (paperTrades.isEmpty)
+            glassCard(
+              child: const Column(
+                children: [
+                  Icon(Icons.hourglass_empty_rounded, size: 38, color: Colors.white30),
+                  SizedBox(height: 10),
+                  Text('No reconciled trades loaded yet.', style: TextStyle(fontWeight: FontWeight.w800)),
+                  SizedBox(height: 4),
+                  Text('IG DEMO positions and PAPER learning trades will reappear here after server reconciliation.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)),
+                ],
+              ),
+            )
+          else
+            ...paperTrades.take(30).map((trade) {
+              final status = trade['status']?.toString().toUpperCase() ?? '-';
+              final market = trade['market']?.toString() ?? trade['symbol']?.toString() ?? '-';
+              final direction = trade['direction']?.toString().toUpperCase() ?? '-';
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: glassCard(
+                  glow: paperTradeColor(status),
+                  child: Row(
+                    children: [
+                      Icon(paperTradeIcon(status), color: paperTradeColor(status)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('$market  $direction', style: const TextStyle(fontWeight: FontWeight.w900)),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${paperTradeHeadline(status)} • ${trade['entry_class'] ?? trade['entry_path'] ?? '-'}',
+                              style: const TextStyle(color: Colors.white54, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Text(formatMoney(trade['pnl']), style: TextStyle(color: paperTradeColor(status), fontWeight: FontWeight.w900)),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: loadForwardStats,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Refresh performance'),
+          ),
+        ],
+      );
+    }
+
+    Widget aiPage() {
+      final learning =
+          aiLearningSnapshot ??
+              <String, dynamic>{};
+
+      final mode =
+          aiLearningStatus?['mode']
+                  ?.toString() ??
+              'DIRECT_AI40_SHADOW_PROMOTION_V662';
+
+      final aiFloor =
+          aiLearningStatus?[
+                  'ai_min_confidence_pct'] ??
+              40.0;
+
+      final engineEnabled =
+          learning['enabled'] == true;
+
+      final liveExecution =
+          learning['live_execution'] == true ||
+              aiLearningStatus?[
+                      'broker_execution_enabled'] ==
+                  true;
+
+      final activeWatchers =
+          learning['active_watchers'] ?? 0;
+
+      final openTrades =
+          learning['open_trades'] ?? 0;
+
+      final learningBalance =
+          learning['paper_balance'] ?? 10000;
+
+      final overnight =
+          overnightDemoStatus ??
+              <String, dynamic>{};
+
+      final overnightSummary =
+          overnight['summary'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['summary'],
                 )
-                + value
-            )
+              : <String, dynamic>{};
 
-    return {
-        "version":
-            "V6.6_PORTFOLIO_INTELLIGENCE",
-        "open_trades":
-            len(open_watchers),
-        "currency_exposure":
-            exposure,
-        "max_currency_exposure":
-            V66_INTELLIGENCE.max_currency_exposure,
-        "high_correlation_abs":
-            V66_INTELLIGENCE.high_correlation_abs,
-        "live_execution":
-            False,
+      final overnightState =
+          overnight['status']
+                  ?.toString()
+                  .toUpperCase() ??
+              'PAUSED';
+
+      final overnightActive =
+          overnightState == 'ACTIVE';
+
+      final overnightDraining =
+          overnightState == 'DRAINING';
+
+      final overnightComplete =
+          overnightState ==
+              'PHASE_COMPLETE';
+
+      final phaseAccepted =
+          overnightSummary[
+                  'phase_accepted_trades'] ??
+              0;
+
+      final phaseTarget =
+          overnightSummary['phase_target'] ??
+              10;
+
+      final phaseRemaining =
+          overnightSummary[
+                  'phase_remaining'] ??
+              phaseTarget;
+
+      final brokerPositions =
+          overnightSummary[
+                  'open_broker_positions'] ??
+              0;
+
+      final maxBrokerPositions =
+          overnightSummary[
+                  'max_broker_positions'] ??
+              3;
+
+      final overnightIg =
+          overnight['ig_demo'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['ig_demo'],
+                )
+              : <String, dynamic>{};
+
+      final brokerSyncState =
+          overnightSummary[
+                  'broker_sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              overnightIg['sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              'STALE';
+
+      final brokerSyncAge =
+          overnightSummary[
+                  'broker_sync_age_seconds'] ??
+              overnightIg[
+                  'broker_sync_age_seconds'];
+
+      final brokerPositionRows =
+          overnight['broker_positions'] is List
+              ? (overnight[
+                          'broker_positions']
+                      as List)
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList()
+              : <Map<String, dynamic>>[];
+
+      final overnightWins =
+          overnightSummary['wins'] ?? 0;
+
+      final overnightLosses =
+          overnightSummary['losses'] ?? 0;
+
+      final overnightWinRate =
+          overnightSummary[
+                  'win_rate_pct'] ??
+              0.0;
+
+      final aiTrades = paperTrades
+          .where(
+            (trade) =>
+                trade['source']?.toString() ==
+                    'V66_LEARNING_ENGINE',
+          )
+          .toList();
+
+      Map<String, dynamic>? openAiTrade;
+
+      for (final trade in aiTrades) {
+        if (trade['status']
+                ?.toString()
+                .toUpperCase() ==
+            'OPEN') {
+          openAiTrade = trade;
+          break;
+        }
+      }
+
+      Widget learningTradeCard(
+        Map<String, dynamic> trade,
+      ) {
+        final status =
+            trade['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final market =
+            trade['market']?.toString() ??
+                trade['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            trade['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final entryClass =
+            trade['entry_path']?.toString() ??
+                trade['entry_class']?.toString() ??
+                '-';
+
+        final aiConfidence =
+            trade['model_ai_confidence'];
+
+        final quant =
+            trade['entry_confidence'] ??
+                trade['quant_confidence'];
+
+        final dueAt =
+            trade['settlement_due_at'] ??
+                trade['scheduled_close_at'];
+
+        return glassCard(
+          glow: paperTradeColor(status),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    paperTradeIcon(status),
+                    color:
+                        paperTradeColor(status),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    entryClass,
+                    color: const Color(
+                      0xFF65E6D3,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  statTile(
+                    'Model AI',
+                    aiConfidence is num
+                        ? '${formatPercent(aiConfidence)}%'
+                        : '-',
+                    Icons.psychology_alt_rounded,
+                    valueColor:
+                        Colors.greenAccent,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Quant',
+                    quant is num
+                        ? '${formatPercent(quant)}%'
+                        : '-',
+                    Icons.analytics_outlined,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'Stake',
+                    formatMoney(
+                      trade['stake'],
+                    ),
+                    Icons.payments_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    status == 'OPEN'
+                        ? 'Time left'
+                        : 'P&L',
+                    status == 'OPEN'
+                        ? formatEpochCountdown(
+                            dueAt,
+                          )
+                        : formatMoney(
+                            trade['pnl'],
+                          ),
+                    status == 'OPEN'
+                        ? Icons.timer_outlined
+                        : Icons
+                            .account_balance_wallet_outlined,
+                    valueColor:
+                        status == 'WIN'
+                            ? Colors.greenAccent
+                            : status == 'LOSS'
+                                ? Colors.redAccent
+                                : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
+                '${trade['exit_price'] != null ? '  •  Exit ${formatNumber(trade['exit_price'], decimals: 5)}' : ''}',
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                status == 'OPEN'
+                    ? 'Autonomous PAPER trade is being monitored by the backend.'
+                    : 'Settled PAPER outcome: ${trade['result'] ?? status}.',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      Widget learningWatcherCard(
+        Map<String, dynamic> watcher,
+      ) {
+        final candidate =
+            watcher['candidate'] is Map
+                ? Map<String, dynamic>.from(
+                    watcher['candidate'],
+                  )
+                : <String, dynamic>{};
+
+        final market =
+            watcher['market']?.toString() ??
+                watcher['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            watcher['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final status =
+            watcher['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final deepStatus =
+            watcher['deep_status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final quality =
+            candidate['quality_tier']
+                    ?.toString() ??
+                '-';
+
+        final fastScore =
+            candidate['smart_fast_score'];
+
+        final quant =
+            watcher['last_quant_confidence'];
+
+        return glassCard(
+          glow: status == 'SHADOW_WATCH'
+              ? Colors.amberAccent
+              : cs.primary,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    status,
+                    color:
+                        status == 'SHADOW_WATCH'
+                            ? Colors.amberAccent
+                            : cs.primary,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  pill(
+                    'Deep $deepStatus',
+                    icon:
+                        Icons.fact_check_outlined,
+                  ),
+                  pill(
+                    'Quality $quality',
+                    icon: Icons.grade_outlined,
+                  ),
+                  if (fastScore is num)
+                    pill(
+                      'Fast ${formatNumber(fastScore, decimals: 0)}',
+                      icon:
+                          Icons.speed_rounded,
+                    ),
+                  if (quant is num)
+                    pill(
+                      'Quant ${formatPercent(quant)}%',
+                      icon: Icons
+                          .analytics_outlined,
+                    ),
+                ],
+              ),
+              if (watcher['last_error'] !=
+                  null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  watcher['last_error']
+                      .toString(),
+                  maxLines: 3,
+                  overflow:
+                      TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      }
+
+      Widget overnightDemoCard() {
+        Color stateColor;
+        IconData stateIcon;
+
+        if (overnightComplete) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.flag_circle_rounded;
+        } else if (overnightActive) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.nightlight_round;
+        } else if (overnightDraining) {
+          stateColor = Colors.amberAccent;
+          stateIcon = Icons.hourglass_bottom_rounded;
+        } else {
+          stateColor = Colors.white54;
+          stateIcon = Icons.bedtime_outlined;
+        }
+
+        final manager =
+            overnight['manager'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['manager'],
+                  )
+                : <String, dynamic>{};
+
+        final progressMessage =
+            manager['progress_message']
+                    ?.toString() ??
+                'Waiting for the next scan';
+
+        final currentTrade =
+            overnight['current_trade'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['current_trade'],
+                  )
+                : null;
+
+        return glassCard(
+          glow: stateColor,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: stateColor.withValues(
+                        alpha: .10,
+                      ),
+                      borderRadius:
+                          BorderRadius.circular(15),
+                    ),
+                    child: Icon(
+                      stateIcon,
+                      color: stateColor,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'OVERNIGHT IG DEMO',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          overnightActive
+                              ? 'Server-side autonomous demo trading is active'
+                              : overnightDraining
+                                  ? 'New entries stopped • current demo trade is settling'
+                                  : overnightComplete
+                                      ? 'Phase target reached • no more demo entries required'
+                                      : 'Ready for a server-side overnight run',
+                          style: const TextStyle(
+                            color:
+                                Colors.white60,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  pill(
+                    overnightState,
+                    color: stateColor,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  statTile(
+                    'Phase',
+                    '$phaseAccepted / $phaseTarget',
+                    Icons.flag_outlined,
+                    valueColor:
+                        overnightComplete
+                            ? Colors.greenAccent
+                            : Colors.white,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'IG positions',
+                    '$brokerPositions / $maxBrokerPositions',
+                    Icons.swap_horiz_rounded,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'W / L',
+                    '$overnightWins / $overnightLosses',
+                    Icons.fact_check_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Win rate',
+                    '${formatNumber(overnightWinRate, decimals: 1)}%',
+                    Icons.insights_rounded,
+                    valueColor:
+                        overnightWins > 0
+                            ? Colors.greenAccent
+                            : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: (
+                    brokerSyncState == 'SYNCED'
+                        ? Colors.greenAccent
+                        : brokerSyncState == 'ERROR'
+                            ? Colors.redAccent
+                            : Colors.amberAccent
+                  ).withValues(alpha: .06),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color: (
+                      brokerSyncState == 'SYNCED'
+                          ? Colors.greenAccent
+                          : brokerSyncState == 'ERROR'
+                              ? Colors.redAccent
+                              : Colors.amberAccent
+                    ).withValues(alpha: .20),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      brokerSyncState == 'SYNCED'
+                          ? Icons.sync_rounded
+                          : brokerSyncState == 'ERROR'
+                              ? Icons.sync_problem_rounded
+                              : Icons.sync_lock_rounded,
+                      color:
+                          brokerSyncState == 'SYNCED'
+                              ? Colors.greenAccent
+                              : brokerSyncState == 'ERROR'
+                                  ? Colors.redAccent
+                                  : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Backend ↔ IG DEMO: $brokerSyncState',
+                            style: const TextStyle(
+                              fontWeight:
+                                  FontWeight.w900,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            brokerSyncAge is num
+                                ? 'Last broker reconciliation ${formatCountdownSeconds(brokerSyncAge)} ago • $brokerPositions open position(s)'
+                                : 'Waiting for broker reconciliation • $brokerPositions open position(s)',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white54,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (brokerPositionRows.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                ...brokerPositionRows
+                    .take(3)
+                    .map(
+                      (position) => Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          bottom: 8,
+                        ),
+                        child: Container(
+                          width:
+                              double.infinity,
+                          padding:
+                              const EdgeInsets
+                                  .symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration:
+                              BoxDecoration(
+                            color: Colors.white
+                                .withValues(
+                              alpha: .025,
+                            ),
+                            borderRadius:
+                                BorderRadius
+                                    .circular(
+                              12,
+                            ),
+                            border: Border.all(
+                              color: Colors.white
+                                  .withValues(
+                                alpha: .05,
+                              ),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons
+                                    .account_balance_rounded,
+                                size: 17,
+                                color: Color(
+                                  0xFF65E6D3,
+                                ),
+                              ),
+                              const SizedBox(
+                                width: 9,
+                              ),
+                              Expanded(
+                                child: Text(
+                                  '${position['symbol'] ?? position['market'] ?? 'IG'} '
+                                  '${position['direction'] ?? ''}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight
+                                            .w800,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${position['size'] ?? '-'} @ ${formatNumber(position['entry_level'], decimals: 5)}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white60,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+              ],
+              const SizedBox(height: 4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(
+                    alpha: .035,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color:
+                        Colors.white.withValues(
+                      alpha: .05,
+                    ),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Scanner: ${overnight['scanner_universe'] ?? 'CURATED_LEARNING_FX'}',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w700,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      progressMessage,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Remaining Phase-1 entries: $phaseRemaining • AI floor ${formatNumber(overnight['ai_min_confidence_pct'] ?? aiFloor, decimals: 0)}%',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (currentTrade != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Current: ${currentTrade['symbol'] ?? currentTrade['market'] ?? '-'} '
+                  '${currentTrade['direction'] ?? ''} • '
+                  'closes in ${formatEpochCountdown(currentTrade['scheduled_close_at'] ?? currentTrade['settlement_due_at'])}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: overnightDemoBusy ||
+                              overnightComplete
+                          ? null
+                          : overnightActive ||
+                                  overnightDraining
+                              ? stopOvernightDemo
+                              : startOvernightDemo,
+                      icon: overnightDemoBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : Icon(
+                              overnightActive ||
+                                      overnightDraining
+                                  ? Icons.stop_circle_outlined
+                                  : Icons.play_circle_fill_rounded,
+                            ),
+                      label: Text(
+                        overnightDemoBusy
+                            ? 'Please wait...'
+                            : overnightActive ||
+                                    overnightDraining
+                                ? 'Stop new overnight entries'
+                                : 'START OVERNIGHT DEMO',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip:
+                        'Refresh overnight status',
+                    onPressed:
+                        loadOvernightDemoStatus,
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'IG DEMO ONLY • Live-money execution remains disabled. '
+                'IG is the broker source of truth; the app re-syncs from the backend whenever it opens or resumes.',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 10,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return ListView(
+        padding:
+            const EdgeInsets.fromLTRB(
+          16,
+          4,
+          16,
+          120,
+        ),
+        children: [
+          sectionTitle(
+            'Overnight Demo Mode',
+            subtitle:
+                'One-tap server-side IG DEMO learning • phone can be locked or closed',
+          ),
+          overnightDemoCard(),
+          const SizedBox(height: 22),
+          sectionTitle(
+            'Autonomous AI PAPER Learning',
+            subtitle:
+                'AI40 shadow promotion • monitoring only on your phone',
+          ),
+          glassCard(
+            glow: engineEnabled
+                ? Colors.greenAccent
+                : Colors.amberAccent,
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      engineEnabled
+                          ? Icons
+                              .smart_toy_rounded
+                          : Icons
+                              .pause_circle_outline,
+                      color: engineEnabled
+                          ? Colors.greenAccent
+                          : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        engineEnabled
+                            ? 'AI learning is ACTIVE'
+                            : 'AI learning is PAUSED',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    pill(
+                      liveExecution
+                          ? 'LIVE'
+                          : 'PAPER ONLY',
+                      color: liveExecution
+                          ? Colors.redAccent
+                          : Colors.greenAccent,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  mode,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight:
+                        FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'AI directional floor: ${formatNumber(aiFloor, decimals: 0)}% • N30 disabled for this experiment',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    statTile(
+                      'Watchers',
+                      '$activeWatchers',
+                      Icons.visibility_outlined,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'Open trades',
+                      '$openTrades',
+                      Icons
+                          .receipt_long_outlined,
+                      valueColor:
+                          (openTrades is num &&
+                                  openTrades > 0)
+                              ? Colors
+                                  .lightBlueAccent
+                              : Colors.white,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    statTile(
+                      'Paper balance',
+                      formatMoney(
+                        learningBalance,
+                      ),
+                      Icons
+                          .account_balance_wallet_outlined,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'AI40 floor',
+                      '${formatNumber(aiFloor, decimals: 0)}%',
+                      Icons
+                          .verified_outlined,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child:
+                          FilledButton.icon(
+                        onPressed:
+                            aiLearningBusy
+                                ? null
+                                : runAiLearningNow,
+                        icon:
+                            aiLearningBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child:
+                                        CircularProgressIndicator(
+                                      strokeWidth:
+                                          2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons
+                                        .auto_awesome_rounded,
+                                  ),
+                        label: Text(
+                          aiLearningBusy
+                              ? 'AI evaluating...'
+                              : 'Run AI cycle now',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip:
+                          'Refresh AI learning',
+                      onPressed: () async {
+                        await loadAutoDashboard();
+                        await loadAiLearningStatus();
+                      },
+                      icon: const Icon(
+                        Icons.refresh_rounded,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (openAiTrade != null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Current AI PAPER trade',
+              subtitle:
+                  'One open learning trade maximum',
+            ),
+            learningTradeCard(
+              openAiTrade,
+            ),
+          ] else if (aiTrades.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Latest AI PAPER outcome',
+            ),
+            learningTradeCard(
+              aiTrades.first,
+            ),
+          ],
+          if (aiLearningLastRun !=
+              null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Last AI decision',
+            ),
+            glassCard(
+              glow: aiLearningLastRun![
+                          'status']
+                      ?.toString() ==
+                  'PAPER_TRADE_OPENED'
+                  ? Colors.greenAccent
+                  : Colors.amberAccent,
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    aiLearningLastRun![
+                                'status']
+                            ?.toString() ??
+                        '-',
+                    style: const TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 15,
+                    ),
+                  ),
+                  if (aiLearningLastRun![
+                          'selected']
+                      is Map) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Builder(
+                      builder: (_) {
+                        final selected =
+                            Map<String,
+                                dynamic>.from(
+                          aiLearningLastRun![
+                              'selected'],
+                        );
+
+                        return Text(
+                          '${selected['market'] ?? selected['symbol'] ?? '-'} '
+                          '${selected['candidate_direction'] ?? ''} • '
+                          'AI ${selected['model_ai_directional_confidence_pct'] ?? '-'}% • '
+                          'Quant ${selected['quant_confidence_pct'] ?? '-'}%',
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.white70,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                  if (aiLearningLastRun![
+                          'error'] !=
+                      null) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Text(
+                      aiLearningLastRun![
+                              'error']
+                          .toString(),
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.redAccent,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'AI learning watchers',
+            subtitle:
+                'A/A+ shadow candidates are isolated from normal production entries',
+          ),
+          if (aiLearningWatchers.isEmpty)
+            glassCard(
+              child: const Text(
+                'No AI-learning watchers yet. Auto Manager will supply new candidates automatically.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          else
+            ...aiLearningWatchers
+                .take(6)
+                .map(
+                  (watcher) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child:
+                        learningWatcherCard(
+                      watcher,
+                    ),
+                  ),
+                ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Jasong AI Copilot',
+            subtitle:
+                'Advisory analysis of PAPER performance and risk evidence',
+          ),
+          glassCard(
+            glow: cs.secondary,
+            child: Column(
+              children: [
+                TextField(
+                  controller:
+                      copilotController,
+                  minLines: 3,
+                  maxLines: 5,
+                  decoration:
+                      const InputDecoration(
+                    hintText:
+                        'Ask Jasong AI about trades, watchers, losses or confidence buckets...',
+                    prefixIcon: Icon(
+                      Icons
+                          .psychology_alt_rounded,
+                    ),
+                  ),
+                ),
+                const SizedBox(
+                  height: 10,
+                ),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: copilotBusy
+                        ? null
+                        : () =>
+                            askJasongCopilot(),
+                    icon: copilotBusy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(
+                            Icons
+                                .auto_awesome_rounded,
+                          ),
+                    label: Text(
+                      copilotBusy
+                          ? 'Analysing...'
+                          : 'Ask Jasong AI',
+                    ),
+                  ),
+                ),
+                const SizedBox(
+                  height: 8,
+                ),
+                SizedBox(
+                  width: double.infinity,
+                  child:
+                      OutlinedButton.icon(
+                    onPressed: copilotBusy
+                        ? null
+                        : runOvernightReview,
+                    icon: const Icon(
+                      Icons
+                          .nights_stay_rounded,
+                    ),
+                    label: const Text(
+                      'Analyse overnight performance',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (copilotAnswer
+              .isNotEmpty) ...[
+            const SizedBox(height: 12),
+            glassCard(
+              child: SelectableText(
+                copilotAnswer,
+                style: const TextStyle(
+                  color: Colors.white70,
+                  height: 1.45,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Learning thresholds',
+            subtitle:
+                'Experimental PAPER eligibility — not win probabilities',
+          ),
+          glassCard(
+            child: const Column(
+              children: [
+                _MidnightRuleRow(
+                  'AI40',
+                  '40%',
+                  'Directional model-AI + live direction agreement',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'EM',
+                  'Experimental',
+                  'High-quality shadow promoted for AI PAPER learning only',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'SHADOW',
+                  'ON',
+                  'Rejected opportunities remain learning evidence',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'IG DEMO BROKER',
+                  'ON',
+                  'Demo broker orders are mirrored to IG • live money remains OFF',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Normal observation portfolio',
+          ),
+          if (serverWatchers.isEmpty)
+            glassCard(
+              child: const Text(
+                'No normal active watchers loaded.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          else
+            ...serverWatchers
+                .take(6)
+                .map(
+                  (w) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child: watcherCard(w),
+                  ),
+                ),
+        ],
+      );
     }
+
+    Widget settingsPage() {
+      final overviewStatus = systemOverview?['status']?.toString() ??
+          systemOverview?['overall_status']?.toString() ??
+          (autoDashboard != null ? 'ONLINE' : 'CHECKING');
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          sectionTitle('Trading preferences'),
+          glassCard(
+            child: Column(
+              children: [
+                TextField(
+                  controller: symbol,
+                  decoration: const InputDecoration(
+                    labelText: 'Market symbol',
+                    prefixIcon: Icon(Icons.currency_exchange_rounded),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: balance,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Paper balance',
+                    prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: risk,
+                  decoration: const InputDecoration(
+                    labelText: 'Risk mode',
+                    prefixIcon: Icon(Icons.shield_outlined),
+                  ),
+                  items: ['Conservative', 'Balanced', 'Aggressive']
+                      .map((value) => DropdownMenuItem<String>(value: value, child: Text(value)))
+                      .toList(),
+                  onChanged: busy
+                      ? null
+                      : (value) => setState(() => risk = value ?? 'Balanced'),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: busy ? null : refreshSignal,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Refresh current signal'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Auto Manager'),
+          glassCard(
+            glow: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Icon(autoOn ? Icons.bolt_rounded : Icons.pause_circle_outline, color: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(autoOn ? 'Auto Manager is running' : 'Auto Manager is stopped', style: const TextStyle(fontWeight: FontWeight.w900)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: autoManagerBusy ? null : (autoOn ? stopAutoMode : startAutoMode),
+                    icon: Icon(autoOn ? Icons.stop_circle_outlined : Icons.play_circle_outline),
+                    label: Text(autoOn ? 'Stop Auto Mode' : 'Start Auto Mode'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: autoManagerBusy ? null : runAutoManagerNow,
+                    icon: const Icon(Icons.bolt_rounded),
+                    label: const Text('Run one cycle now'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('System health'),
+          glassCard(
+            child: Column(
+              children: [
+                _MidnightSystemRow('Backend', overviewStatus),
+                const Divider(height: 24),
+                _MidnightSystemRow('API endpoint', apiBase.replaceFirst('https://', '')),
+                const Divider(height: 24),
+                const _MidnightSystemRow('Execution', 'PAPER ONLY'),
+                const Divider(height: 24),
+                const _MidnightSystemRow('Live broker execution', 'OFF'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: systemDiagnosticBusy ? null : runSystemDiagnostic,
+              icon: systemDiagnosticBusy
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.health_and_safety_outlined),
+              label: Text(systemDiagnosticBusy ? 'Running diagnostic...' : 'Run system diagnostic'),
+            ),
+          ),
+          if (systemDiagnostic != null) ...[
+            const SizedBox(height: 12),
+            glassCard(
+              child: SelectableText(
+                const JsonEncoder.withIndent('  ').convert(systemDiagnostic),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white60),
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
+    final pages = <Widget>[
+      dashboardPage(),
+      marketsPage(),
+      tradesPage(),
+      aiPage(),
+      settingsPage(),
+    ];
+
+    return Scaffold(
+      extendBody: true,
+      appBar: AppBar(
+        toolbarHeight: 76,
+        titleSpacing: 16,
+        title: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [cs.primary, cs.secondary]),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF041014)),
+            ),
+            const SizedBox(width: 11),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  SizedBox(height: 2),
+                  Text('V6.6.7 • Always-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton.filledTonal(
+            tooltip: 'Refresh dashboard',
+            onPressed: () async {
+              await loadAutoDashboard();
+              await loadSystemOverview();
+              await loadAiLearningStatus();
+              await loadOvernightDemoStatus();
+              await refreshServerWatchers();
+            },
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          const SizedBox(width: 10),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await loadAutoDashboard();
+          await loadSystemOverview();
+          await loadAiLearningStatus();
+          await loadOvernightDemoStatus();
+          await refreshServerWatchers();
+          if (selectedTab == 0) {
+            await refreshSignal();
+          }
+        },
+        child: SafeArea(
+          top: false,
+          child: pages[selectedTab],
+        ),
+      ),
+      bottomNavigationBar: NavigationBar(
+        height: 72,
+        selectedIndex: selectedTab,
+        onDestinationSelected: (index) => setState(() => selectedTab = index),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard_rounded), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
+          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
+          NavigationDestination(icon: Icon(Icons.psychology_alt_outlined), selectedIcon: Icon(Icons.psychology_alt_rounded), label: 'AI'),
+          NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune_rounded), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+
+}
+
+
+class _MidnightValue extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _MidnightValue(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .035),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: .05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              color: Color(0x73FFFFFF),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 15,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _midnightValue(String label, String value) {
+  return _MidnightValue(label, value);
+}
+
+class _MidnightRuleRow extends StatelessWidget {
+  final String title;
+  final String value;
+  final String subtitle;
+
+  const _MidnightRuleRow(this.title, this.value, this.subtitle);
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: .10),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(
+            Icons.auto_awesome_rounded,
+            size: 17,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: const TextStyle(color: Colors.white54, fontSize: 11, height: 1.25)),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15)),
+      ],
+    );
+  }
+}
+
+class _MidnightSystemRow extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _MidnightSystemRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    final good = !value.toUpperCase().contains('OFFLINE') &&
+        !value.toUpperCase().contains('ERROR') &&
+        !value.toUpperCase().contains('FAILED');
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: good ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+// ===========================================================
+// CUSTOM NETWORK EXCEPTION
+// ===========================================================
+
+class NetworkValidationException
+    implements Exception {
+  final String market;
+  final String message;
+
+  NetworkValidationException({
+    required this.market,
+    required this.message,
+  });
+
+  @override
+  String toString() {
+    return (
+      'Network validation failed '
+      'for $market: $message'
+    );
+  }
+}
