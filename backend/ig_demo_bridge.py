@@ -102,7 +102,7 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.6.8-IG-DEMO",
+            "version": "6.6.9-IG-DEMO",
             "mirrors": {},
             "broker_positions": [],
             "broker_account": {},
@@ -927,7 +927,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.6.8-IG-DEMO-PERFORMANCE-SYNC",
+                "version": "6.6.9-IG-DEMO-EVIDENCE-SYNC",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1627,9 +1627,29 @@ class IGDemoMirror:
                             trade.get(
                                 "entry_class"
                             ),
+                        "historical_grade":
+                            trade.get(
+                                "historical_grade"
+                            ),
                         "model_ai_confidence":
                             trade.get(
                                 "model_ai_confidence"
+                            ),
+                        "quant_confidence":
+                            trade.get(
+                                "quant_confidence"
+                            ),
+                        "entry_normal_pass":
+                            trade.get(
+                                "entry_normal_pass"
+                            ),
+                        "entry_ai_pass":
+                            trade.get(
+                                "entry_ai_pass"
+                            ),
+                        "model_reason":
+                            trade.get(
+                                "reason"
                             ),
                         "internal_entry_price":
                             trade.get(
