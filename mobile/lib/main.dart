@@ -3817,6 +3817,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   // =========================================================
+  // V6.7 ELITE COMPOUND DASHBOARD
+  // =========================================================
+
+  Future<void> openCompoundDashboard() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CompoundDashboardScreen(
+          apiBase: apiBase,
+          defaultCapital: balance.text.trim(),
+        ),
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    await loadAutoDashboard();
+    await loadOvernightDemoStatus();
+    await loadForwardStats();
+  }
+
+  // =========================================================
   // BUILD
   // =========================================================
 
@@ -3838,6 +3861,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final summary = dashboard['summary'] is Map
         ? Map<String, dynamic>.from(dashboard['summary'] as Map)
         : <String, dynamic>{};
+    final compound = dashboard['compound'] is Map
+        ? Map<String, dynamic>.from(dashboard['compound'] as Map)
+        : <String, dynamic>{};
+    final compoundStatus =
+        compound['status']?.toString().toUpperCase() ?? 'STOPPED';
+    final compoundEnabled = compound['enabled'] == true;
+    final compoundCapital = compound['current_capital'];
+    final compoundReserve = compound['reserve_balance'] ?? 0;
+    final compoundCycle = compound['cycle_number'] ?? 0;
+    final compoundCurrent = compound['current_cycle'] is Map
+        ? Map<String, dynamic>.from(compound['current_cycle'] as Map)
+        : <String, dynamic>{};
+    final compoundPnl = compoundCurrent['running_pnl'] ?? 0;
+    final compoundOpen = compound['compound_broker_positions'] is List
+        ? (compound['compound_broker_positions'] as List).length
+        : 0;
 
     final autoOn = dashboard['auto_mode'] == true ||
         manager['enabled'] == true ||
@@ -4269,6 +4308,123 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const SizedBox(width: 10),
               statTile('Phase', '$igAccepted / 10', Icons.flag_outlined),
             ],
+          ),
+          const SizedBox(height: 14),
+          glassCard(
+            glow: compoundEnabled
+                ? const Color(0xFF67F0C1)
+                : const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF65E6D3).withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      child: const Icon(
+                        Icons.autorenew_rounded,
+                        color: Color(0xFF65E6D3),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'JASONG ELITE COMPOUND',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '+50% basket • 20% harvest • AI ≥40% • best 1–5 markets',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: .52),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    pill(
+                      compoundStatus.replaceAll('_', ' '),
+                      color: compoundEnabled
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFFD75E),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Cycle',
+                        '#$compoundCycle',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Capital',
+                        compoundCapital == null
+                            ? '-'
+                            : formatMoney(compoundCapital),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Reserve',
+                        formatMoney(compoundReserve),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Open elite',
+                        '$compoundOpen / 5',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Basket P&L',
+                        formatMoney(compoundPnl),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: _MidnightValue(
+                        'Environment',
+                        'IG DEMO',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: openCompoundDashboard,
+                    icon: const Icon(Icons.dashboard_customize_rounded),
+                    label: const Text('Open Compound Strategy'),
+                  ),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 20),
           sectionTitle('Live intelligence', subtitle: 'Current signal for ${symbol.text.trim()}'),
@@ -5729,6 +5885,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 'One-tap server-side IG DEMO learning • phone can be locked or closed',
           ),
           overnightDemoCard(),
+          const SizedBox(height: 14),
+          glassCard(
+            glow: const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.autorenew_rounded,
+                      color: Color(0xFF65E6D3),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Elite 80/20 Compound Strategy',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    pill(
+                      compoundStatus.replaceAll('_', ' '),
+                      color: compoundEnabled
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFFD75E),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Existing PAPER/SHADOW learning stays active. Compound execution separately selects the best 1–5 A/A+ markets, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: openCompoundDashboard,
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: const Text('Open Elite Compound'),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 22),
           sectionTitle(
             'Autonomous AI PAPER Learning',
@@ -6267,9 +6474,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Divider(height: 24),
                 _MidnightSystemRow('API endpoint', apiBase.replaceFirst('https://', '')),
                 const Divider(height: 24),
-                const _MidnightSystemRow('Execution', 'PAPER ONLY'),
+                const _MidnightSystemRow('Execution', 'PAPER + IG DEMO'),
                 const Divider(height: 24),
-                const _MidnightSystemRow('Live broker execution', 'OFF'),
+                const _MidnightSystemRow('Live money', 'OFF'),
               ],
             ),
           ),
@@ -6328,7 +6535,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.6.9 • Evidence-Sync DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.7.0 • Elite Compound DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -6380,6 +6587,1223 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+}
+
+
+class CompoundDashboardScreen extends StatefulWidget {
+  final String apiBase;
+  final String defaultCapital;
+
+  const CompoundDashboardScreen({
+    super.key,
+    required this.apiBase,
+    required this.defaultCapital,
+  });
+
+  @override
+  State<CompoundDashboardScreen> createState() =>
+      _CompoundDashboardScreenState();
+}
+
+class _CompoundDashboardScreenState
+    extends State<CompoundDashboardScreen> {
+  late final TextEditingController capitalController;
+
+  Map<String, dynamic>? status;
+  bool busy = false;
+  String? error;
+  Timer? pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    capitalController = TextEditingController(
+      text: widget.defaultCapital.isNotEmpty
+          ? widget.defaultCapital
+          : '1000',
+    );
+    Future.microtask(refreshStatus);
+    pollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => refreshStatus(silent: true),
+    );
+  }
+
+  @override
+  void dispose() {
+    pollTimer?.cancel();
+    capitalController.dispose();
+    super.dispose();
+  }
+
+  Future<Map<String, dynamic>> _get(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    final uri = Uri.parse(
+      '${widget.apiBase}$path',
+    ).replace(
+      queryParameters: query,
+    );
+
+    final client = http.Client();
+    try {
+      final response = await client
+          .get(
+            uri,
+            headers: const {
+              'Accept': 'application/json',
+              'Connection': 'close',
+            },
+          )
+          .timeout(
+            const Duration(seconds: 60),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}: ${response.body}',
+        );
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected backend response',
+        );
+      }
+
+      return Map<String, dynamic>.from(decoded);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<Map<String, dynamic>> _post(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    final uri = Uri.parse(
+      '${widget.apiBase}$path',
+    ).replace(
+      queryParameters: query,
+    );
+
+    final client = http.Client();
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: const {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Connection': 'close',
+            },
+            body: '{}',
+          )
+          .timeout(
+            const Duration(seconds: 120),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}: ${response.body}',
+        );
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected backend response',
+        );
+      }
+
+      return Map<String, dynamic>.from(decoded);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> refreshStatus({
+    bool silent = false,
+  }) async {
+    if (busy && silent) {
+      return;
+    }
+
+    try {
+      final response = await _get(
+        '/compound/status',
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        status = response;
+        error = null;
+      });
+    } catch (e) {
+      if (!mounted || silent) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    }
+  }
+
+  Future<void> _runAction(
+    Future<Map<String, dynamic>> Function() action,
+  ) async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final response = await action();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        status = response;
+      });
+
+      await refreshStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> startNewCampaign() async {
+    final capital = double.tryParse(
+      capitalController.text.trim(),
+    );
+
+    if (capital == null || capital <= 0) {
+      setState(() {
+        error = 'Enter a valid starting compound capital.';
+      });
+      return;
+    }
+
+    await _runAction(
+      () => _post(
+        '/compound/start',
+        query: {
+          'starting_capital': capital.toString(),
+          'new_campaign': 'true',
+        },
+      ),
+    );
+  }
+
+  Future<void> resumeCampaign() async {
+    await _runAction(
+      () => _post('/compound/resume'),
+    );
+  }
+
+  Future<void> runNow() async {
+    await _runAction(
+      () => _post('/compound/run-now'),
+    );
+  }
+
+  Future<void> stopNewCycles() async {
+    await _runAction(
+      () => _post(
+        '/compound/stop',
+        query: {
+          'close_now': 'false',
+          'resume_legacy': 'false',
+        },
+      ),
+    );
+  }
+
+  Future<void> closeBasketNow() async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text(
+                'Close compound basket?',
+              ),
+              content: const Text(
+                'This closes only JASONG Elite Compound IG DEMO positions. '
+                'The completed cycle will be recorded using the realised broker result.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () =>
+                      Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () =>
+                      Navigator.of(dialogContext).pop(true),
+                  child: const Text('Close IG DEMO basket'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!confirmed || !mounted) {
+      return;
+    }
+
+    await _runAction(
+      () => _post(
+        '/compound/stop',
+        query: {
+          'close_now': 'true',
+          'resume_legacy': 'false',
+        },
+      ),
+    );
+  }
+
+  double _number(
+    dynamic value, {
+    double fallback = 0,
+  }) {
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+
+  String _money(dynamic value) {
+    final number = _number(value);
+    return number.toStringAsFixed(2);
+  }
+
+  String _percent01(dynamic value) {
+    return '${(_number(value) * 100).toStringAsFixed(0)}%';
+  }
+
+  String _percentRaw(dynamic value) {
+    return '${_number(value).toStringAsFixed(1)}%';
+  }
+
+  String _statusLabel(dynamic value) {
+    return (value?.toString() ?? 'STOPPED')
+        .toUpperCase()
+        .replaceAll('_', ' ');
+  }
+
+  Color _statusColor(String value) {
+    final clean = value.toUpperCase();
+    if (clean.contains('ACTIVE') ||
+        clean.contains('OPENING') ||
+        clean.contains('COOLDOWN')) {
+      return const Color(0xFF67F0C1);
+    }
+    if (clean.contains('WAITING') ||
+        clean.contains('PAUSED') ||
+        clean.contains('DRAINING')) {
+      return const Color(0xFFFFD75E);
+    }
+    if (clean.contains('ERROR') ||
+        clean.contains('CONTAMINATION')) {
+      return const Color(0xFFFF6B75);
+    }
+    return const Color(0xFF65E6D3);
+  }
+
+  Widget _card({
+    required Widget child,
+    Color? glow,
+    EdgeInsets padding = const EdgeInsets.all(16),
+  }) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: const Color(0xFF0E1A24),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: (glow ?? const Color(0xFF18313C))
+              .withValues(alpha: .35),
+        ),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _metric(
+    String label,
+    String value, {
+    Color? valueColor,
+  }) {
+    return Expanded(
+      child: _card(
+        padding: const EdgeInsets.all(13),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+                color: valueColor ?? Colors.white,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ruleRow(
+    String label,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        vertical: 5,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white60,
+                fontSize: 11,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = status ?? <String, dynamic>{};
+    final rules = data['rules'] is Map
+        ? Map<String, dynamic>.from(data['rules'] as Map)
+        : <String, dynamic>{};
+    final current = data['current_cycle'] is Map
+        ? Map<String, dynamic>.from(
+            data['current_cycle'] as Map,
+          )
+        : <String, dynamic>{};
+    final performance = data['performance'] is Map
+        ? Map<String, dynamic>.from(
+            data['performance'] as Map,
+          )
+        : <String, dynamic>{};
+    final account = data['broker_account'] is Map
+        ? Map<String, dynamic>.from(
+            data['broker_account'] as Map,
+          )
+        : <String, dynamic>{};
+
+    final positions = data['compound_broker_positions'] is List
+        ? (data['compound_broker_positions'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final ranking = data['last_candidate_ranking'] is List
+        ? (data['last_candidate_ranking'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final cycles = data['recent_cycles'] is List
+        ? (data['recent_cycles'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final enabled = data['enabled'] == true;
+    final state = _statusLabel(data['status']);
+    final currentCapital = data['current_capital'];
+    final reserve = data['reserve_balance'];
+    final cycleNumber = data['cycle_number'] ?? 0;
+    final runningPnl = current['running_pnl'] ?? 0;
+    final targetProfit = current['target_profit'] ??
+        (_number(currentCapital) *
+            _number(rules['profit_target_pct'], fallback: .50));
+    final stopAmount = current['stop_loss_amount'] ??
+        (_number(currentCapital) *
+            _number(rules['stop_loss_pct'], fallback: .15));
+    final targetProgress =
+        _number(data['current_target_progress_pct']);
+    final stopProgress =
+        _number(data['current_stop_progress_pct']);
+    final currency =
+        account['currency']?.toString() ?? '';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Elite Compound',
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            Text(
+              'V6.7.0 • IG DEMO ONLY',
+              style: TextStyle(
+                fontSize: 10,
+                color: Colors.white54,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: busy
+                ? null
+                : () => refreshStatus(),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: refreshStatus,
+        child: ListView(
+          physics:
+              const AlwaysScrollableScrollPhysics(),
+          padding:
+              const EdgeInsets.fromLTRB(
+            16,
+            8,
+            16,
+            110,
+          ),
+          children: [
+            _card(
+              glow: _statusColor(state),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'JASONG ELITE 80/20 COMPOUND',
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding:
+                            const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _statusColor(state)
+                              .withValues(alpha: .12),
+                          borderRadius:
+                              BorderRadius.circular(99),
+                        ),
+                        child: Text(
+                          state,
+                          style: TextStyle(
+                            color:
+                                _statusColor(state),
+                            fontSize: 9,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Best available 1–5 markets • no forced filler trades • live-money execution hard OFF',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (data['paused_reason'] != null) ...[
+                    const SizedBox(height: 9),
+                    Text(
+                      data['paused_reason'].toString(),
+                      style: const TextStyle(
+                        color: Color(0xFFFFD75E),
+                        fontSize: 11,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _metric(
+                  'Cycle capital',
+                  currentCapital == null
+                      ? '-'
+                      : '${currency.isNotEmpty ? '$currency ' : ''}${_money(currentCapital)}',
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Reserve bank',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(reserve)}',
+                  valueColor:
+                      const Color(0xFF67F0C1),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Cycle',
+                  '#$cycleNumber',
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Open elite',
+                  '${positions.length} / ${rules['max_positions'] ?? 5}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Basket P&L',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(runningPnl)}',
+                  valueColor:
+                      _number(runningPnl) >= 0
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFF6B75),
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Target',
+                  '+${currency.isNotEmpty ? '$currency ' : ''}${_money(targetProfit)}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            _card(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        '+50% target progress',
+                        style: TextStyle(
+                          fontWeight:
+                              FontWeight.w800,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${targetProgress.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 7),
+                  LinearProgressIndicator(
+                    value:
+                        (targetProgress / 100)
+                            .clamp(0.0, 1.0),
+                    minHeight: 7,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Text(
+                        '-15% stop usage',
+                        style: TextStyle(
+                          fontWeight:
+                              FontWeight.w800,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${stopProgress.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 7),
+                  LinearProgressIndicator(
+                    value:
+                        (stopProgress / 100)
+                            .clamp(0.0, 1.0),
+                    minHeight: 7,
+                  ),
+                  const SizedBox(height: 7),
+                  Text(
+                    'Take-profit +${_money(targetProfit)} • Stop -${_money(stopAmount)}',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'Campaign controls',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            TextField(
+              controller: capitalController,
+              enabled: !busy && !enabled,
+              keyboardType:
+                  const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration:
+                  const InputDecoration(
+                labelText:
+                    'Starting compound capital',
+                helperText:
+                    'Any amount up to available IG DEMO funds',
+                prefixIcon:
+                    Icon(Icons.payments_outlined),
+              ),
+            ),
+            const SizedBox(height: 9),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed:
+                        busy || enabled
+                            ? null
+                            : startNewCampaign,
+                    icon: const Icon(
+                      Icons.play_circle_fill_rounded,
+                    ),
+                    label: const Text(
+                      'Start new campaign',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy || enabled
+                            ? null
+                            : resumeCampaign,
+                    icon: const Icon(
+                      Icons.restart_alt_rounded,
+                    ),
+                    label:
+                        const Text('Resume'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy || !enabled
+                            ? null
+                            : stopNewCycles,
+                    icon:
+                        const Icon(Icons.pause_rounded),
+                    label:
+                        const Text('Stop new cycles'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy
+                            ? null
+                            : runNow,
+                    icon: const Icon(
+                      Icons.bolt_rounded,
+                    ),
+                    label:
+                        const Text('Run cycle now'),
+                  ),
+                ),
+              ],
+            ),
+            if (current.isNotEmpty ||
+                positions.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed:
+                      busy ? null : closeBasketNow,
+                  icon: const Icon(
+                    Icons.stop_circle_outlined,
+                  ),
+                  label: const Text(
+                    'Close compound basket now',
+                  ),
+                ),
+              ),
+            ],
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+            if (error != null) ...[
+              const SizedBox(height: 12),
+              _card(
+                glow: const Color(0xFFFF6B75),
+                child: Text(
+                  error!,
+                  style: const TextStyle(
+                    color: Color(0xFFFF8A92),
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 20),
+            const Text(
+              'Strategy rules',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            _card(
+              child: Column(
+                children: [
+                  _ruleRow(
+                    'Basket take-profit',
+                    '+${_percent01(rules['profit_target_pct'] ?? .50)}',
+                  ),
+                  _ruleRow(
+                    'Basket stop',
+                    '-${_percent01(rules['stop_loss_pct'] ?? .15)}',
+                  ),
+                  _ruleRow(
+                    'Profit harvest',
+                    _percent01(rules['profit_harvest_pct'] ?? .20),
+                  ),
+                  _ruleRow(
+                    'Profit compounded',
+                    _percent01(rules['profit_compound_pct'] ?? .80),
+                  ),
+                  _ruleRow(
+                    'Model-AI minimum',
+                    _percent01(rules['model_ai_min_confidence'] ?? .40),
+                  ),
+                  _ruleRow(
+                    'Quant minimum',
+                    _percent01(rules['quant_min_confidence'] ?? .30),
+                  ),
+                  _ruleRow(
+                    'Fast score minimum',
+                    '${_number(rules['fast_score_min'], fallback: 90).toStringAsFixed(0)}+',
+                  ),
+                  _ruleRow(
+                    'Quality',
+                    'A / A+',
+                  ),
+                  _ruleRow(
+                    'Maximum positions',
+                    '${rules['max_positions'] ?? 5}',
+                  ),
+                  _ruleRow(
+                    'Reserve reused',
+                    'NO',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Current Elite basket',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (positions.isEmpty)
+              _card(
+                child: const Text(
+                  'No Elite Compound positions are open. Jasong will wait until the broker is clean and at least one market passes every Elite gate.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+              )
+            else
+              ...positions.map(
+                (row) => Padding(
+                  padding:
+                      const EdgeInsets.only(
+                    bottom: 8,
+                  ),
+                  child: _card(
+                    glow:
+                        const Color(0xFF67F0C1),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.currency_exchange_rounded,
+                          color:
+                              Color(0xFF67F0C1),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${row['symbol'] ?? row['epic'] ?? '-'}  ${row['direction'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                'Size ${row['size'] ?? '-'} • ${row['deal_reference'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white54,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 20),
+            const Text(
+              'Elite market ranking',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 3),
+            const Text(
+              '40% AI is the eligibility floor — final selection is by Elite Score and diversification.',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (ranking.isEmpty)
+              _card(
+                child: const Text(
+                  'No ranking yet. Start or run the Compound engine to evaluate the current AI watcher pool.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+              )
+            else
+              ...ranking.take(12).map(
+                (row) {
+                  final eligible =
+                      row['eligible'] == true;
+                  final selected =
+                      row['selected'] == true;
+                  final reasons =
+                      row['rejection_reasons']
+                              is List
+                          ? (row['rejection_reasons']
+                                  as List)
+                              .map((e) => e.toString())
+                              .join(' • ')
+                          : '';
+
+                  return Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 8,
+                    ),
+                    child: _card(
+                      glow: selected
+                          ? const Color(0xFF67F0C1)
+                          : eligible
+                              ? const Color(0xFF65E6D3)
+                              : const Color(0xFFFFD75E),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${row['symbol'] ?? row['market'] ?? '-'}  ${row['direction'] ?? ''}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                selected
+                                    ? 'SELECTED'
+                                    : eligible
+                                        ? 'ELIGIBLE'
+                                        : 'REJECTED',
+                                style: TextStyle(
+                                  color: selected
+                                      ? const Color(0xFF67F0C1)
+                                      : eligible
+                                          ? const Color(0xFF65E6D3)
+                                          : const Color(0xFFFFD75E),
+                                  fontSize: 9,
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            'Elite ${_number(row['elite_score']).toStringAsFixed(1)} • '
+                            'AI ${(_number(row['model_ai_confidence']) * 100).toStringAsFixed(1)}% • '
+                            'Quant ${(_number(row['quant_confidence']) * 100).toStringAsFixed(1)}% • '
+                            'Fast ${_number(row['smart_fast_score']).toStringAsFixed(1)} • '
+                            '${row['quality_tier'] ?? '-'}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white60,
+                              fontSize: 10,
+                            ),
+                          ),
+                          if (reasons.isNotEmpty) ...[
+                            const SizedBox(height: 5),
+                            Text(
+                              reasons,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.white38,
+                                fontSize: 10,
+                                height: 1.3,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            const SizedBox(height: 20),
+            const Text(
+              'Cycle history',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (cycles.isEmpty)
+              _card(
+                child: const Text(
+                  'No completed compound cycles yet.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+              )
+            else
+              ...cycles.take(20).map(
+                (cycle) {
+                  final result =
+                      _statusLabel(
+                    cycle['result'],
+                  );
+                  final realised =
+                      _number(
+                    cycle['realised_profit'],
+                  );
+                  return Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 8,
+                    ),
+                    child: _card(
+                      glow: realised >= 0
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFF6B75),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'Cycle #${cycle['cycle_number'] ?? '-'}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                result,
+                                style: TextStyle(
+                                  color:
+                                      realised >= 0
+                                          ? const Color(0xFF67F0C1)
+                                          : const Color(0xFFFF6B75),
+                                  fontWeight:
+                                      FontWeight.w900,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Start ${_money(cycle['starting_capital'])} • '
+                            'Realised ${_money(cycle['realised_profit'])} • '
+                            'Harvest ${_money(cycle['harvested_profit'])} • '
+                            'Next ${_money(cycle['next_cycle_capital'])}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white60,
+                              fontSize: 10,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'Exit: ${_statusLabel(cycle['exit_reason'])}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white38,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            const SizedBox(height: 20),
+            _card(
+              child: const Text(
+                'Parallel design: Jasong AI continues scanning, deep validation, PAPER learning and SHADOW evidence. While Compound is active, legacy IG new entries are paused so the account-level IG P&L belongs only to the Compound basket. Existing legacy positions are allowed to drain normally.',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 10,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 
