@@ -154,6 +154,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool systemDiagnosticBusy = false;
 
   Map<String, dynamic>? autoDashboard;
+  Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
   Timer? watcherPollTimer;
@@ -1959,6 +1960,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   )
                   .toList();
+        }
+
+        final rawIntegrity =
+            response['integrity'];
+
+        if (rawIntegrity is Map) {
+          integrityStatus =
+              Map<String, dynamic>.from(
+            rawIntegrity,
+          );
         }
 
         final rawModelEvidence =
@@ -3901,6 +3912,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         compound['intelligence_bridge_state']?.toString().toUpperCase() ??
             'IDLE';
 
+    final integrity = integrityStatus ??
+        (dashboard['integrity'] is Map
+            ? Map<String, dynamic>.from(
+                dashboard['integrity'] as Map,
+              )
+            : <String, dynamic>{});
+    final integrityScores =
+        integrity['scores'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['scores'] as Map,
+              )
+            : <String, dynamic>{};
+    final integrityModel =
+        integrity['model_evidence'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['model_evidence'] as Map,
+              )
+            : <String, dynamic>{};
+    final integrityBroker =
+        integrity['broker_integrity'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['broker_integrity'] as Map,
+              )
+            : <String, dynamic>{};
+    final systemEfficiency =
+        integrity['system_efficiency_score'] ?? 0;
+    final operationalScore =
+        integrityScores['operational_readiness'] ?? 0;
+    final evidenceScore =
+        integrityScores['evidence_quality'] ?? 0;
+    final strategyScore =
+        integrityScores['strategy_performance'] ?? 0;
+    final compoundReadinessScore =
+        integrityScores['compound_readiness'] ?? 0;
+    final integrityConfidence =
+        integrity['strategy_score_confidence']
+                ?.toString() ??
+            'LOW';
+    final integrityBlockers =
+        integrity['blockers'] is List
+            ? (integrity['blockers'] as List)
+                .map((e) => e.toString())
+                .toList()
+            : <String>[];
+    final integrityRecommendations =
+        integrity['recommendations'] is List
+            ? (integrity['recommendations'] as List)
+                .map((e) => e.toString())
+                .toList()
+            : <String>[];
+
     final autoOn = dashboard['auto_mode'] == true ||
         manager['enabled'] == true ||
         systemOverview?['auto_manager_enabled'] == true;
@@ -4795,6 +4857,117 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
           sectionTitle(
+            'Evidence & execution integrity',
+            subtitle:
+                'Operational readiness is separated from evidence quality and strategy performance',
+          ),
+          Row(
+            children: [
+              statTile(
+                'System',
+                '${formatNumber(systemEfficiency, decimals: 0)}/100',
+                Icons.health_and_safety_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Operational',
+                '${formatNumber(operationalScore, decimals: 0)}/100',
+                Icons.settings_suggest_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Evidence',
+                '${formatNumber(evidenceScore, decimals: 0)}/100',
+                Icons.fact_check_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Strategy',
+                '${formatNumber(strategyScore, decimals: 0)}/100',
+                Icons.query_stats_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Compound ready',
+                '${formatNumber(compoundReadinessScore, decimals: 0)}/100',
+                Icons.account_tree_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Confidence',
+                integrityConfidence,
+                Icons.analytics_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          glassCard(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Settled model: ${integrityModel['settled_entries'] ?? 0} • '
+                  'PF ${formatNumber(integrityModel['profit_factor'], decimals: 2)} • '
+                  'Metadata ${formatNumber(integrityModel['metadata_completeness_pct'], decimals: 0)}%',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Broker close errors: ${integrityBroker['close_error_count'] ?? 0} • '
+                  'Overdue closes: ${integrityBroker['overdue_open_count'] ?? 0} • '
+                  'Close pending: ${integrityBroker['close_pending_count'] ?? 0}',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 10,
+                  ),
+                ),
+                if (integrityBlockers.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ...integrityBlockers.take(3).map(
+                    (item) => Padding(
+                      padding:
+                          const EdgeInsets.only(
+                        bottom: 3,
+                      ),
+                      child: Text(
+                        '• $item',
+                        style: const TextStyle(
+                          color: Color(0xFFFFD75E),
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+                if (integrityRecommendations.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    integrityRecommendations.first,
+                    style: const TextStyle(
+                      color: Color(0xFF67F0C1),
+                      fontSize: 10,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle(
             'IG DEMO performance',
             subtitle:
                 'Broker-grounded Phase-1 performance • IG is the source of truth',
@@ -4993,6 +5166,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                 Text(
                                   'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
                                   '${trade['ig_size'] != null ? ' • Size ${trade['ig_size']}' : ''}',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                              if (trade['mfe_bps'] != null ||
+                                  trade['mae_bps'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'MFE ${formatNumber(trade['mfe_bps'], decimals: 1)} bps'
+                                  ' • MAE ${formatNumber(trade['mae_bps'], decimals: 1)} bps',
                                   style:
                                       const TextStyle(
                                     color:
@@ -6629,7 +6816,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.7.1 • Unified Intelligence + Compound DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.7.2 • Evidence & Execution Integrity DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -7221,6 +7408,12 @@ class _CompoundDashboardScreenState
     final stopAmount = current['stop_loss_amount'] ??
         (_number(currentCapital) *
             _number(rules['stop_loss_pct'], fallback: .15));
+    final basketMfe = current['basket_mfe_pnl'] ??
+        current['peak_pnl'] ??
+        0;
+    final basketMae = current['basket_mae_pnl'] ??
+        current['trough_pnl'] ??
+        0;
     final targetProgress =
         _number(data['current_target_progress_pct']);
     final stopProgress =
@@ -7240,7 +7433,7 @@ class _CompoundDashboardScreenState
               ),
             ),
             Text(
-              'V6.7.1 • IG DEMO ONLY',
+              'V6.7.2 • IG DEMO ONLY',
               style: TextStyle(
                 fontSize: 10,
                 color: Colors.white54,
@@ -7485,6 +7678,24 @@ class _CompoundDashboardScreenState
                 _metric(
                   'Target',
                   '+${currency.isNotEmpty ? '$currency ' : ''}${_money(targetProfit)}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Basket MFE',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(basketMfe)}',
+                  valueColor:
+                      const Color(0xFF67F0C1),
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Basket MAE',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(basketMae)}',
+                  valueColor:
+                      const Color(0xFFFF8A92),
                 ),
               ],
             ),
@@ -7736,6 +7947,10 @@ class _CompoundDashboardScreenState
                     'Reserve reused',
                     'NO',
                   ),
+                  _ruleRow(
+                    'Close accounting',
+                    'BROKER VERIFIED',
+                  ),
                 ],
               ),
             ),
@@ -7800,6 +8015,20 @@ class _CompoundDashboardScreenState
                                   fontSize: 10,
                                 ),
                               ),
+                              if (row['mfe_bps'] != null ||
+                                  row['mae_bps'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'MFE ${_number(row['mfe_bps']).toStringAsFixed(1)} bps'
+                                  ' • MAE ${_number(row['mae_bps']).toStringAsFixed(1)} bps',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
