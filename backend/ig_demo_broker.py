@@ -179,7 +179,7 @@ class IGDemoBroker:
             "Content-Type": "application/json",
             "Accept": "application/json; charset=UTF-8",
             "Version": str(version),
-            "User-Agent": "Jasong-AI-Trader/6.7.2-INTEGRITY-IG-DEMO",
+            "User-Agent": "Jasong-AI-Trader/6.7.2a-MARKET-AWARE-CLOSE",
         }
 
         if authenticated:
@@ -917,6 +917,42 @@ class IGDemoBroker:
             value = 0.0
         return value if value > 0 else 0.0
 
+    @staticmethod
+    def _market_status_from_position_item(
+        item: Dict[str, Any],
+    ) -> tuple[str, str]:
+        """Return (market_status, epic) from an IG /positions row."""
+        market = item.get("market") or {}
+        position = item.get("position") or {}
+        if not isinstance(market, dict):
+            market = {}
+        if not isinstance(position, dict):
+            position = {}
+
+        status = str(
+            market.get("marketStatus")
+            or ""
+        ).upper().strip()
+        epic = str(
+            market.get("epic")
+            or position.get("epic")
+            or ""
+        ).strip()
+        return status, epic
+
+    @staticmethod
+    def _close_allowed_market_status(
+        market_status: str,
+    ) -> bool:
+        """Only submit a market close when IG says closings are possible."""
+        return str(
+            market_status
+            or ""
+        ).upper().strip() in {
+            "TRADEABLE",
+            "CLOSINGS_ONLY",
+        }
+
     def close_position(
         self,
         deal_id: str,
@@ -952,6 +988,44 @@ class IGDemoBroker:
                 "requestedCloseSize": 0.0,
                 "remainingSize": 0.0,
                 "closeVerified": True,
+                "live_money_execution": False,
+                "demo_execution": True,
+            }
+
+        market_status, epic = (
+            self._market_status_from_position_item(
+                item
+            )
+        )
+
+        # V6.7.2a: a due close is not an execution failure when the underlying
+        # weekday market is unavailable. Avoid sending DELETE instructions
+        # that IG will reject with MARKET_CLOSED_WITH_EDITS. The normal broker
+        # reconciliation loop will re-read /positions; once marketStatus becomes
+        # TRADEABLE or CLOSINGS_ONLY, the close is submitted automatically.
+        if (
+            market_status
+            and not self._close_allowed_market_status(
+                market_status
+            )
+        ):
+            return {
+                "broker": "IG",
+                "environment": "DEMO",
+                "dealId": deal_id,
+                "epic": epic or None,
+                "marketStatus": market_status,
+                "status": "CLOSE_DEFERRED_MARKET_CLOSED",
+                "dealStatus": "DEFERRED",
+                "requestedCloseSize": 0.0,
+                "remainingSize": self._open_position_size(
+                    item.get("position") or {}
+                ),
+                "closeVerified": False,
+                "closeDeferred": True,
+                "deferredReason": (
+                    "IG market is not currently open for position closing"
+                ),
                 "live_money_execution": False,
                 "demo_execution": True,
             }
