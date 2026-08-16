@@ -13,7 +13,7 @@ from ig_demo_broker import IGDemoBroker, IGDemoError
 
 
 class EliteCompoundEngine:
-    """Jasong V6.7.2 Elite 80/20 Compound Engine — evidence-integrity release.
+    """Jasong V6.7.2a Elite 80/20 Compound Engine — evidence-integrity release.
 
     Design goals:
       * preserve the existing Jasong AI / PAPER / SHADOW learning engines;
@@ -46,8 +46,9 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.7.2"
+    VERSION = "6.7.2a"
     DEAL_PREFIX = "JSCMP_"
+    CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
     def __init__(
         self,
@@ -1095,6 +1096,65 @@ class EliteCompoundEngine:
             if not deal_id:
                 continue
 
+            market_status = str(
+                position.get("market_status")
+                or position.get("broker_market_status")
+                or ""
+            ).upper().strip()
+
+            if (
+                market_status
+                and market_status
+                not in self.CLOSE_ALLOWED_MARKET_STATUSES
+            ):
+                results.append(
+                    {
+                        "deal_id": deal_id,
+                        "ok": True,
+                        "verified": False,
+                        "pending": False,
+                        "deferred": True,
+                        "market_status": market_status,
+                        "status": "CLOSE_DEFERRED_MARKET_CLOSED",
+                    }
+                )
+                with self._lock:
+                    cycle = dict(
+                        self._state.get("current_cycle")
+                        or {}
+                    )
+                    stored_positions = [
+                        dict(item)
+                        for item in (
+                            cycle.get("positions")
+                            or []
+                        )
+                        if isinstance(item, dict)
+                    ]
+                    for stored in stored_positions:
+                        stored_id = str(
+                            stored.get("deal_id")
+                            or stored.get("ig_deal_id")
+                            or ""
+                        )
+                        if stored_id != deal_id:
+                            continue
+                        stored["close_execution_state"] = (
+                            "CLOSE_DEFERRED_MARKET_CLOSED"
+                        )
+                        stored["broker_market_status"] = (
+                            market_status
+                        )
+                        stored["close_deferred_at"] = self._now()
+                        stored["close_deferred_reason"] = (
+                            f"IG market status is {market_status}"
+                        )
+                        stored["last_close_error"] = None
+                    cycle["positions"] = stored_positions
+                    self._state["current_cycle"] = cycle
+                    self._persist()
+                continue
+
             with self._lock:
                 close_integrity = dict(
                     self._state.get("close_integrity")
@@ -1111,6 +1171,67 @@ class EliteCompoundEngine:
                 result = self.broker.close_position(
                     deal_id
                 )
+                if bool(
+                    result.get("closeDeferred")
+                ):
+                    market_status = str(
+                        result.get("marketStatus")
+                        or market_status
+                        or ""
+                    ).upper().strip()
+                    results.append(
+                        {
+                            "deal_id": deal_id,
+                            "ok": True,
+                            "verified": False,
+                            "pending": False,
+                            "deferred": True,
+                            "market_status": market_status,
+                            "status": "CLOSE_DEFERRED_MARKET_CLOSED",
+                            "result": result,
+                        }
+                    )
+                    with self._lock:
+                        cycle = dict(
+                            self._state.get("current_cycle")
+                            or {}
+                        )
+                        stored_positions = [
+                            dict(item)
+                            for item in (
+                                cycle.get("positions")
+                                or []
+                            )
+                            if isinstance(item, dict)
+                        ]
+                        for stored in stored_positions:
+                            stored_id = str(
+                                stored.get("deal_id")
+                                or stored.get("ig_deal_id")
+                                or ""
+                            )
+                            if stored_id != deal_id:
+                                continue
+                            stored["close_execution_state"] = (
+                                "CLOSE_DEFERRED_MARKET_CLOSED"
+                            )
+                            stored["broker_market_status"] = (
+                                market_status
+                            )
+                            stored["close_deferred_at"] = self._now()
+                            stored["close_deferred_reason"] = (
+                                result.get("deferredReason")
+                                or (
+                                    "IG market is not currently open "
+                                    "for position closing"
+                                )
+                            )
+                            stored["last_close_error"] = None
+                        cycle["positions"] = stored_positions
+                        self._state["current_cycle"] = cycle
+                        self._persist()
+                    continue
+
                 verified = bool(
                     result.get("closeVerified")
                 )
