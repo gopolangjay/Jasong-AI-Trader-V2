@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 
 
 class V64LearningTradeEngine:
-    """High-throughput PAPER learning engine.
+    """High-throughput PAPER learning engine with evidence-integrity tracking.
 
     This engine is deliberately separate from the strict genuine-forward
     watcher engine so exploratory PAPER trades do not contaminate the strict
@@ -28,7 +28,7 @@ class V64LearningTradeEngine:
     No broker credentials are accepted and no live order is sent.
     """
 
-    VERSION = "6.6.0"
+    VERSION = "6.7.2"
     NAMESPACE = "v64_learning_engine"
 
     # V6.6 PAPER-learning entry thresholds.
@@ -491,6 +491,37 @@ class V64LearningTradeEngine:
 
         now = time.time()
         holding = max(1, int(watcher.get("holding_candles") or 4))
+
+        candidate_meta = (
+            dict(watcher.get("candidate") or {})
+            if isinstance(watcher.get("candidate"), dict)
+            else {}
+        )
+        validated_meta = (
+            dict(watcher.get("validated") or {})
+            if isinstance(watcher.get("validated"), dict)
+            else {}
+        )
+
+        historical_win_rate = (
+            candidate_meta.get("historical_win_rate")
+            or candidate_meta.get("win_rate")
+            or validated_meta.get("historical_win_rate")
+            or validated_meta.get("win_rate")
+        )
+        historical_profit_factor = (
+            candidate_meta.get("historical_profit_factor")
+            or candidate_meta.get("profit_factor")
+            or validated_meta.get("historical_profit_factor")
+            or validated_meta.get("profit_factor")
+        )
+        historical_trades = (
+            candidate_meta.get("historical_trades")
+            or candidate_meta.get("trades")
+            or validated_meta.get("historical_trades")
+            or validated_meta.get("trades")
+        )
+
         trade = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": decision["class"],
@@ -503,6 +534,34 @@ class V64LearningTradeEngine:
             "entry_normal_pass": decision.get("normal_pass"),
             "entry_ai_pass": decision.get("ai_pass"),
             "ai": decision.get("ai"),
+            "smart_fast_score": (
+                candidate_meta.get("smart_fast_score")
+                or candidate_meta.get("fast_score")
+                or validated_meta.get("smart_fast_score")
+                or validated_meta.get("fast_score")
+            ),
+            "quality_tier": (
+                candidate_meta.get("quality_tier")
+                or validated_meta.get("quality_tier")
+            ),
+            "deep_status": (
+                watcher.get("deep_status")
+                or validated_meta.get("status")
+            ),
+            "historical_win_rate": historical_win_rate,
+            "historical_profit_factor": historical_profit_factor,
+            "historical_trades": historical_trades,
+            "entry_rsi": live.get("rsi"),
+            "entry_ai_up": (
+                live.get("combined_up_probability")
+                if live.get("combined_up_probability") is not None
+                else live.get("ai_up_probability")
+            ),
+            "entry_live_direction": (
+                live.get("direction")
+                or live.get("signal")
+                or live.get("decision")
+            ),
             "entry_price": price,
             "stake": self._stake(),
             "opened_at": now,
@@ -514,6 +573,10 @@ class V64LearningTradeEngine:
             "exit_price": None,
             "closed_at": None,
             "reason": decision.get("reason"),
+            "current_move_bps": 0.0,
+            "mfe_bps": 0.0,
+            "mae_bps": 0.0,
+            "last_excursion_at": now,
         }
         with self._lock:
             self._state["open_trades"].append(trade)
@@ -542,6 +605,16 @@ class V64LearningTradeEngine:
                 return
         now = time.time()
         holding = max(1, int(watcher.get("holding_candles") or 4))
+        candidate_meta = (
+            dict(watcher.get("candidate") or {})
+            if isinstance(watcher.get("candidate"), dict)
+            else {}
+        )
+        validated_meta = (
+            dict(watcher.get("validated") or {})
+            if isinstance(watcher.get("validated"), dict)
+            else {}
+        )
         shadow = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": "S",
@@ -552,6 +625,44 @@ class V64LearningTradeEngine:
             "model_ai_confidence": decision.get("model_ai_confidence"),
             "entry_normal_pass": decision.get("normal_pass"),
             "entry_ai_pass": decision.get("ai_pass"),
+            "smart_fast_score": (
+                candidate_meta.get("smart_fast_score")
+                or candidate_meta.get("fast_score")
+                or validated_meta.get("smart_fast_score")
+                or validated_meta.get("fast_score")
+            ),
+            "quality_tier": (
+                candidate_meta.get("quality_tier")
+                or validated_meta.get("quality_tier")
+            ),
+            "deep_status": (
+                watcher.get("deep_status")
+                or validated_meta.get("status")
+            ),
+            "historical_win_rate": (
+                candidate_meta.get("historical_win_rate")
+                or candidate_meta.get("win_rate")
+                or validated_meta.get("historical_win_rate")
+                or validated_meta.get("win_rate")
+            ),
+            "historical_profit_factor": (
+                candidate_meta.get("historical_profit_factor")
+                or candidate_meta.get("profit_factor")
+                or validated_meta.get("historical_profit_factor")
+                or validated_meta.get("profit_factor")
+            ),
+            "historical_trades": (
+                candidate_meta.get("historical_trades")
+                or candidate_meta.get("trades")
+                or validated_meta.get("historical_trades")
+                or validated_meta.get("trades")
+            ),
+            "entry_rsi": live.get("rsi"),
+            "entry_ai_up": (
+                live.get("combined_up_probability")
+                if live.get("combined_up_probability") is not None
+                else live.get("ai_up_probability")
+            ),
             "entry_price": price,
             "stake": 0.0,
             "opened_at": now,
@@ -561,11 +672,113 @@ class V64LearningTradeEngine:
             "result": None,
             "pnl": 0.0,
             "reason": decision.get("reason"),
+            "current_move_bps": 0.0,
+            "mfe_bps": 0.0,
+            "mae_bps": 0.0,
+            "last_excursion_at": now,
         }
         with self._lock:
             self._state["shadow_open"].append(shadow)
             self._state["shadow_open"] = self._state["shadow_open"][-30:]
         self._journal("SHADOW_TRADE_OPENED", shadow)
+
+    @classmethod
+    def _signed_move_bps(
+        cls,
+        trade: Dict[str, Any],
+        price: Any,
+    ) -> Optional[float]:
+        entry = cls._safe_float(
+            trade.get("entry_price"),
+            0.0,
+        )
+        current = cls._safe_float(
+            price,
+            0.0,
+        )
+        if entry <= 0 or current <= 0:
+            return None
+
+        direction = str(
+            trade.get("direction")
+            or ""
+        ).upper()
+        if direction == "BUY":
+            return ((current - entry) / entry) * 10000.0
+        if direction == "SELL":
+            return ((entry - current) / entry) * 10000.0
+        return None
+
+    @classmethod
+    def _update_trade_excursion(
+        cls,
+        trade: Dict[str, Any],
+        price: Any,
+        observed_at: float,
+    ) -> None:
+        move = cls._signed_move_bps(
+            trade,
+            price,
+        )
+        if move is None:
+            return
+
+        trade["current_move_bps"] = round(
+            move,
+            4,
+        )
+        trade["mfe_bps"] = round(
+            max(
+                0.0,
+                cls._safe_float(
+                    trade.get("mfe_bps"),
+                    0.0,
+                ),
+                move,
+            ),
+            4,
+        )
+        trade["mae_bps"] = round(
+            min(
+                0.0,
+                cls._safe_float(
+                    trade.get("mae_bps"),
+                    0.0,
+                ),
+                move,
+            ),
+            4,
+        )
+        trade["last_excursion_at"] = observed_at
+
+    def _update_open_excursions(
+        self,
+        observed_prices: Dict[str, float],
+        observed_at: float,
+    ) -> None:
+        with self._lock:
+            for key in (
+                "open_trades",
+                "shadow_open",
+            ):
+                rows = list(
+                    self._state.get(key, [])
+                )
+                for trade in rows:
+                    symbol = str(
+                        trade.get("symbol")
+                        or ""
+                    )
+                    price = observed_prices.get(
+                        symbol
+                    )
+                    if price is not None:
+                        self._update_trade_excursion(
+                            trade,
+                            price,
+                            observed_at,
+                        )
+                self._state[key] = rows
 
     def _settle_list(self, key_open: str, key_settled: str, affect_balance: bool) -> None:
         now = time.time()
@@ -582,6 +795,11 @@ class V64LearningTradeEngine:
             except Exception:
                 remaining.append(trade)
                 continue
+            self._update_trade_excursion(
+                trade,
+                exit_price,
+                now,
+            )
             entry = self._safe_float(trade.get("entry_price"), 0.0)
             direction = str(trade.get("direction") or "").upper()
             won = exit_price > entry if direction == "BUY" else exit_price < entry
@@ -619,6 +837,7 @@ class V64LearningTradeEngine:
 
         now = time.time()
         fresh_watchers = []
+        observed_prices: Dict[str, float] = {}
         for watcher in watchers:
             if now >= self._safe_float(watcher.get("expires_at"), now + 1):
                 continue
@@ -630,6 +849,10 @@ class V64LearningTradeEngine:
                 )
                 if "price" not in live or self._safe_float(live.get("price"), 0.0) <= 0:
                     live["price"] = float(self.price_func(watcher["symbol"]))
+                observed_prices[str(watcher["symbol"])] = self._safe_float(
+                    live.get("price"),
+                    0.0,
+                )
                 decision = self._entry_class(watcher, live)
                 watcher["last_checked_at"] = now
                 watcher["last_quant_confidence"] = decision.get("quant")
@@ -648,6 +871,11 @@ class V64LearningTradeEngine:
 
         with self._lock:
             self._state["watchers"] = fresh_watchers[: self.max_watchers]
+
+        self._update_open_excursions(
+            observed_prices,
+            now,
+        )
 
         self._settle_list("open_trades", "settled_trades", True)
         self._settle_list("shadow_open", "shadow_settled", False)
