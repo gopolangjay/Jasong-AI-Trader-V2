@@ -179,7 +179,7 @@ class IGDemoBroker:
             "Content-Type": "application/json",
             "Accept": "application/json; charset=UTF-8",
             "Version": str(version),
-            "User-Agent": "Jasong-AI-Trader/6.6.6-IG-DEMO",
+            "User-Agent": "Jasong-AI-Trader/6.7.2-INTEGRITY-IG-DEMO",
         }
 
         if authenticated:
@@ -895,10 +895,52 @@ class IGDemoBroker:
                 return item
         return None
 
+    @staticmethod
+    def _open_position_size(
+        position: Dict[str, Any],
+    ) -> float:
+        """Return the current REST open size across IG position API versions.
+
+        IG /positions v2 uses `position.size`; v1 used `position.dealSize`.
+        The broker reads /positions with version=2, so `size` must be the
+        primary field. Keeping the fallback preserves compatibility with old
+        payloads and persisted test fixtures.
+        """
+        raw = (
+            position.get("size")
+            if position.get("size") is not None
+            else position.get("dealSize")
+        )
+        try:
+            value = float(raw or 0.0)
+        except Exception:
+            value = 0.0
+        return value if value > 0 else 0.0
+
     def close_position(
         self,
         deal_id: str,
     ) -> Dict[str, Any]:
+        """Close exactly the broker-reported remaining IG DEMO position size.
+
+        Safety / integrity behaviour:
+        - fetches authoritative /positions immediately before closing;
+        - uses v2 `position.size` (with v1 `dealSize` fallback);
+        - submits one close request for that exact remaining size;
+        - treats an explicit IG rejection as an error;
+        - re-reads /positions to verify whether the deal disappeared;
+        - never reports a verified close merely because the DELETE request
+          was accepted.
+
+        If IG has accepted the close but the position is still visible during
+        the short verification window, the caller receives CLOSE_PENDING and
+        should reconcile on its next normal broker-sync tick instead of
+        blindly submitting duplicate close requests in a tight loop.
+        """
+        deal_id = str(deal_id or "").strip()
+        if not deal_id:
+            raise IGDemoError("IG DEMO close_position requires deal_id")
+
         item = self._find_open_position(deal_id)
         if item is None:
             return {
@@ -906,6 +948,10 @@ class IGDemoBroker:
                 "environment": "DEMO",
                 "dealId": deal_id,
                 "status": "ALREADY_CLOSED_OR_NOT_FOUND",
+                "dealStatus": "ACCEPTED",
+                "requestedCloseSize": 0.0,
+                "remainingSize": 0.0,
+                "closeVerified": True,
                 "live_money_execution": False,
                 "demo_execution": True,
             }
@@ -914,15 +960,25 @@ class IGDemoBroker:
         original_direction = str(
             position.get("direction") or ""
         ).upper()
+        if original_direction not in {"BUY", "SELL"}:
+            raise IGDemoError(
+                f"Invalid IG DEMO direction for deal {deal_id}: "
+                f"{original_direction or '-'}"
+            )
+
         close_direction = (
             "SELL"
             if original_direction == "BUY"
             else "BUY"
         )
-        size = float(position.get("dealSize") or 0.0)
+        size = self._open_position_size(position)
         if size <= 0:
+            # Include both supported field names in the diagnostic without
+            # exposing credentials/tokens.
             raise IGDemoError(
-                f"Invalid IG DEMO open size for deal {deal_id}"
+                "Invalid IG DEMO open size for deal "
+                f"{deal_id}; v2 size={position.get('size')!r}, "
+                f"v1 dealSize={position.get('dealSize')!r}"
             )
 
         acknowledgement = self._request(
@@ -942,10 +998,57 @@ class IGDemoBroker:
             acknowledgement.get("dealReference")
             or ""
         )
-        confirmation = (
-            self.confirm(ref)
-            if ref
-            else {}
+
+        confirmation: Dict[str, Any] = {}
+        confirmation_error: Optional[str] = None
+        if ref:
+            try:
+                confirmation = self.confirm(ref)
+            except Exception as exc:
+                # A close acknowledgement can still be valid even when the
+                # confirm endpoint is temporarily unavailable/rate-limited.
+                # Broker reconciliation below remains the source of truth.
+                confirmation_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        deal_status = str(
+            confirmation.get("dealStatus")
+            or ""
+        ).upper()
+        if deal_status == "REJECTED":
+            raise IGDemoError(
+                "IG DEMO rejected close: "
+                f"{confirmation.get('reason') or confirmation}"
+            )
+
+        close_verified = False
+        remaining_size: Optional[float] = None
+        verification_checks = 0
+
+        # Short read-after-write verification only. If IG is eventually
+        # consistent, the normal 15-second broker reconciliation will finish
+        # the job without generating duplicate close instructions.
+        for delay in (0.20, 0.45, 0.80):
+            time.sleep(delay)
+            verification_checks += 1
+            current = self._find_open_position(deal_id)
+            if current is None:
+                remaining_size = 0.0
+                close_verified = True
+                break
+            current_position = current.get("position") or {}
+            remaining_size = self._open_position_size(
+                current_position
+            )
+
+        if remaining_size is None:
+            remaining_size = size
+
+        status = (
+            "CLOSED_VERIFIED"
+            if close_verified
+            else "CLOSE_PENDING"
         )
 
         return {
@@ -953,10 +1056,29 @@ class IGDemoBroker:
             "environment": "DEMO",
             "dealId": deal_id,
             "dealReference": ref or None,
-            "dealStatus": confirmation.get("dealStatus"),
-            "status": confirmation.get("status") or "CLOSE_SUBMITTED",
+            "dealStatus": (
+                confirmation.get("dealStatus")
+                or (
+                    "ACCEPTED"
+                    if ref
+                    else None
+                )
+            ),
+            "status": status,
+            "confirmationStatus": confirmation.get("status"),
             "level": confirmation.get("level"),
             "reason": confirmation.get("reason"),
+            "requestedCloseSize": size,
+            "openSizeBefore": size,
+            "remainingSize": remaining_size,
+            "closeVerified": close_verified,
+            "verificationChecks": verification_checks,
+            "confirmationError": confirmation_error,
+            "positionSizeSource": (
+                "size"
+                if position.get("size") is not None
+                else "dealSize"
+            ),
             "live_money_execution": False,
             "demo_execution": True,
         }
