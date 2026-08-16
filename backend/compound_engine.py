@@ -13,7 +13,7 @@ from ig_demo_broker import IGDemoBroker, IGDemoError
 
 
 class EliteCompoundEngine:
-    """Jasong V6.7.1 Elite 80/20 Compound Engine — IG DEMO only.
+    """Jasong V6.7.2 Elite 80/20 Compound Engine — evidence-integrity release.
 
     Design goals:
       * preserve the existing Jasong AI / PAPER / SHADOW learning engines;
@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.7.1"
+    VERSION = "6.7.2"
     DEAL_PREFIX = "JSCMP_"
 
     def __init__(
@@ -161,6 +161,13 @@ class EliteCompoundEngine:
             "intelligence_bridge_state": "IDLE",
             "intelligence_wake_count": 0,
             "last_foreign_blockers": [],
+            "close_integrity": {
+                "attempts": 0,
+                "verified": 0,
+                "pending": 0,
+                "errors": 0,
+                "last_error": None,
+            },
         }
         self._load()
 
@@ -241,7 +248,7 @@ class EliteCompoundEngine:
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._loop,
-                name="jasong-v671-elite-compound",
+                name="jasong-v672-elite-compound",
                 daemon=True,
             )
             self._thread.start()
@@ -413,6 +420,116 @@ class EliteCompoundEngine:
     @staticmethod
     def _compound_positions(positions: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [dict(row) for row in positions if bool(row.get("is_compound"))]
+
+    @classmethod
+    def _signed_move_bps(
+        cls,
+        position: Dict[str, Any],
+    ) -> Optional[float]:
+        entry = cls._safe_float(
+            position.get("entry_level"),
+            0.0,
+        )
+        if entry <= 0:
+            return None
+
+        direction = str(
+            position.get("direction")
+            or ""
+        ).upper()
+        bid = cls._safe_float(
+            position.get("bid"),
+            0.0,
+        )
+        offer = cls._safe_float(
+            position.get("offer"),
+            0.0,
+        )
+
+        if direction == "BUY" and bid > 0:
+            return ((bid - entry) / entry) * 10000.0
+        if direction == "SELL" and offer > 0:
+            return ((entry - offer) / entry) * 10000.0
+        return None
+
+    def _update_cycle_position_excursions(
+        self,
+        cycle: Dict[str, Any],
+        broker_positions: List[Dict[str, Any]],
+    ) -> None:
+        by_deal = {
+            str(row.get("deal_id") or ""): row
+            for row in broker_positions
+            if row.get("deal_id")
+        }
+        stored = [
+            dict(row)
+            for row in (cycle.get("positions") or [])
+            if isinstance(row, dict)
+        ]
+        now = self._now()
+
+        for row in stored:
+            deal_id = str(
+                row.get("deal_id")
+                or row.get("ig_deal_id")
+                or ""
+            )
+            live = by_deal.get(
+                deal_id
+            )
+            if live is None:
+                continue
+
+            move = self._signed_move_bps(
+                live
+            )
+            if move is None:
+                continue
+
+            row["current_move_bps"] = round(
+                move,
+                4,
+            )
+            row["mfe_bps"] = round(
+                max(
+                    0.0,
+                    self._safe_float(
+                        row.get("mfe_bps"),
+                        0.0,
+                    ),
+                    move,
+                ),
+                4,
+            )
+            row["mae_bps"] = round(
+                min(
+                    0.0,
+                    self._safe_float(
+                        row.get("mae_bps"),
+                        0.0,
+                    ),
+                    move,
+                ),
+                4,
+            )
+            row["current_close_level"] = (
+                live.get("bid")
+                if str(
+                    live.get("direction")
+                    or ""
+                ).upper() == "BUY"
+                else live.get("offer")
+            )
+            row["last_excursion_at"] = now
+            row["broker_size_now"] = live.get(
+                "size"
+            )
+            row["broker_market_status"] = live.get(
+                "market_status"
+            )
+
+        cycle["positions"] = stored
 
     # ------------------------------------------------------------------
     # Candidate scoring / diversification
@@ -831,6 +948,10 @@ class EliteCompoundEngine:
                 "running_pnl": 0.0,
                 "peak_pnl": 0.0,
                 "trough_pnl": 0.0,
+                "basket_mfe_pnl": 0.0,
+                "basket_mae_pnl": 0.0,
+                "basket_mfe_pct": 0.0,
+                "basket_mae_pct": 0.0,
                 "exit_reason": None,
                 "realised_profit": None,
                 "harvested_profit": 0.0,
@@ -870,6 +991,17 @@ class EliteCompoundEngine:
                     "quality_tier": candidate.get("quality_tier"),
                     "deep_status": candidate.get("deep_status"),
                     "spread_bps": candidate.get("spread_bps"),
+                    "intelligence_source": candidate.get("intelligence_source"),
+                    "intelligence_age_seconds": candidate.get("intelligence_age_seconds"),
+                    "source_rank": candidate.get("source_rank"),
+                    "live_price_at_selection": candidate.get("live_price"),
+                    "entry_rsi": candidate.get("rsi"),
+                    "signal_reason": candidate.get("signal_reason") or candidate.get("reason"),
+                    "historical_win_rate": candidate.get("historical_win_rate"),
+                    "historical_profit_factor": candidate.get("historical_profit_factor"),
+                    "historical_trades": candidate.get("historical_trades"),
+                    "max_abs_correlation": candidate.get("max_abs_correlation"),
+                    "diversification_score": candidate.get("diversification_score"),
                     "weight_pct": round(weight * 100.0, 4),
                     "allocation_amount": round(allocation, 8),
                     "requested_size": requested_size,
@@ -881,6 +1013,12 @@ class EliteCompoundEngine:
                     "broker_status": "OPEN",
                     "opened_at": self._now(),
                     "open_result": result,
+                    "current_move_bps": 0.0,
+                    "mfe_bps": 0.0,
+                    "mae_bps": 0.0,
+                    "close_attempts": 0,
+                    "close_verified": False,
+                    "last_close_error": None,
                 }
                 opened.append(row)
                 with self._lock:
@@ -942,23 +1080,186 @@ class EliteCompoundEngine:
 
         return self.status()
 
-    def _close_compound_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _close_compound_positions(
+        self,
+        positions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
+
         for position in positions:
-            deal_id = str(position.get("deal_id") or position.get("ig_deal_id") or "").strip()
+            deal_id = str(
+                position.get("deal_id")
+                or position.get("ig_deal_id")
+                or ""
+            ).strip()
             if not deal_id:
                 continue
+
+            with self._lock:
+                close_integrity = dict(
+                    self._state.get("close_integrity")
+                    or {}
+                )
+                close_integrity["attempts"] = int(
+                    close_integrity.get("attempts")
+                    or 0
+                ) + 1
+                self._state["close_integrity"] = close_integrity
+                self._persist()
+
             try:
-                result = self.broker.close_position(deal_id)
-                results.append({"deal_id": deal_id, "ok": True, "result": result})
+                result = self.broker.close_position(
+                    deal_id
+                )
+                verified = bool(
+                    result.get("closeVerified")
+                )
+                pending = (
+                    not verified
+                    and str(
+                        result.get("status")
+                        or ""
+                    ).upper()
+                    == "CLOSE_PENDING"
+                )
+
+                results.append(
+                    {
+                        "deal_id": deal_id,
+                        "ok": True,
+                        "verified": verified,
+                        "pending": pending,
+                        "requested_close_size": result.get(
+                            "requestedCloseSize"
+                        ),
+                        "remaining_size": result.get(
+                            "remainingSize"
+                        ),
+                        "result": result,
+                    }
+                )
+
+                with self._lock:
+                    close_integrity = dict(
+                        self._state.get("close_integrity")
+                        or {}
+                    )
+                    if verified:
+                        close_integrity["verified"] = int(
+                            close_integrity.get("verified")
+                            or 0
+                        ) + 1
+                    elif pending:
+                        close_integrity["pending"] = int(
+                            close_integrity.get("pending")
+                            or 0
+                        ) + 1
+                    close_integrity["last_error"] = None
+                    self._state["close_integrity"] = close_integrity
+
+                    cycle = dict(
+                        self._state.get("current_cycle")
+                        or {}
+                    )
+                    stored_positions = [
+                        dict(item)
+                        for item in (
+                            cycle.get("positions")
+                            or []
+                        )
+                        if isinstance(item, dict)
+                    ]
+                    for stored in stored_positions:
+                        stored_id = str(
+                            stored.get("deal_id")
+                            or stored.get("ig_deal_id")
+                            or ""
+                        )
+                        if stored_id != deal_id:
+                            continue
+                        stored["close_attempts"] = int(
+                            stored.get("close_attempts")
+                            or 0
+                        ) + 1
+                        stored["close_verified"] = verified
+                        stored["broker_status"] = (
+                            "CLOSED"
+                            if verified
+                            else "CLOSE_PENDING"
+                        )
+                        stored["remaining_size"] = result.get(
+                            "remainingSize"
+                        )
+                        stored["close_result"] = result
+                        stored["last_close_error"] = None
+                    cycle["positions"] = stored_positions
+                    self._state["current_cycle"] = cycle
+                    self._persist()
+
             except Exception as exc:
+                error_text = (
+                    f"{type(exc).__name__}: {exc}"
+                )
                 results.append(
                     {
                         "deal_id": deal_id,
                         "ok": False,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "verified": False,
+                        "pending": False,
+                        "error": error_text,
                     }
                 )
+
+                with self._lock:
+                    close_integrity = dict(
+                        self._state.get("close_integrity")
+                        or {}
+                    )
+                    close_integrity["errors"] = int(
+                        close_integrity.get("errors")
+                        or 0
+                    ) + 1
+                    close_integrity["last_error"] = error_text
+                    self._state["close_integrity"] = close_integrity
+
+                    cycle = dict(
+                        self._state.get("current_cycle")
+                        or {}
+                    )
+                    stored_positions = [
+                        dict(item)
+                        for item in (
+                            cycle.get("positions")
+                            or []
+                        )
+                        if isinstance(item, dict)
+                    ]
+                    for stored in stored_positions:
+                        stored_id = str(
+                            stored.get("deal_id")
+                            or stored.get("ig_deal_id")
+                            or ""
+                        )
+                        if stored_id != deal_id:
+                            continue
+                        stored["close_attempts"] = int(
+                            stored.get("close_attempts")
+                            or 0
+                        ) + 1
+                        stored["close_verified"] = False
+                        stored["last_close_error"] = error_text
+                    cycle["positions"] = stored_positions
+                    self._state["current_cycle"] = cycle
+                    self._persist()
+
+                self._journal(
+                    "COMPOUND_CLOSE_ERROR",
+                    {
+                        "deal_id": deal_id,
+                        "error": error_text,
+                    },
+                )
+
         return results
 
     def _finalise_cycle(self, reason: str, trigger_pnl: float, *, invalid: bool = False) -> Dict[str, Any]:
@@ -1022,6 +1323,79 @@ class EliteCompoundEngine:
                 "compounded_profit": round(compounded_profit, 8),
                 "next_cycle_capital": round(next_capital, 8),
                 "result": result_label,
+                "basket_mfe_pnl": round(
+                    self._safe_float(
+                        cycle.get("peak_pnl"),
+                        0.0,
+                    ),
+                    8,
+                ),
+                "basket_mae_pnl": round(
+                    self._safe_float(
+                        cycle.get("trough_pnl"),
+                        0.0,
+                    ),
+                    8,
+                ),
+                "basket_mfe_pct": (
+                    round(
+                        self._safe_float(
+                            cycle.get("peak_pnl"),
+                            0.0,
+                        )
+                        / capital
+                        * 100.0,
+                        4,
+                    )
+                    if capital > 0
+                    else 0.0
+                ),
+                "basket_mae_pct": (
+                    round(
+                        self._safe_float(
+                            cycle.get("trough_pnl"),
+                            0.0,
+                        )
+                        / capital
+                        * 100.0,
+                        4,
+                    )
+                    if capital > 0
+                    else 0.0
+                ),
+                "evidence_complete": all(
+                    bool(
+                        str(
+                            row.get("ig_deal_id")
+                            or row.get("deal_id")
+                            or ""
+                        )
+                    )
+                    and row.get(
+                        "model_ai_confidence"
+                    ) is not None
+                    and row.get(
+                        "quant_confidence"
+                    ) is not None
+                    and row.get(
+                        "smart_fast_score"
+                    ) is not None
+                    and bool(
+                        row.get(
+                            "quality_tier"
+                        )
+                    )
+                    and bool(
+                        row.get(
+                            "deep_status"
+                        )
+                    )
+                    for row in (
+                        cycle.get("positions")
+                        or []
+                    )
+                    if isinstance(row, dict)
+                ),
             }
         )
 
@@ -1103,8 +1477,57 @@ class EliteCompoundEngine:
         stop = self._safe_float(cycle.get("stop_loss_amount"), 0.0)
 
         cycle["running_pnl"] = round(running_pnl, 8)
-        cycle["peak_pnl"] = round(max(self._safe_float(cycle.get("peak_pnl"), running_pnl), running_pnl), 8)
-        cycle["trough_pnl"] = round(min(self._safe_float(cycle.get("trough_pnl"), running_pnl), running_pnl), 8)
+        cycle["peak_pnl"] = round(
+            max(
+                self._safe_float(
+                    cycle.get("peak_pnl"),
+                    running_pnl,
+                ),
+                running_pnl,
+            ),
+            8,
+        )
+        cycle["trough_pnl"] = round(
+            min(
+                self._safe_float(
+                    cycle.get("trough_pnl"),
+                    running_pnl,
+                ),
+                running_pnl,
+            ),
+            8,
+        )
+        capital = self._safe_float(
+            cycle.get("starting_capital"),
+            0.0,
+        )
+        cycle["basket_mfe_pnl"] = cycle["peak_pnl"]
+        cycle["basket_mae_pnl"] = cycle["trough_pnl"]
+        cycle["basket_mfe_pct"] = (
+            round(
+                cycle["peak_pnl"]
+                / capital
+                * 100.0,
+                4,
+            )
+            if capital > 0
+            else 0.0
+        )
+        cycle["basket_mae_pct"] = (
+            round(
+                cycle["trough_pnl"]
+                / capital
+                * 100.0,
+                4,
+            )
+            if capital > 0
+            else 0.0
+        )
+
+        self._update_cycle_position_excursions(
+            cycle,
+            compound,
+        )
         cycle["last_broker_check_at"] = self._now()
         cycle["broker_open_positions"] = compound
 
@@ -1364,6 +1787,10 @@ class EliteCompoundEngine:
             "unified_intelligence_bridge": True,
             "broker_clean_required": True,
             "signals_evaluated_while_broker_blocked": True,
+            "evidence_integrity_tracking": True,
+            "position_mfe_mae_tracking": True,
+            "basket_mfe_mae_tracking": True,
+            "verified_close_required_for_accounting": True,
             "live_money_execution": False,
         }
 
@@ -1457,6 +1884,10 @@ class EliteCompoundEngine:
             "last_selection_at": state.get("last_selection_at"),
             "last_tick_at": state.get("last_tick_at"),
             "last_error": state.get("last_error"),
+            "close_integrity": dict(
+                state.get("close_integrity")
+                or {}
+            ),
             "rules": self.rules(),
             "state_path": str(self.state_path),
             "environment": "DEMO",
