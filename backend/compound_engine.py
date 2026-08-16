@@ -13,7 +13,7 @@ from ig_demo_broker import IGDemoBroker, IGDemoError
 
 
 class EliteCompoundEngine:
-    """Jasong V6.7.0 Elite 80/20 Compound Engine — IG DEMO only.
+    """Jasong V6.7.1 Elite 80/20 Compound Engine — IG DEMO only.
 
     Design goals:
       * preserve the existing Jasong AI / PAPER / SHADOW learning engines;
@@ -31,11 +31,22 @@ class EliteCompoundEngine:
     IG's account P&L is account-wide. To keep cycle P&L attributable to this
     strategy, the engine will not open a new compound basket while any foreign
     broker position is open. "Foreign" means any open position whose deal
-    reference does not start with JSCMP_. Existing Jasong AI can keep scanning,
-    learning and collecting PAPER/SHADOW evidence while legacy IG entries drain.
+    reference does not start with JSCMP_.
+
+    V6.7.1 changes the behaviour while the broker is not yet clean:
+      * Elite ranking continues to run;
+      * Live Intelligence can wake the engine immediately;
+      * qualifying setups are retained as PENDING_ELITE candidates;
+      * exact broker blockers are exposed to the mobile app;
+      * the first eligible basket is opened automatically as soon as the broker
+        becomes clean and the live setup still passes every Elite gate.
+
+    Existing Jasong AI can therefore keep scanning, learning and collecting
+    PAPER/SHADOW evidence while legacy IG entries drain, without losing the
+    opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.7.0"
+    VERSION = "6.7.1"
     DEAL_PREFIX = "JSCMP_"
 
     def __init__(
@@ -115,6 +126,7 @@ class EliteCompoundEngine:
         self._lock = threading.RLock()
         self._tick_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._correlation_cache: Dict[str, Dict[str, float]] = {}
         self._correlation_cache_at = 0.0
@@ -143,6 +155,12 @@ class EliteCompoundEngine:
             "broker_account": {},
             "broker_positions": [],
             "legacy_execution_paused": False,
+            "pending_elite_candidates": [],
+            "last_intelligence_signal": None,
+            "last_intelligence_at": None,
+            "intelligence_bridge_state": "IDLE",
+            "intelligence_wake_count": 0,
+            "last_foreign_blockers": [],
         }
         self._load()
 
@@ -223,13 +241,54 @@ class EliteCompoundEngine:
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._loop,
-                name="jasong-v670-elite-compound",
+                name="jasong-v671-elite-compound",
                 daemon=True,
             )
             self._thread.start()
 
     def stop_thread(self) -> None:
         self._stop_event.set()
+        self._wake_event.set()
+
+    def wake(self) -> None:
+        """Wake the server-side Compound loop without waiting for the next poll."""
+        self._wake_event.set()
+
+    def notify_intelligence(
+        self,
+        snapshot: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Receive the same Live Intelligence snapshot shown in the mobile app.
+
+        The signal itself is not an order. It only wakes Compound immediately.
+        The candidate must still pass Fast >= configured minimum, A/A+ quality,
+        deep-validation eligibility, AI/Quant floors, IG spread/tradeability,
+        correlation and currency-exposure gates.
+
+        This method is deliberately lightweight so the /signal request does not
+        block on broker/deep-validation work.
+        """
+        clean = dict(snapshot or {})
+        now = self._now()
+
+        with self._lock:
+            self._state["last_intelligence_signal"] = clean or None
+            self._state["last_intelligence_at"] = now
+            self._state["intelligence_bridge_state"] = "LIVE_SIGNAL_RECEIVED"
+            self._state["intelligence_wake_count"] = int(
+                self._state.get("intelligence_wake_count") or 0
+            ) + 1
+            self._persist()
+
+        self.wake()
+        return {
+            "accepted": True,
+            "bridge_state": "LIVE_SIGNAL_RECEIVED",
+            "compound_enabled": bool(self._state.get("enabled")),
+            "signal": clean,
+            "environment": "DEMO",
+            "live_money_execution": False,
+        }
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -240,8 +299,11 @@ class EliteCompoundEngine:
                     self._state["last_error"] = f"{type(exc).__name__}: {exc}"
                     self._state["last_tick_at"] = self._now()
                     self._persist()
-            if self._stop_event.wait(self.poll_seconds):
-                break
+
+            # V6.7.1: sleep normally, but allow shared Live Intelligence to wake
+            # the loop immediately when a fresh BUY/SELL signal arrives.
+            self._wake_event.wait(self.poll_seconds)
+            self._wake_event.clear()
 
     # ------------------------------------------------------------------
     # Broker state
@@ -662,16 +724,6 @@ class EliteCompoundEngine:
                 self._state["status"] = "COOLDOWN"
             return self.status()
 
-        foreign = self._foreign_positions(positions)
-        if foreign:
-            with self._lock:
-                self._state["status"] = "WAITING_FOR_CLEAN_BROKER"
-                self._state["paused_reason"] = (
-                    "Compound execution is waiting for legacy/manual IG DEMO positions to close so account P&L remains attributable to the compound basket."
-                )
-                self._persist()
-            return self.status()
-
         account_balance = self._safe_float(account.get("balance"), 0.0)
         reserve = self._safe_float(self._state.get("reserve_balance"), 0.0)
         deployable = max(0.0, account_balance - reserve)
@@ -681,16 +733,81 @@ class EliteCompoundEngine:
                 self._state["paused_reason"] = (
                     f"Cycle capital {capital:.2f} exceeds broker balance minus protected reserve ({deployable:.2f})."
                 )
+                self._state["pending_elite_candidates"] = []
+                self._state["intelligence_bridge_state"] = "PAUSED_FUNDS"
                 self._persist()
             return self.status()
 
+        # V6.7.1: ALWAYS evaluate intelligence before the clean-broker veto.
+        # This is the missing link from V6.7.1: Live Intelligence and the
+        # Compound screen now share the same decision trail even when existing
+        # legacy/manual broker positions temporarily block execution.
         selected = self._rank_candidates(capital)
+
+        foreign = self._foreign_positions(positions)
+        if foreign:
+            blocker_names = [
+                str(
+                    row.get("symbol")
+                    or row.get("epic")
+                    or row.get("deal_reference")
+                    or "IG position"
+                )
+                for row in foreign
+            ]
+            with self._lock:
+                self._state["status"] = "WAITING_FOR_CLEAN_BROKER"
+                self._state["last_foreign_blockers"] = [
+                    dict(row)
+                    for row in foreign
+                ]
+                self._state["pending_elite_candidates"] = [
+                    dict(row)
+                    for row in selected
+                ]
+                self._state["intelligence_bridge_state"] = (
+                    "ELITE_READY_BROKER_BLOCKED"
+                    if selected
+                    else "BROKER_BLOCKED_NO_ELITE"
+                )
+                self._state["paused_reason"] = (
+                    f"{len(foreign)} legacy/manual IG DEMO position(s) block "
+                    "Compound execution because IG account P&L is account-wide. "
+                    + (
+                        f"{len(selected)} Elite setup(s) are ready and will be "
+                        "revalidated automatically when the broker becomes clean. "
+                        if selected
+                        else
+                        "Live Intelligence is still being evaluated while the broker drains. "
+                    )
+                    + "Blockers: "
+                    + ", ".join(blocker_names[:6])
+                )
+                self._persist()
+            return self.status()
+
+        with self._lock:
+            self._state["last_foreign_blockers"] = []
+
         if not selected:
             with self._lock:
                 self._state["status"] = "WAITING_FOR_ELITE_MARKETS"
-                self._state["paused_reason"] = "No market currently passes every Elite gate."
+                self._state["paused_reason"] = (
+                    "No market currently passes every Elite gate. "
+                    "Unified Live Intelligence remains connected and will wake "
+                    "the Compound engine when a new directional setup arrives."
+                )
+                self._state["pending_elite_candidates"] = []
+                self._state["intelligence_bridge_state"] = "LISTENING_FOR_ELITE"
                 self._persist()
             return self.status()
+
+        with self._lock:
+            self._state["pending_elite_candidates"] = [
+                dict(row)
+                for row in selected
+            ]
+            self._state["intelligence_bridge_state"] = "ELITE_READY"
 
         with self._lock:
             cycle_number = int(self._state.get("cycle_number") or 0) + 1
@@ -791,6 +908,7 @@ class EliteCompoundEngine:
                 self._state["status"] = "WAITING_FOR_ELITE_MARKETS"
                 self._state["last_error"] = "; ".join(errors) if errors else "No compound position opened"
                 self._state["next_cycle_at"] = self._now() + self.restart_cooldown_seconds
+                self._state["intelligence_bridge_state"] = "OPEN_FAILED"
                 self._persist()
             return self.status()
 
@@ -802,6 +920,8 @@ class EliteCompoundEngine:
             self._state["current_cycle"] = cycle
             self._state["status"] = "ACTIVE"
             self._state["paused_reason"] = None
+            self._state["pending_elite_candidates"] = []
+            self._state["intelligence_bridge_state"] = "BASKET_ACTIVE"
             self._persist()
         self._journal(
             "COMPOUND_CYCLE_OPENED",
@@ -812,6 +932,14 @@ class EliteCompoundEngine:
                 "symbols": [row.get("symbol") for row in opened],
             },
         )
+
+        # Refresh broker truth once after opening so the mobile app does not
+        # temporarily show 0/5 until the next 15-second monitoring tick.
+        try:
+            self._broker_snapshot()
+        except Exception:
+            pass
+
         return self.status()
 
     def _close_compound_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -920,6 +1048,12 @@ class EliteCompoundEngine:
                 else "STOPPED"
             )
             self._state["paused_reason"] = None
+            self._state["pending_elite_candidates"] = []
+            self._state["intelligence_bridge_state"] = (
+                "COOLDOWN"
+                if self._state.get("enabled") and self._state.get("auto_restart")
+                else "IDLE"
+            )
             self._persist()
 
         self._journal(
@@ -977,6 +1111,11 @@ class EliteCompoundEngine:
         with self._lock:
             self._state["current_cycle"] = cycle
             self._state["status"] = "ACTIVE" if cycle.get("status") != "CLOSING" else "CLOSING_BASKET"
+            self._state["intelligence_bridge_state"] = (
+                "BASKET_ACTIVE"
+                if cycle.get("status") != "CLOSING"
+                else "BASKET_CLOSING"
+            )
             self._persist()
 
         close_reason = None
@@ -1048,6 +1187,7 @@ class EliteCompoundEngine:
             self._state["status"] = "STARTING"
             self._state["paused_reason"] = None
             self._state["last_error"] = None
+            self._state["intelligence_bridge_state"] = "STARTING"
             self._persist()
 
         self.start_thread()
@@ -1066,6 +1206,7 @@ class EliteCompoundEngine:
             self._state["next_cycle_at"] = self._now()
             self._state["status"] = "RESUMING"
             self._state["paused_reason"] = None
+            self._state["intelligence_bridge_state"] = "RESUMING"
             self._persist()
         self.start_thread()
         return self.tick()
@@ -1082,6 +1223,7 @@ class EliteCompoundEngine:
             elif not cycle:
                 self._state["status"] = "STOPPED"
                 self._state["paused_reason"] = None
+                self._state["intelligence_bridge_state"] = "IDLE"
             self._persist()
 
         if close_now and cycle:
@@ -1219,6 +1361,9 @@ class EliteCompoundEngine:
             "broker_execution": "IG_DEMO_ONLY",
             "legacy_tracking_preserved": True,
             "legacy_ig_new_entries_must_be_paused_while_compound_runs": True,
+            "unified_intelligence_bridge": True,
+            "broker_clean_required": True,
+            "signals_evaluated_while_broker_blocked": True,
             "live_money_execution": False,
         }
 
@@ -1268,6 +1413,31 @@ class EliteCompoundEngine:
             "compound_broker_positions": self._compound_positions(positions),
             "foreign_broker_positions": self._foreign_positions(positions),
             "legacy_execution_paused": bool(state.get("legacy_execution_paused")),
+            "pending_elite_candidates": [
+                dict(row)
+                for row in (state.get("pending_elite_candidates") or [])
+                if isinstance(row, dict)
+            ][: self.max_positions],
+            "pending_elite_count": len(
+                [
+                    row
+                    for row in (state.get("pending_elite_candidates") or [])
+                    if isinstance(row, dict)
+                ]
+            ),
+            "last_intelligence_signal": (
+                dict(state.get("last_intelligence_signal"))
+                if isinstance(state.get("last_intelligence_signal"), dict)
+                else None
+            ),
+            "last_intelligence_at": state.get("last_intelligence_at"),
+            "intelligence_bridge_state": state.get("intelligence_bridge_state") or "IDLE",
+            "intelligence_wake_count": int(state.get("intelligence_wake_count") or 0),
+            "last_foreign_blockers": [
+                dict(row)
+                for row in (state.get("last_foreign_blockers") or [])
+                if isinstance(row, dict)
+            ],
             "last_candidate_ranking": ranking[:30],
             "recent_cycles": sorted(
                 cycles,
