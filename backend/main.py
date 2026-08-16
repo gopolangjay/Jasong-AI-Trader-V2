@@ -65,6 +65,7 @@ from v64_learning_engine import V64LearningTradeEngine
 from ig_demo_broker import IGDemoError
 from ig_demo_bridge import IGDemoMirror
 from compound_engine import EliteCompoundEngine
+from integrity_engine import EvidenceExecutionIntegrityEngine
 
 from database import (
     SessionLocal,
@@ -207,8 +208,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.7.1 API",
-    version="6.7.1",
+    title="Jasong AI Trader V6.7.2 API",
+    version="6.7.2",
 )
 
 app.add_middleware(
@@ -1022,8 +1023,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.6.0",
-        "engine": "JASONG_AI_V6.6",
+        "version": "6.7.2",
+        "engine": "JASONG_AI_V6.7.2_INTEGRITY",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -1301,7 +1302,7 @@ def _v671_store_live_intelligence(
 
     now = time.time()
     snapshot = {
-        "version": "6.7.1",
+        "version": "6.7.2",
         "source":
             "HOME_LIVE_INTELLIGENCE",
         "symbol": symbol,
@@ -4805,6 +4806,17 @@ def get_auto_dashboard(
             "historical_grade": trade.get("historical_grade"),
             "entry_confidence": trade.get("quant_confidence"),
             "model_ai_confidence": trade.get("model_ai_confidence"),
+            "quant_confidence": trade.get("quant_confidence"),
+            "smart_fast_score": trade.get("smart_fast_score"),
+            "quality_tier": trade.get("quality_tier"),
+            "deep_status": trade.get("deep_status"),
+            "historical_win_rate": trade.get("historical_win_rate"),
+            "historical_profit_factor": trade.get("historical_profit_factor"),
+            "historical_trades": trade.get("historical_trades"),
+            "entry_rsi": trade.get("entry_rsi"),
+            "entry_ai_up": trade.get("entry_ai_up"),
+            "mfe_bps": trade.get("mfe_bps"),
+            "mae_bps": trade.get("mae_bps"),
             "entry_price": trade.get("entry_price"),
             "entry_time": trade.get("opened_at"),
             "settlement_due_at": trade.get("scheduled_close_at"),
@@ -4931,6 +4943,18 @@ def get_auto_dashboard(
             ),
             "ig_size": mirror.get("ig_size"),
             "broker_status": broker_status,
+            "quant_confidence": mirror.get("quant_confidence"),
+            "smart_fast_score": mirror.get("smart_fast_score"),
+            "quality_tier": mirror.get("quality_tier"),
+            "deep_status": mirror.get("deep_status"),
+            "historical_win_rate": mirror.get("historical_win_rate"),
+            "historical_profit_factor": mirror.get("historical_profit_factor"),
+            "historical_trades": mirror.get("historical_trades"),
+            "mfe_bps": mirror.get("mfe_bps"),
+            "mae_bps": mirror.get("mae_bps"),
+            "close_attempts": mirror.get("close_attempts"),
+            "close_verified": mirror.get("close_verified"),
+            "last_close_error": mirror.get("last_close_error"),
             "recovered_from_ig": bool(
                 mirror.get("recovered_from_ig")
             ),
@@ -4952,6 +4976,42 @@ def get_auto_dashboard(
         V66_INTELLIGENCE
         .forward_performance(
             watchers
+        )
+    )
+
+    compound_snapshot = (
+        COMPOUND_ENGINE.status()
+        if "COMPOUND_ENGINE" in globals()
+        else {
+            "status": "STARTING",
+            "environment": "DEMO",
+            "live_money_execution": False,
+        }
+    )
+
+    integrity_snapshot = (
+        EvidenceExecutionIntegrityEngine
+        .evaluate(
+            model_evidence=
+                model_forward_evidence,
+            ig_demo=
+                ig_demo_status,
+            compound=
+                compound_snapshot,
+            market_data=
+                market_data_health(),
+            persistence={
+                "jasong_state_path":
+                    JASONG_STATE_PATH,
+                "ig_state_path":
+                    ig_demo_status.get(
+                        "state_path"
+                    ),
+                "compound_state_path":
+                    compound_snapshot.get(
+                        "state_path"
+                    ),
+            },
         )
     )
 
@@ -5043,15 +5103,10 @@ def get_auto_dashboard(
                 )
                 or {}
             ),
-        "compound": (
-            COMPOUND_ENGINE.status()
-            if "COMPOUND_ENGINE" in globals()
-            else {
-                "status": "STARTING",
-                "environment": "DEMO",
-                "live_money_execution": False,
-            }
-        ),
+        "compound":
+            compound_snapshot,
+        "integrity":
+            integrity_snapshot,
         "paper_trades":
             paper_trade_rows[:50],
         "v66_forward_intelligence":
@@ -5329,9 +5384,9 @@ def _v669_model_forward_evidence(
 
     return {
         "version":
-            "6.6.9",
+            "6.7.2",
         "source":
-            "V64_AI_LEARNING_FORWARD_EVIDENCE",
+            "V64_AI_LEARNING_FORWARD_EVIDENCE_INTEGRITY",
         "entries":
             len(actual_rows),
         # Compatibility aliases used by existing mobile code.
@@ -5408,6 +5463,64 @@ def get_model_forward_evidence(
     return _v669_model_forward_evidence(
         starting_balance=
             starting_balance
+    )
+
+
+@app.get("/integrity/status")
+def get_integrity_status(
+    starting_balance: float = 10000.0,
+):
+    """Deterministic operational/evidence health; never a return forecast."""
+    validate_balance(
+        starting_balance
+    )
+
+    model_evidence = (
+        _v669_model_forward_evidence(
+            starting_balance=
+                starting_balance
+        )
+    )
+    ig_demo = (
+        IG_DEMO_MIRROR
+        .ensure_broker_fresh(
+            max_age_seconds=30
+        )
+    )
+    compound = (
+        COMPOUND_ENGINE.status()
+        if "COMPOUND_ENGINE" in globals()
+        else {
+            "status": "STARTING",
+            "environment": "DEMO",
+            "live_money_execution": False,
+        }
+    )
+
+    return (
+        EvidenceExecutionIntegrityEngine
+        .evaluate(
+            model_evidence=
+                model_evidence,
+            ig_demo=
+                ig_demo,
+            compound=
+                compound,
+            market_data=
+                market_data_health(),
+            persistence={
+                "jasong_state_path":
+                    JASONG_STATE_PATH,
+                "ig_state_path":
+                    ig_demo.get(
+                        "state_path"
+                    ),
+                "compound_state_path":
+                    compound.get(
+                        "state_path"
+                    ),
+            },
+        )
     )
 
 
@@ -6237,6 +6350,51 @@ def _v671_compound_candidate_source(
                 deep_status,
             "smart_fast_score":
                 smart_score,
+            "historical_win_rate":
+                (
+                    candidate_meta.get(
+                        "historical_win_rate"
+                    )
+                    or candidate_meta.get(
+                        "win_rate"
+                    )
+                    or validated_meta.get(
+                        "historical_win_rate"
+                    )
+                    or validated_meta.get(
+                        "win_rate"
+                    )
+                ),
+            "historical_profit_factor":
+                (
+                    candidate_meta.get(
+                        "historical_profit_factor"
+                    )
+                    or candidate_meta.get(
+                        "profit_factor"
+                    )
+                    or validated_meta.get(
+                        "historical_profit_factor"
+                    )
+                    or validated_meta.get(
+                        "profit_factor"
+                    )
+                ),
+            "historical_trades":
+                (
+                    candidate_meta.get(
+                        "historical_trades"
+                    )
+                    or candidate_meta.get(
+                        "trades"
+                    )
+                    or validated_meta.get(
+                        "historical_trades"
+                    )
+                    or validated_meta.get(
+                        "trades"
+                    )
+                ),
             "verified":
                 bool(
                     watcher.get(
@@ -6686,7 +6844,7 @@ def compound_status():
 def compound_intelligence():
     """Inspect the shared Home ↔ Compound Live Intelligence bridge."""
     return {
-        "version": "6.7.1",
+        "version": "6.7.2",
         "recent_live_intelligence":
             _v671_recent_intelligence(),
         "compound":
@@ -7042,7 +7200,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.7.1-UNIFIED-INTELLIGENCE-COMPOUND",
+            "6.7.2-EVIDENCE-EXECUTION-INTEGRITY",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
