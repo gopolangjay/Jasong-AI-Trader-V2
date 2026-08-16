@@ -102,7 +102,7 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.6.9-IG-DEMO",
+            "version": "6.7.2-IG-DEMO-INTEGRITY",
             "mirrors": {},
             "broker_positions": [],
             "broker_account": {},
@@ -413,6 +413,87 @@ class IGDemoMirror:
         )
         return rows
 
+    @staticmethod
+    def _signed_move_bps(
+        *,
+        entry_level: Any,
+        direction: Any,
+        bid: Any,
+        offer: Any,
+    ) -> Optional[float]:
+        """Executable price excursion in basis points from broker entry."""
+        try:
+            entry = float(entry_level or 0.0)
+            bid_value = float(bid or 0.0)
+            offer_value = float(offer or 0.0)
+        except Exception:
+            return None
+        if entry <= 0:
+            return None
+
+        side = str(direction or "").upper()
+        if side == "BUY":
+            exit_now = bid_value
+            if exit_now <= 0:
+                return None
+            return ((exit_now - entry) / entry) * 10000.0
+        if side == "SELL":
+            exit_now = offer_value
+            if exit_now <= 0:
+                return None
+            return ((entry - exit_now) / entry) * 10000.0
+        return None
+
+    def _update_mirror_excursion(
+        self,
+        mirror: Dict[str, Any],
+        position: Dict[str, Any],
+    ) -> None:
+        move = self._signed_move_bps(
+            entry_level=(
+                mirror.get("broker_entry_level")
+                or position.get("entry_level")
+            ),
+            direction=(
+                mirror.get("direction")
+                or position.get("direction")
+            ),
+            bid=position.get("bid"),
+            offer=position.get("offer"),
+        )
+        if move is None:
+            return
+
+        previous_mfe = self._safe_number(
+            mirror.get("mfe_bps")
+        )
+        previous_mae = self._safe_number(
+            mirror.get("mae_bps")
+        )
+
+        mirror["current_move_bps"] = round(move, 4)
+        mirror["mfe_bps"] = round(
+            max(
+                0.0,
+                previous_mfe
+                if previous_mfe is not None
+                else 0.0,
+                move,
+            ),
+            4,
+        )
+        mirror["mae_bps"] = round(
+            min(
+                0.0,
+                previous_mae
+                if previous_mae is not None
+                else 0.0,
+                move,
+            ),
+            4,
+        )
+        mirror["last_excursion_at"] = time.time()
+
     def _mirror_by_deal_id(
         self,
         deal_id: str,
@@ -629,6 +710,11 @@ class IGDemoMirror:
                         "environment": "DEMO",
                         "live_money_execution": False,
                         "open_attempts": 0,
+                        "close_attempts": 0,
+                        "close_requested_at": None,
+                        "close_verified": False,
+                        "mfe_bps": 0.0,
+                        "mae_bps": 0.0,
                     }
                     mirrors[key] = mirror
 
@@ -657,6 +743,10 @@ class IGDemoMirror:
                     "last_seen_on_ig_at": now,
                     "last_error": None,
                 })
+                self._update_mirror_excursion(
+                    mirror,
+                    position,
+                )
 
             # If a position used to be OPEN in our ledger but IG no longer
             # reports it, treat IG as authoritative. Do not delete the record:
@@ -666,22 +756,36 @@ class IGDemoMirror:
                     mirror.get("ig_deal_id")
                     or ""
                 )
+                previous_status = str(
+                    mirror.get("broker_status")
+                    or ""
+                ).upper()
                 if (
                     deal_id
-                    and str(
-                        mirror.get("broker_status")
-                        or ""
-                    ).upper() == "OPEN"
+                    and previous_status
+                    in {
+                        "OPEN",
+                        "CLOSE_PENDING",
+                    }
                     and deal_id not in current_deal_ids
                 ):
+                    initiated_close = bool(
+                        mirror.get("close_requested_at")
+                    )
                     mirror["broker_status"] = (
-                        "CLOSED_EXTERNALLY"
+                        "CLOSED"
+                        if initiated_close
+                        else "CLOSED_EXTERNALLY"
                     )
                     mirror["closed_at"] = (
                         mirror.get("closed_at")
                         or now
                     )
-                    mirror["externally_closed"] = True
+                    mirror["close_verified"] = True
+                    mirror["remaining_size"] = 0.0
+                    mirror["externally_closed"] = (
+                        not initiated_close
+                    )
 
             self._state["broker_positions"] = positions
             self._state["last_broker_sync_at"] = now
@@ -927,7 +1031,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.6.9-IG-DEMO-EVIDENCE-SYNC",
+                "version": "6.7.2-IG-DEMO-EVIDENCE-INTEGRITY",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1354,6 +1458,10 @@ class IGDemoMirror:
                             "last_error":
                                 None,
                         })
+                        self._update_mirror_excursion(
+                            mirror,
+                            position,
+                        )
 
                     for mirror in (
                         self._mirrors().values()
@@ -1364,21 +1472,33 @@ class IGDemoMirror:
                             )
                             or ""
                         )
+                        previous_status = str(
+                            mirror.get(
+                                "broker_status"
+                            )
+                            or ""
+                        ).upper()
                         if (
                             deal_id
-                            and str(
-                                mirror.get(
-                                    "broker_status"
-                                )
-                                or ""
-                            ).upper() == "OPEN"
+                            and previous_status
+                            in {
+                                "OPEN",
+                                "CLOSE_PENDING",
+                            }
                             and deal_id
                             not in current_ids
                         ):
+                            initiated_close = bool(
+                                mirror.get(
+                                    "close_requested_at"
+                                )
+                            )
                             mirror[
                                 "broker_status"
                             ] = (
-                                "CLOSED_EXTERNALLY"
+                                "CLOSED"
+                                if initiated_close
+                                else "CLOSED_EXTERNALLY"
                             )
                             mirror[
                                 "closed_at"
@@ -1387,6 +1507,17 @@ class IGDemoMirror:
                                     "closed_at"
                                 )
                                 or now
+                            )
+                            mirror[
+                                "close_verified"
+                            ] = True
+                            mirror[
+                                "remaining_size"
+                            ] = 0.0
+                            mirror[
+                                "externally_closed"
+                            ] = (
+                                not initiated_close
                             )
 
                     self._state[
@@ -1463,20 +1594,51 @@ class IGDemoMirror:
                     continue
 
                 try:
+                    mirror["close_attempts"] = int(
+                        mirror.get("close_attempts")
+                        or 0
+                    ) + 1
+                    mirror["close_requested_at"] = (
+                        time.time()
+                    )
+
                     result = (
                         self.broker.close_position(
                             deal_id
                         )
                     )
                     mirror[
-                        "broker_status"
-                    ] = "CLOSED"
-                    mirror["closed_at"] = (
-                        time.time()
-                    )
-                    mirror[
                         "close_result"
                     ] = result
+                    mirror[
+                        "remaining_size"
+                    ] = result.get(
+                        "remainingSize"
+                    )
+                    mirror[
+                        "close_verified"
+                    ] = bool(
+                        result.get(
+                            "closeVerified"
+                        )
+                    )
+
+                    if mirror["close_verified"]:
+                        mirror[
+                            "broker_status"
+                        ] = "CLOSED"
+                        mirror["closed_at"] = (
+                            time.time()
+                        )
+                    else:
+                        # Accepted/submitted is not the same as broker-verified
+                        # disappearance. The next normal reconcile is authoritative.
+                        mirror[
+                            "broker_status"
+                        ] = "CLOSE_PENDING"
+
+                    mirror["last_error"] = None
+
                     if trade is not None:
                         mirror[
                             "internal_result"
@@ -1488,11 +1650,16 @@ class IGDemoMirror:
                         ] = trade.get(
                             "pnl"
                         )
+
                     self._record_broker_outcome(
                         mirror,
                         result,
                     )
                 except Exception as exc:
+                    mirror["last_close_error"] = (
+                        f"{type(exc).__name__}: "
+                        f"{exc}"
+                    )
                     mirror["last_error"] = (
                         f"close: "
                         f"{type(exc).__name__}: "
@@ -1651,6 +1818,38 @@ class IGDemoMirror:
                             trade.get(
                                 "reason"
                             ),
+                        "smart_fast_score":
+                            trade.get(
+                                "smart_fast_score"
+                            ),
+                        "quality_tier":
+                            trade.get(
+                                "quality_tier"
+                            ),
+                        "deep_status":
+                            trade.get(
+                                "deep_status"
+                            ),
+                        "historical_win_rate":
+                            trade.get(
+                                "historical_win_rate"
+                            ),
+                        "historical_profit_factor":
+                            trade.get(
+                                "historical_profit_factor"
+                            ),
+                        "historical_trades":
+                            trade.get(
+                                "historical_trades"
+                            ),
+                        "entry_rsi":
+                            trade.get(
+                                "entry_rsi"
+                            ),
+                        "entry_ai_up":
+                            trade.get(
+                                "entry_ai_up"
+                            ),
                         "internal_entry_price":
                             trade.get(
                                 "entry_price"
@@ -1671,6 +1870,18 @@ class IGDemoMirror:
                             0,
                         "next_retry_at":
                             None,
+                        "close_attempts":
+                            0,
+                        "close_requested_at":
+                            None,
+                        "close_verified":
+                            False,
+                        "remaining_size":
+                            None,
+                        "mfe_bps":
+                            0.0,
+                        "mae_bps":
+                            0.0,
                     }
                     self._mirrors()[
                         trade_id
@@ -1691,4 +1902,3 @@ class IGDemoMirror:
             return self.status()
         finally:
             self._sync_lock.release()
-
