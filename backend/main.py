@@ -208,8 +208,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.7.2 API",
-    version="6.7.2",
+    title="Jasong AI Trader V6.7.2a API",
+    version="6.7.2a",
 )
 
 app.add_middleware(
@@ -1023,8 +1023,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.7.2",
-        "engine": "JASONG_AI_V6.7.2_INTEGRITY",
+        "version": "6.7.2a",
+        "engine": "JASONG_AI_V6.7.2a_MARKET_AWARE_CLOSE",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -1302,7 +1302,7 @@ def _v671_store_live_intelligence(
 
     now = time.time()
     snapshot = {
-        "version": "6.7.2",
+        "version": "6.7.2a",
         "source":
             "HOME_LIVE_INTELLIGENCE",
         "symbol": symbol,
@@ -6844,7 +6844,7 @@ def compound_status():
 def compound_intelligence():
     """Inspect the shared Home ↔ Compound Live Intelligence bridge."""
     return {
-        "version": "6.7.2",
+        "version": "6.7.2a",
         "recent_live_intelligence":
             _v671_recent_intelligence(),
         "compound":
@@ -7200,7 +7200,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.7.2-EVIDENCE-EXECUTION-INTEGRITY",
+            "6.7.2a-MARKET-AWARE-CLOSE",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
