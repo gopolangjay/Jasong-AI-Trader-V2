@@ -13,6 +13,11 @@ from ig_demo_broker import IGDemoBroker, IGDemoError
 
 
 class IGDemoMirror:
+    CLOSE_ALLOWED_MARKET_STATUSES = {
+        "TRADEABLE",
+        "CLOSINGS_ONLY",
+    }
+
     """
     Mirrors Jasong AI learning trades to IG DEMO.
 
@@ -102,7 +107,7 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.7.2-IG-DEMO-INTEGRITY",
+            "version": "6.7.2a-IG-DEMO-MARKET-AWARE-CLOSE",
             "mirrors": {},
             "broker_positions": [],
             "broker_account": {},
@@ -726,6 +731,7 @@ class IGDemoMirror:
                     "ig_deal_reference": deal_reference,
                     "ig_epic": position.get("epic"),
                     "ig_size": position.get("size"),
+                    "market_status": position.get("market_status"),
                     "broker_entry_level": position.get(
                         "entry_level"
                     ),
@@ -1031,7 +1037,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.7.2-IG-DEMO-EVIDENCE-INTEGRITY",
+                "version": "6.7.2a-IG-DEMO-MARKET-AWARE-CLOSE",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1433,6 +1439,10 @@ class IGDemoMirror:
                                 position.get(
                                     "size"
                                 ),
+                            "market_status":
+                                position.get(
+                                    "market_status"
+                                ),
                             "broker_entry_level":
                                 position.get(
                                     "entry_level"
@@ -1593,7 +1603,88 @@ class IGDemoMirror:
                 if not deal_id:
                     continue
 
+                market_status = str(
+                    mirror.get("market_status")
+                    or ""
+                ).upper().strip()
+
+                if (
+                    market_status
+                    and market_status
+                    not in self.CLOSE_ALLOWED_MARKET_STATUSES
+                ):
+                    # This is a scheduling deferral, not a broker execution
+                    # failure. Keep the position OPEN and let the normal
+                    # /positions reconciliation tell us when the market
+                    # becomes closable again.
+                    mirror["close_execution_state"] = (
+                        "CLOSE_DEFERRED_MARKET_CLOSED"
+                    )
+                    mirror["close_deferred_reason"] = (
+                        f"IG market status is {market_status}"
+                    )
+                    mirror["close_deferred_at"] = time.time()
+                    mirror["last_market_status_at_close_check"] = (
+                        market_status
+                    )
+                    # Clear the old weekend rejection once the current IG
+                    # snapshot itself confirms the market is unavailable.
+                    old_error = str(
+                        mirror.get("last_close_error")
+                        or ""
+                    )
+                    if (
+                        "MARKET_CLOSED_WITH_EDITS"
+                        in old_error.upper()
+                    ):
+                        mirror["last_close_error"] = None
+                    old_last_error = str(
+                        mirror.get("last_error")
+                        or ""
+                    )
+                    if (
+                        "MARKET_CLOSED_WITH_EDITS"
+                        in old_last_error.upper()
+                    ):
+                        mirror["last_error"] = None
+                    continue
+
+                mirror["close_execution_state"] = (
+                    "CLOSE_READY"
+                )
+                mirror["close_deferred_reason"] = None
+
                 try:
+                    result = (
+                        self.broker.close_position(
+                            deal_id
+                        )
+                    )
+
+                    if bool(
+                        result.get("closeDeferred")
+                    ):
+                        mirror["close_execution_state"] = (
+                            "CLOSE_DEFERRED_MARKET_CLOSED"
+                        )
+                        mirror["market_status"] = (
+                            result.get("marketStatus")
+                            or mirror.get("market_status")
+                        )
+                        mirror["close_deferred_reason"] = (
+                            result.get("deferredReason")
+                            or (
+                                "IG market is not currently open "
+                                "for position closing"
+                            )
+                        )
+                        mirror["close_deferred_at"] = (
+                            time.time()
+                        )
+                        mirror["last_close_error"] = None
+                        mirror["last_error"] = None
+                        continue
+
                     mirror["close_attempts"] = int(
                         mirror.get("close_attempts")
                         or 0
@@ -1602,11 +1693,6 @@ class IGDemoMirror:
                         time.time()
                     )
 
-                    result = (
-                        self.broker.close_position(
-                            deal_id
-                        )
-                    )
                     mirror[
                         "close_result"
                     ] = result
