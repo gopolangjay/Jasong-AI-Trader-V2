@@ -207,8 +207,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.7.0 API",
-    version="6.7.0",
+    title="Jasong AI Trader V6.7.1 API",
+    version="6.7.1",
 )
 
 app.add_middleware(
@@ -1188,6 +1188,243 @@ def _v651_norm_symbol(value: str) -> str:
     return text
 
 
+
+# ============================================================
+# V6.7.1 UNIFIED LIVE INTELLIGENCE BUS
+# ============================================================
+
+_V671_INTELLIGENCE_LOCK = threading.RLock()
+_V671_LIVE_INTELLIGENCE: dict[str, dict] = {}
+try:
+    _V671_INTELLIGENCE_TTL_SECONDS = max(
+        30,
+        min(
+            900,
+            int(
+                os.getenv(
+                    "COMPOUND_INTELLIGENCE_TTL_SECONDS",
+                    "180",
+                )
+            ),
+        ),
+    )
+except Exception:
+    _V671_INTELLIGENCE_TTL_SECONDS = 180
+
+
+def _v671_ai_up_probability(
+    result: dict,
+) -> float:
+    for key in (
+        "combined_up_probability",
+        "ai_up_probability",
+        "ai_up",
+        "up_probability",
+        "prob_up",
+        "probability_up",
+    ):
+        if result.get(key) is not None:
+            return _v651_confidence01(
+                result.get(key)
+            )
+    return 0.0
+
+
+def _v671_intelligence_key(
+    symbol: str,
+    direction: str,
+) -> str:
+    return (
+        f"{_v651_norm_symbol(symbol)}:"
+        f"{str(direction or '').upper().strip()}"
+    )
+
+
+def _v671_prune_intelligence() -> None:
+    cutoff = (
+        time.time()
+        - _V671_INTELLIGENCE_TTL_SECONDS
+    )
+    with _V671_INTELLIGENCE_LOCK:
+        stale = [
+            key
+            for key, row
+            in _V671_LIVE_INTELLIGENCE.items()
+            if float(
+                row.get("observed_at")
+                or 0.0
+            )
+            < cutoff
+        ]
+        for key in stale:
+            _V671_LIVE_INTELLIGENCE.pop(
+                key,
+                None,
+            )
+
+
+def _v671_store_live_intelligence(
+    *,
+    symbol: str,
+    risk_mode: str,
+    signal_result: dict,
+) -> dict:
+    """Store the exact live decision used by the Home Live Intelligence card.
+
+    This is an intelligence observation, not an order. Compound still applies
+    every Elite gate before IG DEMO execution.
+    """
+    direction = str(
+        signal_result.get("direction")
+        or signal_result.get("signal")
+        or signal_result.get("decision")
+        or "WAIT"
+    ).upper().strip()
+
+    quant = _v651_confidence01(
+        signal_result.get("confidence")
+    )
+    ai_up = _v671_ai_up_probability(
+        signal_result
+    )
+    directional_ai = (
+        _v651_directional_model_ai(
+            signal_result,
+            direction,
+        )
+        if direction in {
+            "BUY",
+            "SELL",
+        }
+        else 0.0
+    )
+
+    now = time.time()
+    snapshot = {
+        "version": "6.7.1",
+        "source":
+            "HOME_LIVE_INTELLIGENCE",
+        "symbol": symbol,
+        "normalized_symbol":
+            _v651_norm_symbol(symbol),
+        "direction": direction,
+        "risk_mode": risk_mode,
+        "quant_confidence": quant,
+        "quant_confidence_pct":
+            round(
+                quant * 100.0,
+                2,
+            ),
+        "ai_up_probability":
+            ai_up,
+        "ai_up_probability_pct":
+            round(
+                ai_up * 100.0,
+                2,
+            ),
+        "model_ai_confidence":
+            directional_ai,
+        "model_ai_directional_confidence_pct":
+            round(
+                directional_ai * 100.0,
+                2,
+            ),
+        "price":
+            signal_result.get("price"),
+        "rsi":
+            signal_result.get("rsi"),
+        "reason":
+            signal_result.get("reason"),
+        "observed_at":
+            now,
+        "paper_learning":
+            True,
+        "ig_demo_compound_eligible_for_evaluation":
+            direction
+            in {
+                "BUY",
+                "SELL",
+            },
+        "live_money_execution":
+            False,
+    }
+
+    if direction in {
+        "BUY",
+        "SELL",
+    }:
+        key = _v671_intelligence_key(
+            symbol,
+            direction,
+        )
+        with _V671_INTELLIGENCE_LOCK:
+            _V671_LIVE_INTELLIGENCE[
+                key
+            ] = snapshot
+
+    _v671_prune_intelligence()
+    return snapshot
+
+
+def _v671_recent_intelligence() -> list[dict]:
+    _v671_prune_intelligence()
+    now = time.time()
+    with _V671_INTELLIGENCE_LOCK:
+        rows = [
+            dict(row)
+            for row
+            in _V671_LIVE_INTELLIGENCE.values()
+        ]
+
+    for row in rows:
+        row[
+            "age_seconds"
+        ] = round(
+            max(
+                0.0,
+                now
+                - float(
+                    row.get("observed_at")
+                    or now
+                ),
+            ),
+            2,
+        )
+
+    rows.sort(
+        key=lambda row:
+            float(
+                row.get("observed_at")
+                or 0.0
+            ),
+        reverse=True,
+    )
+    return rows
+
+
+def _v671_intelligence_for(
+    symbol: str,
+    direction: str,
+) -> Optional[dict]:
+    _v671_prune_intelligence()
+    key = _v671_intelligence_key(
+        symbol,
+        direction,
+    )
+    with _V671_INTELLIGENCE_LOCK:
+        row = _V671_LIVE_INTELLIGENCE.get(
+            key
+        )
+        return (
+            dict(row)
+            if isinstance(
+                row,
+                dict,
+            )
+            else None
+        )
+
+
 def _v651_signal_bridge(
     *,
     symbol: str,
@@ -1341,6 +1578,51 @@ def signal(
         balance=balance,
         signal_result=result,
     )
+
+    # V6.7.1: the exact same observation displayed under Live Intelligence is
+    # now placed on the shared server-side intelligence bus. If Compound is
+    # active, this wakes it immediately instead of waiting for the normal poll.
+    shared_intelligence = _v671_store_live_intelligence(
+        symbol=symbol,
+        risk_mode=risk_mode,
+        signal_result=result,
+    )
+    result[
+        "unified_intelligence"
+    ] = shared_intelligence
+
+    compound = globals().get(
+        "COMPOUND_ENGINE"
+    )
+    if compound is not None:
+        try:
+            result[
+                "compound_bridge"
+            ] = compound.notify_intelligence(
+                shared_intelligence
+            )
+        except Exception as exc:
+            result[
+                "compound_bridge"
+            ] = {
+                "accepted": False,
+                "bridge_state":
+                    "BRIDGE_ERROR",
+                "reason":
+                    f"{type(exc).__name__}: {exc}",
+                "live_money_execution":
+                    False,
+            }
+    else:
+        result[
+            "compound_bridge"
+        ] = {
+            "accepted": False,
+            "bridge_state":
+                "COMPOUND_NOT_INITIALISED",
+            "live_money_execution":
+                False,
+        }
 
     return result
 
@@ -5793,35 +6075,81 @@ def _v66_ai_learning_cycle() -> dict:
 
 
 # ============================================================
-# V6.7.0 ELITE 80/20 COMPOUND ENGINE
+# V6.7.1 UNIFIED INTELLIGENCE + ELITE COMPOUND ENGINE
 # ============================================================
 
-def _v670_compound_candidate_source(
+def _v671_compound_candidate_source(
     cycle_capital: float,
 ) -> list[dict]:
-    """Evaluate the current V64 learning watcher pool for Elite Compound.
+    """Unified candidate feed for Elite Compound.
 
-    This is read-only with respect to the existing learning system. It reuses
-    the already-sourced/deep-validated watcher metadata, obtains a fresh live
-    signal, and exposes the fields the compound engine needs for its own gate.
-    Existing PAPER/SHADOW tracking remains untouched.
+    V6.7.1 deliberately joins two information paths:
+
+      1. the persistent V64/deep-validated watcher pool; and
+      2. the exact recent Live Intelligence observations shown on Home.
+
+    A Home signal does NOT bypass deep validation. If it has no matching
+    deep-validated watcher yet, the row is still exposed to Compound with
+    PENDING_DEEP_VALIDATION so the mobile app can show the exact reason it is
+    not yet tradeable. The existing signal bridge queues Auto Manager to build
+    that missing evidence.
+
+    When a recent Home observation matches a watcher, Compound uses that same
+    direction/AI/Quant observation instead of immediately recomputing a
+    different signal. If no recent Home observation exists, Compound remains
+    autonomous and obtains a fresh server-side signal.
     """
-    watcher_payload = V64_LEARNING_ENGINE.watchers()
+    watcher_payload = (
+        V64_LEARNING_ENGINE.watchers()
+    )
     watchers = (
-        watcher_payload.get("watchers", [])
-        if isinstance(watcher_payload, dict)
+        watcher_payload.get(
+            "watchers",
+            [],
+        )
+        if isinstance(
+            watcher_payload,
+            dict,
+        )
         else []
     )
     watchers = [
         dict(item)
         for item in watchers
-        if isinstance(item, dict)
+        if isinstance(
+            item,
+            dict,
+        )
     ]
 
+    recent = (
+        _v671_recent_intelligence()
+    )
+    recent_by_key = {
+        _v671_intelligence_key(
+            str(row.get("symbol") or ""),
+            str(row.get("direction") or ""),
+        ): row
+        for row in recent
+        if str(
+            row.get("direction")
+            or ""
+        ).upper()
+        in {
+            "BUY",
+            "SELL",
+        }
+    }
+
     evaluated: list[dict] = []
+    seen_keys: set[str] = set()
+
     balance = max(
         1.0,
-        float(cycle_capital or 1.0),
+        float(
+            cycle_capital
+            or 1.0
+        ),
     )
 
     for rank, watcher in enumerate(
@@ -5844,7 +6172,9 @@ def _v670_compound_candidate_source(
         candidate_meta = (
             watcher.get("candidate")
             if isinstance(
-                watcher.get("candidate"),
+                watcher.get(
+                    "candidate"
+                ),
                 dict,
             )
             else {}
@@ -5852,96 +6182,262 @@ def _v670_compound_candidate_source(
         validated_meta = (
             watcher.get("validated")
             if isinstance(
-                watcher.get("validated"),
+                watcher.get(
+                    "validated"
+                ),
                 dict,
             )
             else {}
         )
 
-        smart_score = _ai_learning_candidate_score(
-            candidate_meta
+        smart_score = (
+            _ai_learning_candidate_score(
+                candidate_meta
+            )
         )
         quality_tier = str(
-            candidate_meta.get("quality_tier")
-            or validated_meta.get("quality_tier")
+            candidate_meta.get(
+                "quality_tier"
+            )
+            or validated_meta.get(
+                "quality_tier"
+            )
             or ""
         ).upper().strip()
         deep_status = str(
             watcher.get("deep_status")
-            or validated_meta.get("status")
+            or validated_meta.get(
+                "status"
+            )
             or ""
         ).upper().strip()
 
+        key = (
+            _v671_intelligence_key(
+                symbol,
+                wanted,
+            )
+        )
+        seen_keys.add(
+            key
+        )
+
         row = {
             "rank": rank,
-            "watcher_id": watcher.get("watcher_id"),
+            "watcher_id":
+                watcher.get(
+                    "watcher_id"
+                ),
             "market": market,
             "symbol": symbol,
             "direction": wanted,
-            "quality_tier": quality_tier,
-            "deep_status": deep_status,
-            "smart_fast_score": smart_score,
-            "verified": bool(watcher.get("verified")),
-            "experimental": bool(watcher.get("experimental")),
-            "trade_eligible": bool(watcher.get("trade_eligible")),
-            "strategy_quarantined": bool(
-                candidate_meta.get(
-                    "strategy_quarantined",
-                    False,
-                )
-            ),
-            "live_direction": None,
-            "direction_match": False,
-            "quant_confidence": 0.0,
-            "model_ai_confidence": 0.0,
-            "reason": None,
+            "quality_tier":
+                quality_tier,
+            "deep_status":
+                deep_status,
+            "smart_fast_score":
+                smart_score,
+            "verified":
+                bool(
+                    watcher.get(
+                        "verified"
+                    )
+                ),
+            "experimental":
+                bool(
+                    watcher.get(
+                        "experimental"
+                    )
+                ),
+            "trade_eligible":
+                bool(
+                    watcher.get(
+                        "trade_eligible"
+                    )
+                ),
+            "strategy_quarantined":
+                bool(
+                    candidate_meta.get(
+                        "strategy_quarantined",
+                        False,
+                    )
+                ),
+            "live_direction":
+                None,
+            "direction_match":
+                False,
+            "quant_confidence":
+                0.0,
+            "model_ai_confidence":
+                0.0,
+            "intelligence_source":
+                None,
+            "intelligence_age_seconds":
+                None,
+            "reason":
+                None,
         }
 
         if (
             not symbol
-            or wanted not in {
+            or wanted
+            not in {
                 "BUY",
                 "SELL",
             }
         ):
-            row["reason"] = (
-                "Watcher has no valid BUY/SELL symbol."
+            row[
+                "reason"
+            ] = (
+                "Watcher has no valid "
+                "BUY/SELL symbol."
             )
-            evaluated.append(row)
+            evaluated.append(
+                row
+            )
             continue
 
-        if row["strategy_quarantined"]:
-            row["reason"] = (
-                "Existing strategy-health gate quarantined this candidate."
+        if row[
+            "strategy_quarantined"
+        ]:
+            row[
+                "reason"
+            ] = (
+                "Existing strategy-health "
+                "gate quarantined this "
+                "candidate."
             )
-            evaluated.append(row)
+            evaluated.append(
+                row
+            )
             continue
 
-        live_result = _ai_learning_call_with_timeout(
-            _v63_adaptive_live_signal,
-            symbol,
-            watcher.get(
-                "risk_mode",
-                "Balanced",
-            ),
-            balance,
-            timeout_seconds=25.0,
+        shared = (
+            recent_by_key.get(
+                key
+            )
         )
 
-        if not live_result.get("ok"):
-            row["reason"] = (
+        if shared is not None:
+            live_direction = str(
+                shared.get(
+                    "direction"
+                )
+                or ""
+            ).upper()
+            quant = (
+                V64_LEARNING_ENGINE
+                ._confidence01(
+                    shared.get(
+                        "quant_confidence"
+                    )
+                )
+            )
+            model_ai = (
+                V64_LEARNING_ENGINE
+                ._confidence01(
+                    shared.get(
+                        "model_ai_confidence"
+                    )
+                )
+            )
+
+            row.update({
+                "live_direction":
+                    live_direction,
+                "direction_match":
+                    (
+                        live_direction
+                        == wanted
+                    ),
+                "quant_confidence":
+                    quant,
+                "quant_confidence_pct":
+                    round(
+                        quant
+                        * 100.0,
+                        2,
+                    ),
+                "model_ai_confidence":
+                    model_ai,
+                "model_ai_directional_confidence_pct":
+                    round(
+                        model_ai
+                        * 100.0,
+                        2,
+                    ),
+                "live_price":
+                    shared.get(
+                        "price"
+                    ),
+                "rsi":
+                    shared.get(
+                        "rsi"
+                    ),
+                "signal_reason":
+                    shared.get(
+                        "reason"
+                    ),
+                "intelligence_source":
+                    "UNIFIED_HOME_LIVE_INTELLIGENCE",
+                "intelligence_age_seconds":
+                    shared.get(
+                        "age_seconds"
+                    ),
+                "reason":
+                    shared.get(
+                        "reason"
+                    ),
+            })
+            evaluated.append(
+                row
+            )
+            continue
+
+        # No recent mobile/Home observation for this exact symbol+direction:
+        # keep the system autonomous by evaluating it server-side.
+        live_result = (
+            _ai_learning_call_with_timeout(
+                _v63_adaptive_live_signal,
+                symbol,
+                watcher.get(
+                    "risk_mode",
+                    "Balanced",
+                ),
+                balance,
+                timeout_seconds=25.0,
+            )
+        )
+
+        if not live_result.get(
+            "ok"
+        ):
+            row[
+                "intelligence_source"
+            ] = (
+                "SERVER_FRESH_SIGNAL"
+            )
+            row[
+                "reason"
+            ] = (
                 "Live signal timeout"
-                if live_result.get("timeout")
+                if live_result.get(
+                    "timeout"
+                )
                 else (
                     "Live signal error: "
                     f"{live_result.get('error')}"
                 )
             )
-            evaluated.append(row)
+            evaluated.append(
+                row
+            )
             continue
 
         live = dict(
-            live_result.get("result")
+            live_result.get(
+                "result"
+            )
             or {}
         )
         live_direction = (
@@ -5952,7 +6448,9 @@ def _v670_compound_candidate_source(
         quant = (
             V64_LEARNING_ENGINE
             ._confidence01(
-                live.get("confidence")
+                live.get(
+                    "confidence"
+                )
             )
         )
         model_ai = (
@@ -5964,26 +6462,174 @@ def _v670_compound_candidate_source(
         )
 
         row.update({
-            "live_direction": live_direction,
-            "direction_match": (
-                live_direction == wanted
-            ),
-            "quant_confidence": quant,
-            "quant_confidence_pct": round(
-                quant * 100.0,
-                2,
-            ),
-            "model_ai_confidence": model_ai,
-            "model_ai_directional_confidence_pct": round(
-                model_ai * 100.0,
-                2,
-            ),
-            "live_price": live.get("price"),
-            "rsi": live.get("rsi"),
-            "signal_reason": live.get("reason"),
-            "reason": live.get("reason"),
+            "live_direction":
+                live_direction,
+            "direction_match":
+                (
+                    live_direction
+                    == wanted
+                ),
+            "quant_confidence":
+                quant,
+            "quant_confidence_pct":
+                round(
+                    quant
+                    * 100.0,
+                    2,
+                ),
+            "model_ai_confidence":
+                model_ai,
+            "model_ai_directional_confidence_pct":
+                round(
+                    model_ai
+                    * 100.0,
+                    2,
+                ),
+            "live_price":
+                live.get(
+                    "price"
+                ),
+            "rsi":
+                live.get(
+                    "rsi"
+                ),
+            "signal_reason":
+                live.get(
+                    "reason"
+                ),
+            "intelligence_source":
+                "SERVER_FRESH_SIGNAL",
+            "reason":
+                live.get(
+                    "reason"
+                ),
         })
-        evaluated.append(row)
+        evaluated.append(
+            row
+        )
+
+    # Surface fresh Home signals that have not yet acquired a matching
+    # deep-validated watcher. They cannot trade yet, but they are now visible
+    # inside the Compound ranking instead of silently living on a separate UI.
+    for shared in recent:
+        direction = str(
+            shared.get(
+                "direction"
+            )
+            or ""
+        ).upper()
+        symbol = str(
+            shared.get(
+                "symbol"
+            )
+            or ""
+        )
+        key = (
+            _v671_intelligence_key(
+                symbol,
+                direction,
+            )
+        )
+        if (
+            key in seen_keys
+            or direction
+            not in {
+                "BUY",
+                "SELL",
+            }
+        ):
+            continue
+
+        quant = (
+            V64_LEARNING_ENGINE
+            ._confidence01(
+                shared.get(
+                    "quant_confidence"
+                )
+            )
+        )
+        model_ai = (
+            V64_LEARNING_ENGINE
+            ._confidence01(
+                shared.get(
+                    "model_ai_confidence"
+                )
+            )
+        )
+
+        evaluated.append({
+            "rank":
+                len(
+                    evaluated
+                )
+                + 1,
+            "watcher_id":
+                None,
+            "market":
+                symbol,
+            "symbol":
+                symbol,
+            "direction":
+                direction,
+            "quality_tier":
+                "",
+            "deep_status":
+                "PENDING_DEEP_VALIDATION",
+            "smart_fast_score":
+                0.0,
+            "verified":
+                False,
+            "experimental":
+                False,
+            "trade_eligible":
+                False,
+            "strategy_quarantined":
+                False,
+            "live_direction":
+                direction,
+            "direction_match":
+                True,
+            "quant_confidence":
+                quant,
+            "quant_confidence_pct":
+                round(
+                    quant
+                    * 100.0,
+                    2,
+                ),
+            "model_ai_confidence":
+                model_ai,
+            "model_ai_directional_confidence_pct":
+                round(
+                    model_ai
+                    * 100.0,
+                    2,
+                ),
+            "live_price":
+                shared.get(
+                    "price"
+                ),
+            "rsi":
+                shared.get(
+                    "rsi"
+                ),
+            "signal_reason":
+                shared.get(
+                    "reason"
+                ),
+            "intelligence_source":
+                "UNIFIED_HOME_LIVE_INTELLIGENCE",
+            "intelligence_age_seconds":
+                shared.get(
+                    "age_seconds"
+                ),
+            "reason": (
+                "Live Intelligence is connected, but this exact "
+                "symbol/direction does not yet have a matching deep-validated "
+                "V64 watcher. Auto Manager must complete Fast/quality/deep "
+                "validation before Compound execution."
+            ),
+        })
 
     evaluated.sort(
         key=lambda row: (
@@ -6023,7 +6669,7 @@ COMPOUND_STATE_PATH = os.getenv(
 COMPOUND_ENGINE = EliteCompoundEngine(
     broker=IG_DEMO_BROKER,
     candidate_source=
-        _v670_compound_candidate_source,
+        _v671_compound_candidate_source,
     correlation_source=
         _v66_fx_correlation_matrix,
     state_path=COMPOUND_STATE_PATH,
@@ -6034,6 +6680,20 @@ COMPOUND_ENGINE.start_thread()
 @app.get("/compound/status")
 def compound_status():
     return COMPOUND_ENGINE.status()
+
+
+@app.get("/compound/intelligence")
+def compound_intelligence():
+    """Inspect the shared Home ↔ Compound Live Intelligence bridge."""
+    return {
+        "version": "6.7.1",
+        "recent_live_intelligence":
+            _v671_recent_intelligence(),
+        "compound":
+            COMPOUND_ENGINE.status(),
+        "environment": "DEMO",
+        "live_money_execution": False,
+    }
 
 
 @app.get("/compound/rules")
@@ -6382,7 +7042,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.7.0-ELITE-COMPOUND",
+            "6.7.1-UNIFIED-INTELLIGENCE-COMPOUND",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
@@ -7795,7 +8455,7 @@ def _v68_copilot_context():
     return {
         "engine": {
             "version":
-                "V6.7.0",
+                "V6.7.1",
             "paper_learning_enabled":
                 True,
             "ig_demo_broker_execution_enabled":
