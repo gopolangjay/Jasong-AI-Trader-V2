@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 class EvidenceExecutionIntegrityEngine:
-    """Read-only V6.7.2 evidence and execution integrity scorer.
+    """Read-only V6.7.2a evidence and execution integrity scorer.
 
     The score is deliberately separated into four components so a broker/API
     defect is never mislabeled as a weak trading strategy:
@@ -19,7 +19,7 @@ class EvidenceExecutionIntegrityEngine:
     This module never opens, closes or sizes a trade.
     """
 
-    VERSION = "6.7.2"
+    VERSION = "6.7.2a"
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -265,6 +265,7 @@ class EvidenceExecutionIntegrityEngine:
         overdue_open = []
         close_errors = []
         close_pending = []
+        close_deferred = []
 
         for mirror in mirrors:
             status = cls._status(mirror.get("broker_status"))
@@ -279,12 +280,36 @@ class EvidenceExecutionIntegrityEngine:
             ):
                 overdue_open.append(mirror)
 
+            close_execution_state = cls._status(
+                mirror.get("close_execution_state")
+            )
+            is_deferred = (
+                close_execution_state
+                == "CLOSE_DEFERRED_MARKET_CLOSED"
+            )
+            if is_deferred:
+                close_deferred.append(
+                    {
+                        "deal_id": mirror.get("ig_deal_id"),
+                        "symbol": mirror.get("symbol"),
+                        "market_status": mirror.get("market_status"),
+                        "scheduled_close_at": mirror.get(
+                            "scheduled_close_at"
+                        ),
+                        "deferred_at": mirror.get("close_deferred_at"),
+                        "reason": mirror.get("close_deferred_reason"),
+                    }
+                )
+
             error = str(
                 mirror.get("last_close_error")
                 or mirror.get("last_error")
                 or ""
             )
-            if "close" in error.lower():
+            if (
+                "close" in error.lower()
+                and not is_deferred
+            ):
                 close_errors.append(
                     {
                         "deal_id": mirror.get("ig_deal_id"),
@@ -330,6 +355,12 @@ class EvidenceExecutionIntegrityEngine:
             ),
             "close_pending_count": len(close_pending),
             "close_pending": close_pending[:20],
+            "close_deferred_count": len(close_deferred),
+            "close_deferred": close_deferred[:20],
+            "actionable_overdue_open_count": max(
+                0,
+                len(overdue_open) - len(close_deferred),
+            ),
             "overdue_open_count": len(overdue_open),
             "overdue_open": [
                 {
@@ -431,9 +462,15 @@ class EvidenceExecutionIntegrityEngine:
             0.0,
             15.0 - 5.0 * broker["close_error_count"],
         )
-        operational += 10.0 if broker["overdue_open_count"] == 0 else max(
-            0.0,
-            10.0 - 2.0 * broker["overdue_open_count"],
+        operational += (
+            10.0
+            if broker["actionable_overdue_open_count"] == 0
+            else max(
+                0.0,
+                10.0
+                - 2.0
+                * broker["actionable_overdue_open_count"],
+            )
         )
         operational += 15.0 * (persistent_count / 3.0)
         operational += 5.0 if market_data_ok else 0.0
@@ -591,9 +628,20 @@ class EvidenceExecutionIntegrityEngine:
             blockers.append(
                 f"{broker['close_error_count']} IG close error(s) remain."
             )
-        if broker["overdue_open_count"]:
+        if broker["close_deferred_count"]:
             blockers.append(
-                f"{broker['overdue_open_count']} broker position(s) are overdue for closure."
+                (
+                    f"{broker['close_deferred_count']} overdue broker "
+                    "position(s) are safely deferred because their IG "
+                    "markets are not currently closable."
+                )
+            )
+        if broker["actionable_overdue_open_count"]:
+            blockers.append(
+                (
+                    f"{broker['actionable_overdue_open_count']} broker "
+                    "position(s) are overdue and actionable for closure."
+                )
             )
         if broker["sync_state"] != "SYNCED":
             blockers.append(
@@ -613,9 +661,20 @@ class EvidenceExecutionIntegrityEngine:
             )
 
         recommendations: List[str] = []
-        if broker["close_error_count"] or broker["overdue_open_count"]:
+        if (
+            broker["close_error_count"]
+            or broker["actionable_overdue_open_count"]
+        ):
             recommendations.append(
                 "Resolve broker close/reconciliation integrity before interpreting strategy results."
+            )
+        elif broker["close_deferred_count"]:
+            recommendations.append(
+                (
+                    "No close-integrity repair is required for the deferred "
+                    "positions; Jasong will submit their close automatically "
+                    "when IG reports TRADEABLE or CLOSINGS_ONLY."
+                )
             )
         if settled < 30:
             recommendations.append(
@@ -627,7 +686,7 @@ class EvidenceExecutionIntegrityEngine:
             )
         if model["metadata_completeness_pct"] < 100:
             recommendations.append(
-                "Use V6.7.2 attribution fields on new entries so AI, Quant, Fast, Quality, Deep, historical context and MFE/MAE remain linked."
+                "Use V6.7.2a attribution fields on new entries so AI, Quant, Fast, Quality, Deep, historical context and MFE/MAE remain linked."
             )
 
         return {
