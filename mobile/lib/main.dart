@@ -3853,6 +3853,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         sig?['decision']?.toString().toUpperCase() ?? 'WAIT';
     final confidence = formatPercent(sig?['confidence']);
     final aiUp = formatPercent(sig?['combined_up_probability']);
+    final unifiedLive = sig?['unified_intelligence'] is Map
+        ? Map<String, dynamic>.from(
+            sig!['unified_intelligence'] as Map,
+          )
+        : <String, dynamic>{};
+    final liveDirectionalAi = formatPercent(
+      unifiedLive['model_ai_confidence'],
+    );
+    final liveCompoundBridge = sig?['compound_bridge'] is Map
+        ? Map<String, dynamic>.from(
+            sig!['compound_bridge'] as Map,
+          )
+        : <String, dynamic>{};
+    final liveCompoundBridgeState =
+        liveCompoundBridge['bridge_state']?.toString().toUpperCase() ??
+            'WAITING';
 
     final dashboard = autoDashboard ?? <String, dynamic>{};
     final manager = dashboard['manager'] is Map
@@ -3877,6 +3893,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final compoundOpen = compound['compound_broker_positions'] is List
         ? (compound['compound_broker_positions'] as List).length
         : 0;
+    final compoundPending = int.tryParse(
+          '${compound['pending_elite_count'] ?? 0}',
+        ) ??
+        0;
+    final compoundBridgeState =
+        compound['intelligence_bridge_state']?.toString().toUpperCase() ??
+            'IDLE';
 
     final autoOn = dashboard['auto_mode'] == true ||
         manager['enabled'] == true ||
@@ -4414,6 +4437,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
+                const SizedBox(height: 9),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 11,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .035),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        size: 16,
+                        color: Color(0xFF65E6D3),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          'Live Intelligence ↔ Compound: '
+                          '${compoundBridgeState.replaceAll('_', ' ')}'
+                          '${compoundPending > 0 ? ' • $compoundPending Elite ready' : ''}',
+                          style: const TextStyle(
+                            color: Colors.white60,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 14),
                 SizedBox(
                   width: double.infinity,
@@ -4461,6 +4518,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     const SizedBox(width: 8),
                     Expanded(child: _midnightValue('RSI', formatNumber(sig?['rsi']))),
                   ],
+                ),
+                const SizedBox(height: 9),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF65E6D3).withValues(alpha: .06),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0xFF65E6D3).withValues(alpha: .16),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        color: Color(0xFF65E6D3),
+                        size: 17,
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          'Directional AI for $liveDecision: $liveDirectionalAi% • '
+                          'Compound bridge: ${liveCompoundBridgeState.replaceAll('_', ' ')}',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -6535,7 +6629,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.7.0 • Elite Compound DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.7.1 • Unified Intelligence + Compound DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -7061,6 +7155,30 @@ class _CompoundDashboardScreenState
             .toList()
         : <Map<String, dynamic>>[];
 
+    final pendingElite = data['pending_elite_candidates'] is List
+        ? (data['pending_elite_candidates'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final blockers = data['foreign_broker_positions'] is List
+        ? (data['foreign_broker_positions'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final lastIntelligence = data['last_intelligence_signal'] is Map
+        ? Map<String, dynamic>.from(
+            data['last_intelligence_signal'] as Map,
+          )
+        : <String, dynamic>{};
+
     final cycles = data['recent_cycles'] is List
         ? (data['recent_cycles'] as List)
             .whereType<Map>()
@@ -7072,6 +7190,27 @@ class _CompoundDashboardScreenState
 
     final enabled = data['enabled'] == true;
     final state = _statusLabel(data['status']);
+    final bridgeState = _statusLabel(
+      data['intelligence_bridge_state'] ?? 'IDLE',
+    );
+    final intelligenceDirection =
+        lastIntelligence['direction']?.toString().toUpperCase() ?? '-';
+    final intelligenceSymbol =
+        lastIntelligence['symbol']?.toString() ?? '-';
+    final intelligenceAi = _number(
+      lastIntelligence['model_ai_confidence'],
+    ) * 100;
+    final intelligenceQuant = _number(
+      lastIntelligence['quant_confidence'],
+    ) * 100;
+    final intelligenceObservedAt = _number(
+      lastIntelligence['observed_at'],
+    );
+    final intelligenceAgeSeconds = intelligenceObservedAt > 0
+        ? ((DateTime.now().millisecondsSinceEpoch / 1000) -
+                intelligenceObservedAt)
+            .clamp(0, 999999)
+        : null;
     final currentCapital = data['current_capital'];
     final reserve = data['reserve_balance'];
     final cycleNumber = data['cycle_number'] ?? 0;
@@ -7101,7 +7240,7 @@ class _CompoundDashboardScreenState
               ),
             ),
             Text(
-              'V6.7.0 • IG DEMO ONLY',
+              'V6.7.1 • IG DEMO ONLY',
               style: TextStyle(
                 fontSize: 10,
                 color: Colors.white54,
@@ -7192,6 +7331,107 @@ class _CompoundDashboardScreenState
                         color: Color(0xFFFFD75E),
                         fontSize: 11,
                         height: 1.35,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _card(
+              glow: pendingElite.isNotEmpty
+                  ? const Color(0xFF67F0C1)
+                  : const Color(0xFF65E6D3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        color: Color(0xFF65E6D3),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          'Unified Live Intelligence',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        bridgeState,
+                        style: TextStyle(
+                          color: pendingElite.isNotEmpty
+                              ? const Color(0xFF67F0C1)
+                              : const Color(0xFF65E6D3),
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (lastIntelligence.isNotEmpty)
+                    Text(
+                      '$intelligenceSymbol  $intelligenceDirection • '
+                      'Directional AI ${intelligenceAi.toStringAsFixed(1)}% • '
+                      'Quant ${intelligenceQuant.toStringAsFixed(1)}%'
+                      '${intelligenceAgeSeconds != null ? ' • ${intelligenceAgeSeconds.toStringAsFixed(0)}s ago' : ''}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        height: 1.35,
+                      ),
+                    )
+                  else
+                    const Text(
+                      'Waiting for the next shared Live Intelligence observation.',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  if (pendingElite.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '${pendingElite.length} Elite setup(s) are ready. '
+                      '${blockers.isNotEmpty ? 'Execution is queued until the broker is clean.' : 'Compound can execute immediately after final broker preflight.'}',
+                      style: const TextStyle(
+                        color: Color(0xFF67F0C1),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                  if (blockers.isNotEmpty) ...[
+                    const SizedBox(height: 9),
+                    const Text(
+                      'Broker blockers',
+                      style: TextStyle(
+                        color: Color(0xFFFFD75E),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    ...blockers.take(5).map(
+                      (row) => Padding(
+                        padding: const EdgeInsets.only(
+                          bottom: 4,
+                        ),
+                        child: Text(
+                          '• ${row['symbol'] ?? row['epic'] ?? 'IG position'} '
+                          '${row['direction'] ?? ''} • ${row['deal_reference'] ?? ''}',
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 10,
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -7511,7 +7751,7 @@ class _CompoundDashboardScreenState
             if (positions.isEmpty)
               _card(
                 child: const Text(
-                  'No Elite Compound positions are open. Jasong will wait until the broker is clean and at least one market passes every Elite gate.',
+                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -7663,7 +7903,8 @@ class _CompoundDashboardScreenState
                             'AI ${(_number(row['model_ai_confidence']) * 100).toStringAsFixed(1)}% • '
                             'Quant ${(_number(row['quant_confidence']) * 100).toStringAsFixed(1)}% • '
                             'Fast ${_number(row['smart_fast_score']).toStringAsFixed(1)} • '
-                            '${row['quality_tier'] ?? '-'}',
+                            '${row['quality_tier'] ?? '-'}'
+                            '${row['intelligence_source'] != null ? ' • ${_statusLabel(row['intelligence_source'])}' : ''}',
                             style:
                                 const TextStyle(
                               color:
@@ -7791,7 +8032,7 @@ class _CompoundDashboardScreenState
             const SizedBox(height: 20),
             _card(
               child: const Text(
-                'Parallel design: Jasong AI continues scanning, deep validation, PAPER learning and SHADOW evidence. While Compound is active, legacy IG new entries are paused so the account-level IG P&L belongs only to the Compound basket. Existing legacy positions are allowed to drain normally.',
+                'Unified parallel design: the Home Live Intelligence signal is shared directly with Elite Compound, while Auto Manager, deep validation, PAPER learning and SHADOW evidence continue. Signals are ranked even while legacy/manual IG positions drain. New Compound orders wait for a clean broker because the current +50%/-15% cycle accounting uses IG account-level P&L.',
                 style: TextStyle(
                   color: Colors.white54,
                   fontSize: 10,
