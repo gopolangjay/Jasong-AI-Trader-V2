@@ -667,12 +667,74 @@ class IGDemoBroker:
             "fuzzy market matches were rejected"
         )
 
-    def market_details(self, epic: str) -> Dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/markets/{urlparse.quote(epic, safe='')}",
-            version=4,
+    @staticmethod
+    def extract_snapshot_quote(details: Dict[str, Any]) -> Dict[str, Optional[float]]:
+        """Extract bid/offer from IG v3 or v4 market snapshots."""
+        snapshot = (details or {}).get("snapshot") or {}
+
+        def _num(value: Any) -> Optional[float]:
+            try:
+                if value is None or value == "":
+                    return None
+                number = float(value)
+                return number if number == number else None
+            except Exception:
+                return None
+
+        bid = _num(snapshot.get("bid"))
+        offer = _num(
+            snapshot.get("offer")
+            if snapshot.get("offer") is not None
+            else snapshot.get("ask")
         )
+
+        if bid is None or offer is None:
+            ladder = snapshot.get("priceLadder") or []
+            if isinstance(ladder, list) and ladder:
+                first = ladder[0] if isinstance(ladder[0], dict) else {}
+                if bid is None:
+                    bid = _num(first.get("bid"))
+                if offer is None:
+                    offer = _num(
+                        first.get("ask")
+                        if first.get("ask") is not None
+                        else first.get("offer")
+                    )
+
+        return {"bid": bid, "offer": offer}
+
+    def market_details(
+        self,
+        epic: str,
+        *,
+        require_quote: bool = False,
+    ) -> Dict[str, Any]:
+        path = f"/markets/{urlparse.quote(epic, safe='')}"
+        details = self._request("GET", path, version=4)
+
+        if require_quote:
+            quote = self.extract_snapshot_quote(details)
+            if quote.get("bid") is None or quote.get("offer") is None:
+                try:
+                    v3 = self._request("GET", path, version=3)
+                    q3 = self.extract_snapshot_quote(v3)
+                    if q3.get("bid") is not None and q3.get("offer") is not None:
+                        merged = dict(details)
+                        merged["_quote_fallback_v3"] = True
+                        merged["_quote_snapshot"] = {
+                            "bid": q3["bid"],
+                            "offer": q3["offer"],
+                        }
+                        snap = dict(merged.get("snapshot") or {})
+                        v3snap = v3.get("snapshot") or {}
+                        if not snap.get("marketStatus") and v3snap.get("marketStatus"):
+                            snap["marketStatus"] = v3snap.get("marketStatus")
+                        merged["snapshot"] = snap
+                        return merged
+                except Exception:
+                    pass
+
+        return details
 
 
     def search_markets(
