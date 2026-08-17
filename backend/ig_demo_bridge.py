@@ -1108,6 +1108,13 @@ class IGDemoMirror:
         return None
 
     def status(self) -> Dict[str, Any]:
+        # V6.8.3 safety net: a read/status poll must also advance a fully
+        # settled phase. This prevents a completed 10/10 phase from remaining
+        # stuck merely because the background mirror loop has not ticked yet
+        # (for example after a Render restart or temporary worker pause).
+        if self._maybe_roll_phase():
+            self._persist()
+
         with self._lock:
             mirrors = list(
                 self._mirrors().values()
@@ -1185,7 +1192,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.0-IG-DEMO-FORWARD-LEARNING",
+                "version": "6.8.3-IG-DEMO-ROLLING-PHASES",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
