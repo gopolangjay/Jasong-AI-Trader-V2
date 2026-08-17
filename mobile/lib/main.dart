@@ -157,6 +157,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
+  // V6.7.3 global multi-market intelligence.
+  Map<String, dynamic>? globalMarketsStatus;
+  List<Map<String, dynamic>> globalMarketCandidates = [];
+  bool globalMarketsBusy = false;
+
   Timer? watcherPollTimer;
   Timer? autoDashboardPollTimer;
 
@@ -1513,6 +1518,51 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+
+  Future<void> loadGlobalMarkets() async {
+    try {
+      final status = await getJson(
+        Uri.parse('$apiBase/global-markets/status'),
+        timeoutSeconds: 60,
+      );
+      final candidates = await getJson(
+        Uri.parse('$apiBase/global-markets/candidates').replace(
+          queryParameters: {'limit': '60'},
+        ),
+        timeoutSeconds: 60,
+      );
+      if (!mounted) return;
+      setState(() {
+        globalMarketsStatus = status;
+        final raw = candidates['candidates'];
+        globalMarketCandidates = raw is List
+            ? raw.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList()
+            : [];
+      });
+    } catch (_) {
+      // Supplemental dashboard. Keep last known snapshot on one failed poll.
+    }
+  }
+
+  Future<void> runGlobalMarketScanNow() async {
+    if (globalMarketsBusy) return;
+    setState(() => globalMarketsBusy = true);
+    try {
+      await postJsonOnce(
+        Uri.parse('$apiBase/global-markets/run-now'),
+        <String, dynamic>{},
+        timeoutSeconds: 180,
+      );
+      await loadGlobalMarkets();
+    } catch (e) {
+      if (mounted) {
+        setState(() => error = 'Global market scan failed: $e');
+      }
+    } finally {
+      if (mounted) setState(() => globalMarketsBusy = false);
+    }
+  }
+
   Future<void> runSystemDiagnostic() async {
     if (systemDiagnosticBusy) {
       return;
@@ -2047,6 +2097,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         loadSystemOverview();
         loadAiLearningStatus();
         loadOvernightDemoStatus();
+        loadGlobalMarkets();
       },
     );
 
@@ -2064,6 +2115,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     Future.microtask(
       loadOvernightDemoStatus,
+    );
+
+    Future.microtask(
+      loadGlobalMarkets,
     );
   }
 
@@ -3278,6 +3333,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Future.microtask(loadAutoDashboard);
       Future.microtask(loadAiLearningStatus);
       Future.microtask(loadSystemOverview);
+      Future.microtask(loadGlobalMarkets);
     }
   }
 
@@ -4706,7 +4762,130 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return ListView(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
         children: [
-          sectionTitle('Market scanner', subtitle: 'Fast ranking across the configured FX universe'),
+          sectionTitle(
+            'Global multi-market intelligence',
+            subtitle: 'Forex • indices • commodities • crypto • shares • ETFs • rates',
+          ),
+          Row(
+            children: [
+              statTile(
+                'Universe',
+                '${globalMarketsStatus?['universe_size'] ?? 9}',
+                Icons.public_rounded,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Elite ready',
+                '${globalMarketsStatus?['elite_ready'] ?? 0}',
+                Icons.workspace_premium_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          glassCard(
+            glow: const Color(0xFF6FA8FF),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.hub_outlined, color: Color(0xFF6FA8FF)),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Cross-asset opportunity engine',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                    pill(
+                      '${globalMarketsStatus?['fresh_evaluations'] ?? 0} fresh',
+                      color: const Color(0xFF6FA8FF),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Mature FX watcher evidence remains active. V6.7.3 independently rotates through liquid non-FX markets, applies the same Rule+ML direction, held-out validation, IG tradeability preflight and Elite quality gates, then feeds the best opportunities into the same Compound ranking.',
+                  style: TextStyle(color: Colors.white54, fontSize: 11, height: 1.4),
+                ),
+                const SizedBox(height: 10),
+                if (globalMarketsStatus?['evaluated_by_asset_class'] is Map)
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: (globalMarketsStatus!['evaluated_by_asset_class'] as Map).entries.map((entry) {
+                      return pill(
+                        '${entry.key}: ${entry.value}',
+                        color: Colors.white38,
+                      );
+                    }).toList(),
+                  ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: globalMarketsBusy ? null : runGlobalMarketScanNow,
+                    icon: globalMarketsBusy
+                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.travel_explore_rounded),
+                    label: Text(globalMarketsBusy ? 'Scanning global batch...' : 'Scan next global batch now'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (globalMarketCandidates.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            sectionTitle('Cross-asset candidates'),
+            ...globalMarketCandidates.take(10).map((item) {
+              final direction = item['direction']?.toString().toUpperCase() ?? 'WAIT';
+              final asset = item['asset_class']?.toString().toUpperCase() ?? '-';
+              final fast = item['smart_fast_score'] ?? 0;
+              final ai = (double.tryParse('${item['model_ai_confidence'] ?? 0}') ?? 0) * 100;
+              final quant = (double.tryParse('${item['quant_confidence'] ?? 0}') ?? 0) * 100;
+              final status = item['ig_market_status']?.toString().toUpperCase() ?? 'NOT PREFLIGHTED';
+              final epic = item['ig_epic']?.toString();
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 9),
+                child: glassCard(
+                  glow: sideColor(direction),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              item['market']?.toString() ?? item['symbol']?.toString() ?? '-',
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15),
+                            ),
+                          ),
+                          pill(asset, color: const Color(0xFF6FA8FF)),
+                          const SizedBox(width: 6),
+                          pill(direction, color: sideColor(direction)),
+                        ],
+                      ),
+                      const SizedBox(height: 7),
+                      Text(
+                        'AI ${ai.toStringAsFixed(1)}% • Quant ${quant.toStringAsFixed(1)}% • Fast ${formatNumber(fast, decimals: 1)} • ${item['quality_tier'] ?? '-'} • ${item['deep_status'] ?? '-'}',
+                        style: const TextStyle(color: Colors.white60, fontSize: 11),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'IG: $status${epic != null ? ' • $epic' : ''}',
+                        style: TextStyle(
+                          color: status == 'TRADEABLE' ? const Color(0xFF67F0C1) : Colors.white38,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle('Legacy FX scanner', subtitle: 'Existing mature FX discovery and deep-validation path'),
           Row(
             children: [
               Expanded(
@@ -6816,7 +6995,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.7.2 • Evidence & Execution Integrity DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.7.3 • Global Multi-Market Intelligence DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -6830,6 +7009,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               await loadSystemOverview();
               await loadAiLearningStatus();
               await loadOvernightDemoStatus();
+              await loadGlobalMarkets();
               await refreshServerWatchers();
             },
             icon: const Icon(Icons.refresh_rounded),
@@ -6843,6 +7023,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           await loadSystemOverview();
           await loadAiLearningStatus();
           await loadOvernightDemoStatus();
+          await loadGlobalMarkets();
           await refreshServerWatchers();
           if (selectedTab == 0) {
             await refreshSignal();
