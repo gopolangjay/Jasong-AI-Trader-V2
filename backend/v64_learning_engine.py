@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover
 
 
 class V64LearningTradeEngine:
-    """V6.8 signal-lifecycle engine for broker-forward learning.
+    """V6.8.12 signal-lifecycle engine for IG-DEMO-only forward learning.
 
     The engine still creates and times model signal records, but V6.8 treats
     IG DEMO reconciliation as the source of truth for forward W/L evidence.
@@ -22,7 +22,7 @@ class V64LearningTradeEngine:
     path. Broker credentials remain isolated in IGDemoMirror.
     """
 
-    VERSION = "6.8.0"
+    VERSION = "6.8.12"
     NAMESPACE = "v64_learning_engine"
 
     # V6.6 PAPER-learning entry thresholds.
@@ -280,7 +280,7 @@ class V64LearningTradeEngine:
             candidate = watcher.get("candidate") or {}
             validated = watcher.get("validated") or {}
             prompt = {
-                "task": "Independent PAPER-trade directional assessment. Do not claim certainty.",
+                "task": "Independent IG DEMO directional assessment for broker-forward evidence. Do not claim certainty.",
                 "symbol": watcher.get("symbol"),
                 "historical_direction": watcher.get("direction"),
                 "quant_confidence_pct": round(quant_conf * 100.0, 2),
@@ -521,6 +521,10 @@ class V64LearningTradeEngine:
 
         trade = {
             "trade_id": str(uuid.uuid4()),
+            "record_type": "IG_DEMO_FORWARD_SIGNAL",
+            "execution_mode": "IG_DEMO_ONLY",
+            "broker_execution_required": True,
+            "paper_execution": False,
             "entry_class": decision["class"],
             "elite_state": decision.get("elite_state"),
             "trade_class": decision.get("trade_class"),
@@ -584,7 +588,7 @@ class V64LearningTradeEngine:
         }
         with self._lock:
             self._state["open_trades"].append(trade)
-        self._journal("LEARNING_TRADE_OPENED", trade)
+        self._journal("IG_DEMO_FORWARD_SIGNAL_CREATED", trade)
 
     def _open_shadow(
         self,
@@ -971,7 +975,11 @@ class V64LearningTradeEngine:
         return {
             "version": self.VERSION,
             "enabled": bool(state.get("enabled", True)),
-            "paper_only": True,
+            "execution_mode": "IG_DEMO_ONLY",
+            "paper_only": False,
+            "paper_execution_enabled": False,
+            "ig_demo_execution_required": True,
+            "live_money_execution": False,
             "live_execution": False,
             "max_watchers": self.max_watchers,
             "active_watchers": len(watchers),
