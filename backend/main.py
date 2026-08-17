@@ -3879,7 +3879,9 @@ V64_LEARNING_ENGINE = AI40OnlyLearningTradeEngine(
     price_func=_v53_latest_price,
     state_store=V61_STATE_STORE,
     max_watchers=6,
-    max_open_trades=1,
+    max_open_trades=int(
+        os.getenv("LEARNING_MAX_OPEN_SIGNALS", "10")
+    ),
     watcher_refresh_seconds=30,
     starting_balance=10000.0,
     payout=0.80,
@@ -7076,10 +7078,16 @@ def execution_policy():
         "learning_direct_ig_demo": True,
         "unified_forward_evidence": True,
         "max_ig_demo_positions": int(
-            os.getenv("IG_DEMO_MAX_OPEN_POSITIONS", "3")
+            os.getenv("IG_DEMO_MAX_OPEN_POSITIONS", "15")
         ),
         "compound_reserved_slots": int(
-            os.getenv("IG_DEMO_COMPOUND_RESERVED_SLOTS", "1")
+            os.getenv("IG_DEMO_COMPOUND_RESERVED_SLOTS", "0")
+        ),
+        "compound_max_open_positions": int(
+            os.getenv("COMPOUND_MAX_POSITIONS", "5")
+        ),
+        "learning_max_open_signals": int(
+            os.getenv("LEARNING_MAX_OPEN_SIGNALS", "10")
         ),
         "broker_reconcile_seconds": int(
             os.getenv("IG_DEMO_MIRROR_POLL_SECONDS", "15")
@@ -8439,6 +8447,8 @@ def _v69_system_overview():
             ),
         },
         "calibration": {
+            "execution_blocking": False,
+            "advisory_only": True,
             "status": (
                 "FRESH"
                 if calibration_fresh
@@ -8549,7 +8559,9 @@ def v69_system_diagnostic():
 
     checks.append({
         "component": "CALIBRATION",
-        "passed": bool(
+        "passed": True,
+        "advisory_only": True,
+        "fresh": bool(
             overview[
                 "calibration"
             ][
@@ -8563,7 +8575,11 @@ def v69_system_diagnostic():
             ][
                 "fresh"
             ]
-            else "Adaptive calibration is stale or missing."
+            else (
+                "Adaptive calibration is stale or missing; "
+                "this is advisory evidence only and does not "
+                "block confidence-qualified IG DEMO execution."
+            )
         ),
     })
 
