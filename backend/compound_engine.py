@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.7.3"
+    VERSION = "6.8.0"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -82,6 +82,18 @@ class EliteCompoundEngine:
         )
         self.fast_score_min = self._float_env(
             "COMPOUND_FAST_SCORE_MIN", 90.0, 0.0, 100.0
+        )
+        # V6.8.0 minimum-to-maximum learning floor. These values do NOT
+        # weaken Elite Compound execution; they only classify useful near-miss
+        # evidence for the IG DEMO learning path.
+        self.learning_ai_min_confidence = self._float_env(
+            "LEARNING_AI_MIN_CONFIDENCE", 0.25, 0.0, 1.0
+        )
+        self.learning_quant_min_confidence = self._float_env(
+            "LEARNING_QUANT_MIN_CONFIDENCE", 0.15, 0.0, 1.0
+        )
+        self.learning_fast_score_min = self._float_env(
+            "LEARNING_FAST_SCORE_MIN", 50.0, 0.0, 100.0
         )
         self.max_spread_bps = self._float_env(
             "COMPOUND_MAX_SPREAD_BPS", 8.0, 0.1, 100.0
@@ -263,7 +275,7 @@ class EliteCompoundEngine:
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._loop,
-                name="jasong-v672-elite-compound",
+                name="jasong-v680-elite-compound",
                 daemon=True,
             )
             self._thread.start()
@@ -554,7 +566,14 @@ class EliteCompoundEngine:
     def _quality_score(quality: str, deep_status: str) -> float:
         q = str(quality or "").upper().strip()
         d = str(deep_status or "").upper().strip()
-        q_score = {"A+": 100.0, "A": 92.0}.get(q, 0.0)
+        q_score = {
+            "A+": 100.0,
+            "A": 92.0,
+            "B+": 78.0,
+            "B": 68.0,
+            "C+": 52.0,
+            "C": 42.0,
+        }.get(q, 0.0)
         d_score = {
             "VERIFIED": 100.0,
             "NEAR_VERIFIED": 92.0,
@@ -562,8 +581,49 @@ class EliteCompoundEngine:
             "AI_LEARNING_SHADOW_PROMOTION": 86.0,
             "GLOBAL_VERIFIED": 100.0,
             "GLOBAL_NEAR_VERIFIED": 92.0,
+            # A rejection is still useful forward evidence; it is not Elite.
+            "REJECT": 40.0,
+            "GLOBAL_REJECT": 40.0,
         }.get(d, 0.0)
         return 0.60 * q_score + 0.40 * d_score
+
+    def _learning_floor_passes(
+        self, ai: float, quant: float, fast: float, quality: str
+    ) -> bool:
+        return bool(
+            ai >= self.learning_ai_min_confidence
+            and quant >= self.learning_quant_min_confidence
+            and fast >= self.learning_fast_score_min
+            and str(quality or "").upper().strip() in {"B", "B+", "A", "A+"}
+        )
+
+    def _elite_state(
+        self,
+        *,
+        ai: float,
+        quant: float,
+        fast: float,
+        quality: str,
+        deep: str,
+        direction_match: bool,
+        spread_ok: Optional[bool],
+        elite_score: float,
+        strict_reasons: List[str],
+        technical_invalid: bool = False,
+    ) -> str:
+        if technical_invalid:
+            return "INVALID"
+        if not strict_reasons:
+            if str(quality).upper() == "A+" and elite_score >= 85.0:
+                return "ELITE_A_PLUS"
+            return "ELITE_A"
+        if not self._learning_floor_passes(ai, quant, fast, quality):
+            return "OBSERVE"
+        ai_gap = abs(ai - self.ai_min_confidence)
+        quant_gap = abs(quant - self.quant_min_confidence)
+        fast_gap = abs(fast - self.fast_score_min)
+        near_boundary = ai_gap <= 0.05 or quant_gap <= 0.05 or fast_gap <= 10.0
+        return "LEARNING_PLUS" if near_boundary or len(strict_reasons) == 1 else "LEARNING"
 
     @staticmethod
     def _normalise_pair(value: Any) -> str:
@@ -691,14 +751,30 @@ class EliteCompoundEngine:
         }
 
     def _rank_candidates(self, capital: float) -> List[Dict[str, Any]]:
+        """Rank all signals, but return only strict Elite selections for Compound.
+
+        V6.8.0 separates *quality information* from *execution eligibility*.
+        Near-miss signals retain a real Elite score and an Elite State so the
+        IG DEMO learning path can study minimum-to-maximum performance without
+        weakening the Compound execution gates.
+        """
         source_rows = self.candidate_source(capital) or []
         screened: List[Dict[str, Any]] = []
+
+        allowed_deep = {
+            "VERIFIED", "NEAR_VERIFIED", "WATCH",
+            "AI_LEARNING_SHADOW_PROMOTION",
+            "GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED",
+        }
 
         for source_rank, raw in enumerate(source_rows, start=1):
             row = dict(raw or {})
             row["source_rank"] = source_rank
-            row.setdefault("eligible", False)
-            row.setdefault("rejection_reasons", [])
+            row["eligible"] = False
+            row["elite_eligible"] = False
+            row["learning_eligible"] = False
+            row["selected"] = False
+            row["rejection_reasons"] = []
 
             symbol = self._normalise_pair(row.get("symbol") or row.get("market"))
             direction = str(row.get("direction") or "").upper().strip()
@@ -709,60 +785,64 @@ class EliteCompoundEngine:
             deep = str(row.get("deep_status") or "").upper().strip()
             direction_match = bool(row.get("direction_match"))
 
-            reasons: List[str] = []
-            if not symbol or direction not in {"BUY", "SELL"}:
-                reasons.append("Invalid symbol/direction")
+            row.update({
+                "symbol": symbol,
+                "direction": direction,
+                "model_ai_confidence": ai,
+                "quant_confidence": quant,
+                "smart_fast_score": fast,
+                "quality_tier": quality,
+                "deep_status": deep,
+                "direction_match": direction_match,
+                "threshold_distance": {
+                    "ai_pct_points": round((ai - self.ai_min_confidence) * 100.0, 3),
+                    "quant_pct_points": round((quant - self.quant_min_confidence) * 100.0, 3),
+                    "fast_points": round(fast - self.fast_score_min, 3),
+                },
+            })
+
+            technical_invalid = (not symbol or direction not in {"BUY", "SELL"})
+            strict_reasons: List[str] = []
+            if technical_invalid:
+                strict_reasons.append("Invalid symbol/direction")
             if ai < self.ai_min_confidence:
-                reasons.append(f"AI {ai*100:.1f}% < {self.ai_min_confidence*100:.0f}%")
+                strict_reasons.append(f"AI {ai*100:.1f}% < {self.ai_min_confidence*100:.0f}%")
             if quant < self.quant_min_confidence:
-                reasons.append(f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%")
+                strict_reasons.append(f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%")
             if fast < self.fast_score_min:
-                reasons.append(f"Fast score {fast:.1f} < {self.fast_score_min:.0f}")
+                strict_reasons.append(f"Fast score {fast:.1f} < {self.fast_score_min:.0f}")
             if quality not in {"A+", "A"}:
-                reasons.append(f"Quality {quality or '-'} is not A/A+")
-            if deep not in {
-                "VERIFIED", "NEAR_VERIFIED", "WATCH", "AI_LEARNING_SHADOW_PROMOTION",
-                "GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED",
-            }:
-                reasons.append(f"Deep status {deep or '-'} not elite-eligible")
+                strict_reasons.append(f"Quality {quality or '-'} is not A/A+")
+            if deep not in allowed_deep:
+                strict_reasons.append(f"Deep status {deep or '-'} not elite-eligible")
             if not direction_match:
-                reasons.append("Live direction does not agree")
+                strict_reasons.append("Live direction does not agree")
 
-            row.update(
-                {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "model_ai_confidence": ai,
-                    "quant_confidence": quant,
-                    "smart_fast_score": fast,
-                    "quality_tier": quality,
-                    "deep_status": deep,
-                    "direction_match": direction_match,
-                }
-            )
-
-            if reasons:
-                row["rejection_reasons"] = reasons
-                screened.append(row)
-                continue
-
-            try:
-                spread = self._spread_metrics(row)
-            except Exception as exc:
-                row["rejection_reasons"] = [f"IG DEMO preflight: {type(exc).__name__}: {exc}"]
-                screened.append(row)
-                continue
-
-            row["spread_bps"] = spread.get("spread_bps")
-            row["spread_score"] = spread.get("spread_score")
-            row["spread_limit_bps"] = spread.get("spread_limit_bps")
-            row["ig_epic"] = (spread.get("market") or {}).get("epic")
-            if not spread.get("ok"):
-                row["rejection_reasons"] = [str(spread.get("reason") or "Spread gate failed")]
-                screened.append(row)
-                continue
+            # OBSERVE-only signals do not spend an IG market-details call.
+            spread = {"ok": None, "spread_score": 0.0, "spread_bps": None, "spread_limit_bps": None, "market": {}}
+            if not technical_invalid and self._learning_floor_passes(ai, quant, fast, quality):
+                try:
+                    spread = self._spread_metrics(row)
+                except Exception as exc:
+                    spread = {
+                        "ok": False,
+                        "reason": f"IG DEMO preflight: {type(exc).__name__}: {exc}",
+                        "spread_bps": None,
+                        "spread_score": 0.0,
+                        "spread_limit_bps": None,
+                        "market": {},
+                    }
+                row["spread_bps"] = spread.get("spread_bps")
+                row["spread_score"] = spread.get("spread_score")
+                row["spread_limit_bps"] = spread.get("spread_limit_bps")
+                row["ig_epic"] = (spread.get("market") or {}).get("epic") or row.get("ig_epic")
+                if spread.get("ok") is False:
+                    strict_reasons.append(str(spread.get("reason") or "Spread gate failed"))
+                    technical_invalid = True
 
             deep_quality = self._quality_score(quality, deep)
+            # Always produce a quality score. A failed gate must never collapse
+            # the information to Elite 0.0.
             base_score = (
                 25.0 * ai
                 + 25.0 * quant
@@ -772,10 +852,34 @@ class EliteCompoundEngine:
             )
             row["deep_quality_score"] = round(deep_quality, 2)
             row["elite_base_score"] = round(base_score, 2)
-            row["eligible"] = True
+            row["elite_score"] = round(base_score, 2)
+            row["rejection_reasons"] = list(dict.fromkeys(strict_reasons))
+
+            strict_pass = not technical_invalid and not strict_reasons
+            row["elite_eligible"] = strict_pass
+            row["eligible"] = strict_pass  # backward compatibility
+            row["learning_eligible"] = bool(
+                not technical_invalid
+                and not strict_pass
+                and self._learning_floor_passes(ai, quant, fast, quality)
+                and direction_match
+            )
+            row["elite_state"] = self._elite_state(
+                ai=ai, quant=quant, fast=fast, quality=quality, deep=deep,
+                direction_match=direction_match, spread_ok=spread.get("ok"),
+                elite_score=row["elite_score"], strict_reasons=row["rejection_reasons"],
+                technical_invalid=technical_invalid,
+            )
+            row["trade_class"] = (
+                "ELITE" if strict_pass else
+                "BOUNDARY" if row["elite_state"] == "LEARNING_PLUS" else
+                "LEARNING" if row["elite_state"] == "LEARNING" else
+                row["elite_state"]
+            )
+            row["ig_demo_learning_eligible"] = row["trade_class"] in {"ELITE", "BOUNDARY", "LEARNING"}
             screened.append(row)
 
-        eligible = [row for row in screened if row.get("eligible")]
+        eligible = [row for row in screened if row.get("elite_eligible")]
         eligible.sort(
             key=lambda r: (
                 self._safe_float(r.get("elite_base_score"), 0.0),
@@ -788,14 +892,14 @@ class EliteCompoundEngine:
         matrix = self._correlation_matrix()
         selected: List[Dict[str, Any]] = []
         exposures: Dict[str, int] = {}
-
         for row in eligible:
             if len(selected) >= self.max_positions:
                 break
             symbol = str(row.get("symbol") or "")
             if any(str(x.get("symbol")) == symbol for x in selected):
                 row["eligible"] = False
-                row["rejection_reasons"] = ["Duplicate market"]
+                row["elite_eligible"] = False
+                row["rejection_reasons"].append("Duplicate market")
                 continue
 
             effects = self._currency_effect(symbol, str(row.get("direction") or ""))
@@ -807,11 +911,10 @@ class EliteCompoundEngine:
                     exposure_block = True
             if exposure_block:
                 row["eligible"] = False
-                row["rejection_reasons"] = ["Currency exposure limit"]
+                row["elite_eligible"] = False
+                row["rejection_reasons"].append("Currency exposure limit")
                 continue
 
-            # Multi-asset thematic concentration guard.  A US Tech index and
-            # several US tech shares are not treated as independent exposure.
             theme_counts: Dict[str, int] = {}
             for existing in selected:
                 for tag in existing.get("exposure_tags") or []:
@@ -826,7 +929,8 @@ class EliteCompoundEngine:
                     break
             if theme_block:
                 row["eligible"] = False
-                row["rejection_reasons"] = [f"Theme exposure limit: {theme_block}"]
+                row["elite_eligible"] = False
+                row["rejection_reasons"].append(f"Theme exposure limit: {theme_block}")
                 continue
 
             correlations = [
@@ -840,7 +944,10 @@ class EliteCompoundEngine:
             max_corr = max(correlations) if correlations else 0.0
             if max_corr >= self.high_correlation_abs:
                 row["eligible"] = False
-                row["rejection_reasons"] = [f"Correlation {max_corr:.2f} >= {self.high_correlation_abs:.2f}"]
+                row["elite_eligible"] = False
+                row["rejection_reasons"].append(
+                    f"Correlation {max_corr:.2f} >= {self.high_correlation_abs:.2f}"
+                )
                 continue
 
             diversification_score = max(0.0, min(100.0, 100.0 * (1.0 - max_corr)))
@@ -848,14 +955,15 @@ class EliteCompoundEngine:
             row["max_abs_correlation"] = round(max_corr, 4)
             row["diversification_score"] = round(diversification_score, 2)
             row["elite_score"] = round(elite_score, 2)
+            row["elite_state"] = (
+                "ELITE_A_PLUS"
+                if str(row.get("quality_tier")) == "A+" and elite_score >= 85.0
+                else "ELITE_A"
+            )
+            row["trade_class"] = "ELITE"
             row["selected"] = True
             selected.append(row)
             exposures = prospective
-
-        selected_ids = {id(row) for row in selected}
-        for row in screened:
-            row.setdefault("selected", id(row) in selected_ids)
-            row.setdefault("elite_score", row.get("elite_base_score"))
 
         screened.sort(
             key=lambda r: (
@@ -874,13 +982,14 @@ class EliteCompoundEngine:
             snapshot.append(clean)
 
         with self._lock:
-            self._state["last_candidate_ranking"] = snapshot[:50]
+            self._state["last_candidate_ranking"] = snapshot[:100]
             self._state["last_selection_at"] = now
         self._journal(
             "ELITE_RANKING",
             {
                 "evaluated": len(snapshot),
                 "selected": len(selected),
+                "learning_eligible": sum(1 for r in snapshot if r.get("learning_eligible")),
                 "selected_symbols": [row.get("symbol") for row in selected],
             },
         )
@@ -1984,6 +2093,17 @@ class EliteCompoundEngine:
             "quant_min_confidence": self.quant_min_confidence,
             "fast_score_min": self.fast_score_min,
             "quality_tiers": ["A+", "A"],
+            "learning_floor": {
+                "model_ai_min_confidence": self.learning_ai_min_confidence,
+                "quant_min_confidence": self.learning_quant_min_confidence,
+                "fast_score_min": self.learning_fast_score_min,
+                "quality_tiers": ["B", "B+", "A", "A+"],
+                "execution_environment": "IG_DEMO_ONLY",
+            },
+            "elite_states": [
+                "ELITE_A_PLUS", "ELITE_A", "LEARNING_PLUS",
+                "LEARNING", "OBSERVE", "INVALID",
+            ],
             "direction_agreement_required": True,
             "ig_tradeable_required": True,
             "max_spread_bps": self.max_spread_bps,
