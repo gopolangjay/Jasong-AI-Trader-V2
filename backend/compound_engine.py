@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.0"
+    VERSION = "6.8.4"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -82,6 +82,12 @@ class EliteCompoundEngine:
         )
         self.fast_score_min = self._float_env(
             "COMPOUND_FAST_SCORE_MIN", 90.0, 0.0, 100.0
+        )
+        # GLOBAL_MULTI_MARKET uses a different held-out evidence score
+        # distribution from SERVER_FRESH_SIGNAL. Keep mature FX/server
+        # fast scoring at 90, but calibrate global learning at 60.
+        self.global_fast_score_min = self._float_env(
+            "COMPOUND_GLOBAL_FAST_SCORE_MIN", 60.0, 0.0, 100.0
         )
         # V6.8.0 minimum-to-maximum learning floor. These values do NOT
         # weaken Elite Compound execution; they only classify useful near-miss
@@ -587,6 +593,13 @@ class EliteCompoundEngine:
         }.get(d, 0.0)
         return 0.60 * q_score + 0.40 * d_score
 
+    def _required_fast_score(self, row: Dict[str, Any]) -> float:
+        """Return the source-calibrated fast threshold."""
+        source = str(row.get("intelligence_source") or "").upper().strip()
+        if source == "GLOBAL_MULTI_MARKET":
+            return float(self.global_fast_score_min)
+        return float(self.fast_score_min)
+
     def _learning_floor_passes(
         self, ai: float, quant: float, fast: float, quality: str
     ) -> bool:
@@ -692,7 +705,7 @@ class EliteCompoundEngine:
         asset_class = str(candidate.get("asset_class") or "FX").upper().strip()
 
         if epic:
-            details = self.broker.market_details(epic)
+            details = self.broker.market_details(epic, require_quote=True)
             instrument = details.get("instrument") or {}
             snapshot = details.get("snapshot") or {}
             status = str(snapshot.get("marketStatus") or candidate.get("ig_market_status") or "").upper()
@@ -724,15 +737,28 @@ class EliteCompoundEngine:
             snapshot = details.get("snapshot") or {}
 
         snapshot = details.get("snapshot") or {}
-        bid = self._safe_float(snapshot.get("bid"), 0.0)
+        quote = (
+            self.broker.extract_snapshot_quote(details)
+            if hasattr(self.broker, "extract_snapshot_quote")
+            else {}
+        )
+        fallback_quote = details.get("_quote_snapshot") or {}
+        bid = self._safe_float(
+            quote.get("bid")
+            if quote.get("bid") is not None
+            else fallback_quote.get("bid"),
+            0.0,
+        )
         offer = self._safe_float(
-            snapshot.get("offer") if snapshot.get("offer") is not None else snapshot.get("ask"),
+            quote.get("offer")
+            if quote.get("offer") is not None
+            else fallback_quote.get("offer"),
             0.0,
         )
         if bid <= 0 or offer <= 0 or offer < bid:
             return {
                 "ok": False,
-                "reason": "IG DEMO spread unavailable",
+                "reason": "IG DEMO spread unavailable after v4 ladder/direct quote and v3 snapshot fallback",
                 "spread_bps": None,
                 "spread_score": 0.0,
                 "market": market,
@@ -788,6 +814,7 @@ class EliteCompoundEngine:
             ai = self._safe_float(row.get("model_ai_confidence"), 0.0)
             quant = self._safe_float(row.get("quant_confidence"), 0.0)
             fast = self._safe_float(row.get("smart_fast_score"), 0.0)
+            required_fast = self._required_fast_score(row)
             quality = str(row.get("quality_tier") or "").upper().strip()
             deep = str(row.get("deep_status") or "").upper().strip()
             direction_match = bool(row.get("direction_match"))
@@ -804,7 +831,8 @@ class EliteCompoundEngine:
                 "threshold_distance": {
                     "ai_pct_points": round((ai - self.ai_min_confidence) * 100.0, 3),
                     "quant_pct_points": round((quant - self.quant_min_confidence) * 100.0, 3),
-                    "fast_points": round(fast - self.fast_score_min, 3),
+                    "fast_points": round(fast - required_fast, 3),
+                    "required_fast_score": round(required_fast, 2),
                 },
             })
 
@@ -821,9 +849,10 @@ class EliteCompoundEngine:
                 confidence_reasons.append(
                     f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%"
                 )
-            if fast < self.fast_score_min:
+            if fast < required_fast:
                 confidence_reasons.append(
-                    f"Fast score {fast:.1f} < {self.fast_score_min:.0f}"
+                    f"Fast score {fast:.1f} < {required_fast:.0f} "
+                    f"for {str(row.get('intelligence_source') or 'DEFAULT')}"
                 )
             if not direction_match:
                 confidence_reasons.append("Live direction does not agree")
@@ -844,7 +873,7 @@ class EliteCompoundEngine:
                 not technical_invalid
                 and ai >= self.ai_min_confidence
                 and quant >= self.quant_min_confidence
-                and fast >= self.fast_score_min
+                and fast >= required_fast
                 and direction_match
             )
 
@@ -912,6 +941,12 @@ class EliteCompoundEngine:
             row["elite_reasons"] = list(dict.fromkeys(elite_only_reasons))
             row["confidence_qualified"] = bool(confidence_pass)
             row["execution_eligible"] = bool(confidence_pass)
+            row["required_fast_score"] = round(required_fast, 2)
+            row["fast_threshold_source"] = (
+                "GLOBAL_CALIBRATED"
+                if str(row.get("intelligence_source") or "").upper() == "GLOBAL_MULTI_MARKET"
+                else "SERVER_FRESH"
+            )
             row["elite_eligible"] = strict_pass
             row["eligible"] = bool(confidence_pass)
             row["learning_eligible"] = bool(confidence_pass and not strict_pass)
@@ -2172,6 +2207,11 @@ class EliteCompoundEngine:
             "model_ai_min_confidence": self.ai_min_confidence,
             "quant_min_confidence": self.quant_min_confidence,
             "fast_score_min": self.fast_score_min,
+            "global_fast_score_min": self.global_fast_score_min,
+            "fast_threshold_policy": {
+                "SERVER_FRESH_SIGNAL": self.fast_score_min,
+                "GLOBAL_MULTI_MARKET": self.global_fast_score_min,
+            },
             "quality_tiers": ["A+", "A"],
             "learning_floor": {
                 "model_ai_min_confidence": self.learning_ai_min_confidence,
