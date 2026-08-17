@@ -52,16 +52,16 @@ class IGDemoMirror:
         )
         self.max_open_positions = self._int_env(
             "IG_DEMO_MAX_OPEN_POSITIONS",
-            3,
+            15,
             minimum=1,
-            maximum=20,
+            maximum=50,
         )
-        # Keep one broker slot available for Compound whenever
+        # With a 15-position account ceiling and a separate Compound max of 5, whenever
         # Compound currently has no open JSCMP_ position. This allows fast
         # forward learning without starving direct Compound execution.
         self.compound_reserved_slots = self._int_env(
             "IG_DEMO_COMPOUND_RESERVED_SLOTS",
-            1,
+            0,
             minimum=0,
             maximum=3,
         )
@@ -1631,7 +1631,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.13-FULL-IG-DEMO-DUAL-TRACK",
+                "version": "6.8.14-CAP15-CALIBRATION-ADVISORY",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
