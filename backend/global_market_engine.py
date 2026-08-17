@@ -71,7 +71,7 @@ GLOBAL_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 class GlobalMarketEngine:
-    VERSION = "6.8.5"
+    VERSION = "6.8.6"
 
     def __init__(
         self,
