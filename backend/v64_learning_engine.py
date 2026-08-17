@@ -22,10 +22,10 @@ class V64LearningTradeEngine:
     path. Broker credentials remain isolated in IGDemoMirror.
     """
 
-    VERSION = "6.8.12"
+    VERSION = "6.8.13"
     NAMESPACE = "v64_learning_engine"
 
-    # V6.6 PAPER-learning entry thresholds.
+    # V6.6 forward-learning entry thresholds.
     # Experimental only: broker execution remains disabled.
     NORMAL_MIN_CONFIDENCE = 0.30
     AI_MIN_CONFIDENCE = 0.40
@@ -61,7 +61,7 @@ class V64LearningTradeEngine:
             "version": self.VERSION,
             "enabled": True,
             "starting_balance": float(starting_balance),
-            "paper_balance": float(starting_balance),
+            "reference_balance": float(starting_balance),
             "payout": float(payout),
             "watchers": [],
             "open_trades": [],
@@ -74,6 +74,16 @@ class V64LearningTradeEngine:
             "last_error": None,
         }
         self._restore()
+        with self._lock:
+            if (
+                self._state.get("reference_balance") is None
+                and self._state.get("paper_balance") is not None
+            ):
+                self._state["reference_balance"] = self._state.get(
+                    "paper_balance"
+                )
+            # Do not expose or update the old synthetic execution balance.
+            self._state.pop("paper_balance", None)
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -249,7 +259,7 @@ class V64LearningTradeEngine:
         )
 
     def _stake(self) -> float:
-        balance = max(self._safe_float(self._state.get("paper_balance"), 0.0), 0.0)
+        balance = max(self._safe_float(self._state.get("reference_balance", self._state.get("paper_balance")), 0.0), 0.0)
         return round(max(1.0, balance * self.default_stake_pct), 2)
 
     def _ai_assess(
@@ -360,7 +370,7 @@ class V64LearningTradeEngine:
         live: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        V6.6 PAPER-only adaptive entry policy.
+        V6.6 IG-DEMO-forward adaptive entry policy.
 
         A VERIFIED watcher may enter when live direction matches and either:
         - normal quantitative confidence >= 30%, or
@@ -463,7 +473,7 @@ class V64LearningTradeEngine:
             "normal_pass": False,
             "ai_pass": False,
             "direction_match": True,
-            "reason": "Below V6.6 PAPER thresholds: normal <30% and model-AI <40%",
+            "reason": "Below V6.6 forward-signal thresholds: normal <30% and model-AI <40%",
         }
 
     def _open_trade(
@@ -811,17 +821,17 @@ class V64LearningTradeEngine:
             entry = self._safe_float(trade.get("entry_price"), 0.0)
             direction = str(trade.get("direction") or "").upper()
             won = exit_price > entry if direction == "BUY" else exit_price < entry
-            stake = self._safe_float(trade.get("stake"), 0.0)
-            payout = self._safe_float(self._state.get("payout"), 0.80)
-            pnl = (stake * payout) if won else (-stake)
-            if not affect_balance:
-                pnl = 0.0
+            # Internal lifecycle grades model direction only. There is no
+            # synthetic/paper cash execution in V6.8.13. Real P&L belongs to
+            # the IG DEMO broker ledger.
             trade.update({
                 "status": "CLOSED",
                 "result": "WIN" if won else "LOSS",
+                "model_result": "WIN" if won else "LOSS",
                 "exit_price": exit_price,
                 "closed_at": now,
-                "pnl": round(pnl, 2),
+                "pnl": None,
+                "cash_pnl_source": "IG_DEMO_BROKER_ONLY",
             })
             settled_now.append(trade)
             self._journal("LEARNING_TRADE_SETTLED" if affect_balance else "SHADOW_TRADE_SETTLED", trade)
@@ -830,12 +840,6 @@ class V64LearningTradeEngine:
             self._state[key_open] = remaining
             settled = list(self._state.get(key_settled, [])) + settled_now
             self._state[key_settled] = settled[-2000:]
-            if affect_balance:
-                self._state["paper_balance"] = round(
-                    self._safe_float(self._state.get("paper_balance"), 0.0)
-                    + sum(self._safe_float(t.get("pnl"), 0.0) for t in settled_now),
-                    2,
-                )
 
     def tick(self) -> Dict[str, Any]:
         with self._lock:
@@ -853,7 +857,7 @@ class V64LearningTradeEngine:
                 live = self.signal_func(
                     watcher["symbol"],
                     watcher.get("risk_mode", "Balanced"),
-                    self._safe_float(self._state.get("paper_balance"), 10000.0),
+                    self._safe_float(self._state.get("reference_balance", self._state.get("paper_balance")), 10000.0),
                 )
                 if "price" not in live or self._safe_float(live.get("price"), 0.0) <= 0:
                     live["price"] = float(self.price_func(watcher["symbol"]))
@@ -976,7 +980,6 @@ class V64LearningTradeEngine:
             "version": self.VERSION,
             "enabled": bool(state.get("enabled", True)),
             "execution_mode": "IG_DEMO_ONLY",
-            "paper_only": False,
             "paper_execution_enabled": False,
             "ig_demo_execution_required": True,
             "live_money_execution": False,
@@ -986,8 +989,12 @@ class V64LearningTradeEngine:
             "watcher_refresh_seconds": self.watcher_refresh_seconds,
             "max_open_trades": self.max_open_trades,
             "open_trades": len(open_trades),
-            "paper_balance": state.get("paper_balance"),
-            "starting_balance": state.get("starting_balance"),
+            "reference_balance": state.get(
+                "reference_balance",
+                state.get("paper_balance"),
+            ),
+            "reference_balance_is_execution_balance": False,
+            "starting_reference_balance": state.get("starting_balance"),
             "ticks": state.get("ticks"),
             "last_tick_at": state.get("last_tick_at"),
             "last_error": state.get("last_error"),
@@ -998,7 +1005,7 @@ class V64LearningTradeEngine:
         }
 
     def trades(self, limit: int = 200) -> Dict[str, Any]:
-        """Return actual PAPER learning trades for the mobile Trade Lab."""
+        """Return IG-DEMO-forward signal lifecycle records for the Trade Lab."""
         with self._lock:
             opened = [dict(x) for x in self._state.get("open_trades", [])]
             settled = [dict(x) for x in self._state.get("settled_trades", [])]
