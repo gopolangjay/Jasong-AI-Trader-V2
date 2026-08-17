@@ -6910,6 +6910,7 @@ def _v673_global_analysis(seed: dict) -> dict:
         "model_ai_directional_confidence_pct": round(directional_ai * 100.0, 2),
         "smart_fast_score": round(smart_fast_score, 2),
         "fast_score_scale": "GLOBAL_HELD_OUT_EVIDENCE",
+        "ig_execution_resolver": "MULTI_ASSET_SAFE_RESOLVER",
         "required_fast_score": float(
             os.getenv("COMPOUND_GLOBAL_FAST_SCORE_MIN", "60")
         ),
