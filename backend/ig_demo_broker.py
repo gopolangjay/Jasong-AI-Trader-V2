@@ -1009,6 +1009,55 @@ class IGDemoBroker:
 
         return float(f"{value:.10f}")
 
+    @staticmethod
+    def _size_increment_retry_candidates(
+        requested_size: float,
+        *,
+        minimum_size: float,
+        first_size: float,
+    ) -> list[float]:
+        """Return conservative larger sizes for an IG SIZE_INCREMENT retry.
+
+        IG's public /markets/{epic} schema exposes minDealSize but does not
+        provide one universal deal-size increment field for every market.
+        Therefore, when IG explicitly rejects a DEMO order with
+        SIZE_INCREMENT, try only conservative upward sizes and only after the
+        original order is confirmed REJECTED.
+
+        This function never reduces below the requested/minimum size.
+        """
+        floor = max(
+            float(requested_size or 0.0),
+            float(minimum_size or 0.0),
+            float(first_size or 0.0),
+        )
+
+        # Common contract steps used by IG-style index/CFD instruments.
+        common_steps = (1.0, 0.5, 0.25, 0.1, 0.05, 0.01)
+
+        candidates: list[float] = []
+        for step in common_steps:
+            if step <= 0:
+                continue
+            candidate = math.ceil((floor - 1e-12) / step) * step
+            candidate = float(f"{candidate:.10f}")
+            if candidate <= first_size + 1e-12:
+                # Move at least one step above the size already rejected.
+                candidate = float(
+                    f"{(candidate + step):.10f}"
+                )
+            if candidate >= floor - 1e-12 and candidate not in candidates:
+                candidates.append(candidate)
+
+        # Prefer the smallest retry, but cap the automatic retry expansion.
+        candidates.sort()
+        max_auto = max(1.0, floor * 2.5)
+        return [
+            value
+            for value in candidates
+            if value <= max_auto + 1e-12
+        ]
+
     def open_epic_position(
         self,
         *,
@@ -1055,13 +1104,98 @@ class IGDemoBroker:
             "orderType": "MARKET",
             "size": round(final_size, 12),
         }
-        acknowledgement = self._request("POST", "/positions/otc", version=2, payload=payload)
-        ref = str(acknowledgement.get("dealReference") or payload["dealReference"])
+        acknowledgement = self._request(
+            "POST",
+            "/positions/otc",
+            version=2,
+            payload=payload,
+        )
+        ref = str(
+            acknowledgement.get("dealReference")
+            or payload["dealReference"]
+        )
         confirmation = self.confirm(ref)
+
+        retry_sizes: list[float] = []
+        size_increment_retry_used = False
+        first_rejection_reason = None
+
         if str(confirmation.get("dealStatus") or "").upper() == "REJECTED":
-            raise IGDemoError(
-                "IG DEMO rejected order: " + str(confirmation.get("reason") or confirmation)
+            first_rejection_reason = str(
+                confirmation.get("reason") or confirmation
             )
+
+            # V6.8.11 — DEMO-only adaptive size handling.
+            # Retry only if IG itself says SIZE_INCREMENT and the first order
+            # was definitively REJECTED, so there is no duplicate-position risk.
+            if (
+                "SIZE_INCREMENT" in first_rejection_reason.upper()
+                and self.demo
+            ):
+                retry_sizes = self._size_increment_retry_candidates(
+                    requested_size,
+                    minimum_size=min_size,
+                    first_size=final_size,
+                )
+
+                for retry_index, retry_size in enumerate(
+                    retry_sizes[:3],
+                    start=1,
+                ):
+                    retry_payload = dict(payload)
+                    retry_payload["size"] = round(retry_size, 12)
+                    retry_payload["dealReference"] = (
+                        f"{payload['dealReference'][:20]}"
+                        f"_S{retry_index}_{uuid.uuid4().hex[:5]}"
+                    )[:30]
+
+                    retry_ack = self._request(
+                        "POST",
+                        "/positions/otc",
+                        version=2,
+                        payload=retry_payload,
+                    )
+                    retry_ref = str(
+                        retry_ack.get("dealReference")
+                        or retry_payload["dealReference"]
+                    )
+                    retry_confirmation = self.confirm(retry_ref)
+
+                    if (
+                        str(
+                            retry_confirmation.get("dealStatus") or ""
+                        ).upper()
+                        != "REJECTED"
+                    ):
+                        payload = retry_payload
+                        ref = retry_ref
+                        confirmation = retry_confirmation
+                        final_size = retry_size
+                        size_increment_retry_used = True
+                        break
+
+                    retry_reason = str(
+                        retry_confirmation.get("reason")
+                        or retry_confirmation
+                    )
+                    confirmation = retry_confirmation
+                    ref = retry_ref
+
+                    # Stop retrying if the broker has moved on to a different
+                    # rejection reason. That is not a size-step problem.
+                    if "SIZE_INCREMENT" not in retry_reason.upper():
+                        break
+
+            if str(confirmation.get("dealStatus") or "").upper() == "REJECTED":
+                raise IGDemoError(
+                    "IG DEMO rejected order: "
+                    + str(
+                        confirmation.get("reason")
+                        or first_rejection_reason
+                        or confirmation
+                    )
+                )
+
         return {
             "broker": "IG",
             "environment": "DEMO",
@@ -1075,6 +1209,9 @@ class IGDemoBroker:
             "sizeIncrement": size_increment,
             "normalisedSize": final_size,
             "size": final_size,
+            "sizeIncrementRetryUsed": size_increment_retry_used,
+            "sizeIncrementRetryCandidates": retry_sizes,
+            "firstRejectionReason": first_rejection_reason,
             "dealReference": ref,
             "dealId": confirmation.get("dealId"),
             "level": confirmation.get("level"),
