@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 class EvidenceExecutionIntegrityEngine:
-    """Read-only V6.7.2a evidence and execution integrity scorer.
+    """Read-only V6.7.3 evidence and execution integrity scorer.
 
     The score is deliberately separated into four components so a broker/API
     defect is never mislabeled as a weak trading strategy:
@@ -19,7 +19,7 @@ class EvidenceExecutionIntegrityEngine:
     This module never opens, closes or sizes a trade.
     """
 
-    VERSION = "6.7.2a"
+    VERSION = "6.7.3"
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
