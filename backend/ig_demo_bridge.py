@@ -19,13 +19,13 @@ class IGDemoMirror:
     }
 
     """
-    Mirrors Jasong AI learning trades to IG DEMO.
+    Mirrors Jasong AI forward-learning trades to IG DEMO.
 
-    Phase-1 defaults:
-    - 10 accepted IG DEMO entries total.
+    Forward-learning defaults:
+    - Rolling phases of 10 broker-settled IG DEMO entries by default.
     - Up to 3 broker positions open at once.
-    - Only trades already opened by the Jasong AI learning engine are mirrored.
-    - IG market availability is treated as a hard execution requirement.
+    - ELITE / BOUNDARY / LEARNING model signals may be mirrored.
+    - IG market availability is a hard execution requirement; OBSERVE/INVALID never execute.
     """
 
     def __init__(
@@ -107,7 +107,7 @@ class IGDemoMirror:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {
-            "version": "6.7.2a-IG-DEMO-MARKET-AWARE-CLOSE",
+            "version": "6.8.1-IG-DEMO-PHASE-ROLLOVER",
             "mirrors": {},
             "broker_positions": [],
             "broker_account": {},
@@ -117,8 +117,11 @@ class IGDemoMirror:
             "last_error": None,
             "broker_reconciliation_error": None,
             "account_sync_error": None,
+            "current_phase_id": 1,
+            "phases": {},
         }
         self._load()
+        self._ensure_phase_state()
 
     @staticmethod
     def _bool_env(name: str, default: bool) -> bool:
@@ -238,6 +241,108 @@ class IGDemoMirror:
         )
         return mirrors
 
+    def _ensure_phase_state(self) -> None:
+        """Migrate old Phase-1 mirror data and ensure rolling phase metadata."""
+        with self._lock:
+            current = int(self._state.get("current_phase_id") or 1)
+            phases = self._state.setdefault("phases", {})
+            if "1" not in phases:
+                phases["1"] = {
+                    "phase_id": 1,
+                    "status": "ACTIVE",
+                    "target": self.phase_target,
+                    "started_at": self._state.get("last_sync_at") or time.time(),
+                    "completed_at": None,
+                }
+            for mirror in self._mirrors().values():
+                if not isinstance(mirror, dict):
+                    continue
+                if mirror.get("phase_id") is None and not mirror.get("recovered_from_ig"):
+                    mirror["phase_id"] = 1
+            self._state["current_phase_id"] = max(1, current)
+            self._state["phases"] = phases
+        self._maybe_roll_phase()
+        self._persist()
+
+    def _phase_rows(self, phase_id: int) -> list[Dict[str, Any]]:
+        rows = []
+        for item in self._mirrors().values():
+            if not isinstance(item, dict) or item.get("recovered_from_ig"):
+                continue
+            item_phase = int(item.get("phase_id") or 1)
+            if item_phase == int(phase_id):
+                rows.append(item)
+        return rows
+
+    @staticmethod
+    def _stats_for_rows(rows: list[Dict[str, Any]]) -> Dict[str, Any]:
+        accepted = [r for r in rows if r.get("ig_deal_id")]
+        open_rows = [r for r in accepted if str(r.get("broker_status") or "").upper() in {
+            "OPEN", "SUBMITTING", "RETRY_WAIT", "CLOSE_PENDING"
+        }]
+        settled = [r for r in accepted if str(r.get("broker_result") or "").upper() in {"WIN", "LOSS"}]
+        wins = sum(1 for r in settled if str(r.get("broker_result") or "").upper() == "WIN")
+        losses = len(settled) - wins
+        return {
+            "accepted": len(accepted),
+            "open": len(open_rows),
+            "settled": len(settled),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(wins / len(settled) * 100.0, 2) if settled else 0.0,
+        }
+
+    def _phase_stats(self, phase_id: Optional[int] = None) -> Dict[str, Any]:
+        pid = int(phase_id or self._state.get("current_phase_id") or 1)
+        rows = self._phase_rows(pid)
+        overall = self._stats_for_rows(rows)
+        by_class: Dict[str, Any] = {}
+        for cls in ("ELITE", "BOUNDARY", "LEARNING"):
+            bucket = [r for r in rows if str(r.get("trade_class") or r.get("entry_class") or "").upper() == cls]
+            by_class[cls] = self._stats_for_rows(bucket)
+        overall["by_class"] = by_class
+        overall["phase_id"] = pid
+        overall["target"] = self.phase_target
+        overall["remaining_to_settle"] = max(0, self.phase_target - overall["settled"])
+        return overall
+
+    def _maybe_roll_phase(self) -> bool:
+        """Archive a completed broker-settled phase and create the next phase."""
+        with self._lock:
+            current = int(self._state.get("current_phase_id") or 1)
+            stats = self._phase_stats(current)
+            if stats["settled"] < self.phase_target:
+                return False
+            phases = self._state.setdefault("phases", {})
+            phase = phases.setdefault(str(current), {
+                "phase_id": current, "target": self.phase_target, "started_at": time.time()
+            })
+            if str(phase.get("status") or "").upper() != "COMPLETE":
+                phase["status"] = "COMPLETE"
+                phase["completed_at"] = time.time()
+                phase["performance"] = stats
+            next_id = current + 1
+            phases.setdefault(str(next_id), {
+                "phase_id": next_id,
+                "status": "ACTIVE",
+                "target": self.phase_target,
+                "started_at": time.time(),
+                "completed_at": None,
+            })
+            self._state["current_phase_id"] = next_id
+            self._state["phases"] = phases
+            return True
+
+    def phase_history(self) -> list[Dict[str, Any]]:
+        with self._lock:
+            phases = dict(self._state.get("phases") or {})
+        history = []
+        for key in sorted(phases, key=lambda x: int(x)):
+            row = dict(phases[key])
+            row["performance"] = self._phase_stats(int(key))
+            history.append(row)
+        return history
+
     @staticmethod
     def _timestamp_from_ig(value: Any) -> Optional[float]:
         text = str(value or "").strip()
@@ -334,8 +439,11 @@ class IGDemoMirror:
             ).strip()
 
             # Critical safety boundary: only adopt positions created by Jasong.
-            # Manual IG DEMO positions remain untouched.
-            if not deal_reference.startswith("JASONG_"):
+            # Manual IG DEMO positions remain untouched. V6.8 introduces
+            # class-specific forward-evidence prefixes while retaining JASONG_.
+            if not deal_reference.startswith((
+                "JASONG_", "JSELT_", "JSBND_", "JSLRN_"
+            )):
                 continue
 
             deal_id = str(
@@ -665,7 +773,7 @@ class IGDemoMirror:
         """Rebuild local mirror state from authoritative IG DEMO positions.
 
         This is intentionally independent of the phone/app and allows a
-        restarted backend to recover bot-created positions using JASONG_ deal
+        restarted backend to recover bot-created positions using Jasong-owned deal
         references.
         """
         if not self.broker.configured():
@@ -853,10 +961,17 @@ class IGDemoMirror:
         finally:
             self._sync_lock.release()
 
-    def _accepted_count(self) -> int:
+    def _accepted_count(self, phase_id: Optional[int] = None) -> int:
+        rows = self._mirrors().values()
+        if phase_id is not None:
+            rows = [
+                item for item in rows
+                if not item.get("recovered_from_ig")
+                and int(item.get("phase_id") or 1) == int(phase_id)
+            ]
         return len({
             str(item.get("ig_deal_id"))
-            for item in self._mirrors().values()
+            for item in rows
             if item.get("ig_deal_id")
         })
 
@@ -949,15 +1064,48 @@ class IGDemoMirror:
             "account_currency": account.get("currency"),
         }
 
+    def phase_entry_limit_reached(self) -> bool:
+        """True once the current phase has accepted its configured entries.
+
+        We stop adding NEW broker entries at the phase target, but continue
+        reconciling/closing the accepted positions until all target outcomes
+        are broker-settled. Only then does _maybe_roll_phase() create the next
+        phase. This prevents a 10-trade phase from accidentally becoming 11+
+        while the last positions are still open.
+        """
+        return self._phase_stats()["accepted"] >= self.phase_target
+
     def phase_complete(self) -> bool:
-        return self._accepted_count() >= self.phase_target
+        # A phase is complete only when the target number of broker outcomes
+        # are settled. Merely submitting/opening 10 positions is not enough.
+        stats = self._phase_stats()
+        return (
+            stats["accepted"] >= self.phase_target
+            and stats["settled"] >= self.phase_target
+            and stats["open"] == 0
+        )
 
     def execution_required(self) -> bool:
+        # Broker preflight is required only while the current phase can still
+        # accept a new entry. After the phase is full we reconcile/settle it,
+        # roll automatically, and execution_required becomes True again.
         return bool(
             self.enabled
             and self.broker.configured()
-            and not self.phase_complete()
+            and not self.phase_entry_limit_reached()
         )
+
+    def _entry_blocker(self) -> Optional[str]:
+        if not self.enabled:
+            return "IG_DEMO_AUTOTRADE_DISABLED"
+        if not self.broker.configured():
+            return "IG_DEMO_BROKER_NOT_CONFIGURED"
+        stats = self._phase_stats()
+        if stats["accepted"] >= self.phase_target and stats["settled"] < self.phase_target:
+            return "PHASE_FULL_WAITING_FOR_BROKER_SETTLEMENT"
+        if self._open_count() >= self.max_open_positions:
+            return "MAX_OPEN_IG_POSITIONS_REACHED"
+        return None
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
@@ -1037,18 +1185,25 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.7.2a-IG-DEMO-MARKET-AWARE-CLOSE",
+                "version": "6.8.0-IG-DEMO-FORWARD-LEARNING",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
                 "phase_target": self.phase_target,
-                "phase_accepted_trades": self._accepted_count(),
-                "phase_remaining": max(
-                    0,
-                    self.phase_target
-                    - self._accepted_count(),
-                ),
+                "current_phase_id": int(self._state.get("current_phase_id") or 1),
+                "phase_accepted_trades": self._phase_stats()["accepted"],
+                "phase_settled_trades": self._phase_stats()["settled"],
+                "phase_remaining": self._phase_stats()["remaining_to_settle"],
                 "phase_complete": self.phase_complete(),
+                "phase_entry_limit_reached": self.phase_entry_limit_reached(),
+                "entry_blocker": self._entry_blocker(),
+                "execution_required": self.execution_required(),
+                "current_phase_performance": self._phase_stats(),
+                "phase_history": self.phase_history(),
+                "lifetime_performance": self._stats_for_rows([
+                    item for item in self._mirrors().values()
+                    if not item.get("recovered_from_ig")
+                ]),
                 "max_open_positions": self.max_open_positions,
                 "open_broker_positions": self._open_count(),
                 "broker_positions": broker_positions,
@@ -1225,8 +1380,13 @@ class IGDemoMirror:
                 symbol=symbol,
                 direction=direction,
                 deal_reference=(
-                    f"JASONG_{trade_id.replace('-', '')[:20]}"
-                ),
+                    (
+                        "JSELT_" if str(mirror.get("trade_class") or "").upper() == "ELITE"
+                        else "JSBND_" if str(mirror.get("trade_class") or "").upper() == "BOUNDARY"
+                        else "JSLRN_"
+                    )
+                    + trade_id.replace('-', '')[:20]
+                )[:30],
             )
 
             mirror["open_result"] = result
@@ -1741,6 +1901,7 @@ class IGDemoMirror:
                         mirror,
                         result,
                     )
+                    self._maybe_roll_phase()
                 except Exception as exc:
                     mirror["last_close_error"] = (
                         f"{type(exc).__name__}: "
@@ -1754,9 +1915,14 @@ class IGDemoMirror:
 
             # Autotrade-disabled mode still reconciles and closes bot-owned
             # positions, but does not create new ones.
-            if self.enabled and not self.phase_complete():
+            if self.enabled:
+                self._maybe_roll_phase()
                 for trade in trades:
-                    if self.phase_complete():
+                    # Do not overfill a phase. Once the target number of IG
+                    # entries has been accepted, wait for those trades to
+                    # settle. _maybe_roll_phase() will archive the phase and
+                    # immediately open capacity for the next one.
+                    if self.phase_entry_limit_reached():
                         break
                     if (
                         self._open_count()
@@ -1776,6 +1942,12 @@ class IGDemoMirror:
                         or ""
                     ).upper()
                     if trade_status != "OPEN":
+                        continue
+                    if not bool(trade.get("ig_demo_learning_eligible", True)):
+                        continue
+                    if str(trade.get("trade_class") or "").upper() not in {
+                        "ELITE", "BOUNDARY", "LEARNING"
+                    }:
                         continue
 
                     existing = (
@@ -1880,6 +2052,13 @@ class IGDemoMirror:
                             trade.get(
                                 "entry_class"
                             ),
+                        "elite_state": trade.get("elite_state"),
+                        "trade_class": trade.get("trade_class") or trade.get("entry_class"),
+                        "elite_score": trade.get("elite_score"),
+                        "failed_gates": list(trade.get("failed_gates") or []),
+                        "threshold_distance": dict(trade.get("threshold_distance") or {}),
+                        "model_version": trade.get("model_version") or "6.8.0",
+                        "phase_id": int(self._state.get("current_phase_id") or 1),
                         "historical_grade":
                             trade.get(
                                 "historical_grade"
