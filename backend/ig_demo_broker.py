@@ -763,6 +763,40 @@ class IGDemoBroker:
         words.discard("")
         return letters, words
 
+    @staticmethod
+    def _instrument_type_family(value: Any) -> str:
+        """Normalise IG instrument type variants into broad safe families."""
+        raw = str(value or "").upper().strip()
+        if "CURRENC" in raw or "FOREX" in raw or raw == "FX":
+            return "FX"
+        if "SHARE" in raw or "STOCK" in raw or "EQUITY" in raw:
+            return "SHARE"
+        if "INDICE" in raw or raw == "INDEX":
+            return "INDEX"
+        if "COMMOD" in raw:
+            return "COMMODITY"
+        if "CRYPTO" in raw or "BITCOIN" in raw or "ETHER" in raw:
+            return "CRYPTO"
+        if "ETF" in raw or "FUND" in raw:
+            return "ETF"
+        return raw
+
+    @classmethod
+    def _instrument_type_allowed(
+        cls,
+        actual: Any,
+        expected_types: Optional[list[str]],
+    ) -> bool:
+        if not expected_types:
+            return True
+        actual_family = cls._instrument_type_family(actual)
+        expected_families = {
+            cls._instrument_type_family(x)
+            for x in (expected_types or [])
+            if str(x or "").strip()
+        }
+        return actual_family in expected_families
+
     def resolve_global_market(
         self,
         *,
@@ -823,7 +857,10 @@ class IGDemoBroker:
                 token_letters = "".join(ch for ch in token if ch.isalnum())
                 if token_letters and (token_letters in name_letters or token_letters in name_words):
                     token_hits += 1
-            type_ok = (not allowed_types) or market_type in allowed_types
+            type_ok = self._instrument_type_allowed(
+                market_type,
+                list(allowed_types),
+            )
             banned = any(x in market_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE"))
             cash_like = expiry in {"", "-", "DFB"} or "CASH" in name
             return (
@@ -848,7 +885,10 @@ class IGDemoBroker:
             snapshot = details.get("snapshot") or {}
             status = str(snapshot.get("marketStatus") or candidate.get("marketStatus") or "").upper()
             instrument_type = str(instrument.get("type") or candidate.get("instrumentType") or "").upper()
-            if allowed_types and instrument_type not in allowed_types:
+            if not self._instrument_type_allowed(
+                instrument_type,
+                list(allowed_types),
+            ):
                 continue
             if any(x in instrument_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
                 continue
@@ -875,6 +915,7 @@ class IGDemoBroker:
                 "expiry": expiry,
                 "name": instrument_name,
                 "instrument_type": instrument_type,
+                "instrument_family": self._instrument_type_family(instrument_type),
                 "market_status": status,
                 "details": details,
                 "min_deal_size": self._min_deal_size(details),
