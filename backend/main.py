@@ -1,4 +1,3 @@
-
 from adaptive_confidence import AdaptiveConfidenceGate
 from v66_intelligence import V66Intelligence
 from v68_copilot import COPILOT
@@ -94,90 +93,164 @@ PROFILES = {
 # V6.6 AI40-ONLY AUTONOMOUS PAPER LEARNING POLICY
 # ============================================================
 class AI40OnlyLearningTradeEngine(V64LearningTradeEngine):
-    """PAPER-only learning engine that requires the AI40 path to enter.
+    """V6.8 minimum-to-maximum IG DEMO forward-learning policy.
 
-    The inherited V6.6 learning engine already handles candidate watchers,
-    paper stake sizing, timed settlement, P&L, persistence, shadow evidence
-    and learning statistics. This override changes only entry eligibility:
+    The legacy class name is retained so existing imports/state wiring do not
+    break. V6.8 no longer means AI40-only and no longer treats paper results as
+    primary evidence. It classifies every valid directional setup as:
 
-      * BUY/SELL live direction must match the candidate direction.
-      * Directional model-AI confidence must be at least 40%.
-      * Normal N30 confidence alone can no longer open an AI-learning trade.
+      ELITE_A_PLUS / ELITE_A / LEARNING_PLUS / LEARNING / OBSERVE / INVALID
 
-    No broker execution is enabled.
+    ELITE, LEARNING_PLUS and LEARNING may be mirrored to IG DEMO. OBSERVE is
+    retained as signal metadata only. IG DEMO is the source of truth for W/L.
     """
+
+    LEARNING_AI_MIN = 0.25
+    LEARNING_QUANT_MIN = 0.15
+    LEARNING_FAST_MIN = 50.0
+    ELITE_AI_MIN = 0.40
+    ELITE_QUANT_MIN = 0.30
+    ELITE_FAST_MIN = 90.0
+
+    @staticmethod
+    def _grade_score(quality: str) -> float:
+        return {
+            "A+": 100.0, "A": 92.0, "B+": 78.0, "B": 68.0,
+            "C+": 52.0, "C": 42.0,
+        }.get(str(quality or "").upper().strip(), 0.0)
+
+    @staticmethod
+    def _deep_score(status: str) -> float:
+        return {
+            "VERIFIED": 100.0, "GLOBAL_VERIFIED": 100.0,
+            "NEAR_VERIFIED": 92.0, "GLOBAL_NEAR_VERIFIED": 92.0,
+            "WATCH": 82.0, "AI_LEARNING_SHADOW_PROMOTION": 86.0,
+            "REJECT": 40.0, "GLOBAL_REJECT": 40.0,
+        }.get(str(status or "").upper().strip(), 0.0)
 
     def _entry_class(
         self,
         watcher: Dict[str, object],
         live: Dict[str, object],
     ) -> Dict[str, object]:
-        decision = super()._entry_class(
-            watcher,
-            live,
+        wanted = str(watcher.get("direction") or "").upper()
+        live_direction = str(
+            live.get("direction") or live.get("signal") or
+            live.get("decision") or "WAIT"
+        ).upper()
+        direction_match = live_direction == wanted
+
+        quant = self._confidence01(live.get("confidence"))
+        ai = self._directional_model_ai_confidence(live, wanted)
+        candidate = dict(watcher.get("candidate") or {})
+        validated = dict(watcher.get("validated") or {})
+        fast = self._safe_float(
+            candidate.get("smart_fast_score")
+            or candidate.get("fast_score")
+            or validated.get("smart_fast_score")
+            or validated.get("fast_score"),
+            0.0,
+        )
+        quality = str(
+            candidate.get("quality_tier")
+            or validated.get("quality_tier")
+            or ""
+        ).upper().strip()
+        deep = str(
+            watcher.get("deep_status")
+            or validated.get("status")
+            or "NOT_VALIDATED"
+        ).upper().strip()
+
+        invalid = (
+            wanted not in {"BUY", "SELL"}
+            or live_direction not in {"BUY", "SELL", "WAIT"}
+            or deep in {"NOT_VALIDATED", "INVALID", "ERROR", ""}
         )
 
-        verified = bool(
-            watcher.get("verified")
-        )
-        experimental = bool(
-            watcher.get("experimental")
-        )
-        trade_eligible = bool(
-            watcher.get(
-                "trade_eligible",
-                verified or experimental,
-            )
+        failed = []
+        if ai < self.ELITE_AI_MIN:
+            failed.append(f"AI {ai*100:.1f}% < 40%")
+        if quant < self.ELITE_QUANT_MIN:
+            failed.append(f"Quant {quant*100:.1f}% < 30%")
+        if fast < self.ELITE_FAST_MIN:
+            failed.append(f"Fast score {fast:.1f} < 90")
+        if quality not in {"A", "A+"}:
+            failed.append(f"Quality {quality or '-'} is not A/A+")
+        if deep not in {
+            "VERIFIED", "NEAR_VERIFIED", "WATCH",
+            "AI_LEARNING_SHADOW_PROMOTION",
+            "GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED",
+        }:
+            failed.append(f"Deep status {deep or '-'} not elite-eligible")
+        if not direction_match:
+            failed.append("Live direction does not agree")
+
+        score = round(
+            20.0 * ai
+            + 20.0 * quant
+            + 0.20 * max(0.0, min(100.0, fast))
+            + 0.20 * self._grade_score(quality)
+            + 0.20 * self._deep_score(deep),
+            2,
         )
 
-        direction_match = bool(
-            decision.get("direction_match")
-        )
-        ai_pass = bool(
-            decision.get("ai_pass")
-        )
-
-        if (
-            trade_eligible
+        strict = not invalid and not failed
+        learning_floor = bool(
+            not invalid
             and direction_match
-            and ai_pass
-        ):
-            return {
-                **decision,
-                "class": (
-                    "EM"
-                    if experimental
-                    else "M"
-                ),
-                "enter": True,
-                "reason": (
-                    "AI40 autonomous PAPER path: "
-                    "live direction agrees and directional "
-                    "model-AI confidence is >=40%"
-                ),
-            }
-
-        reason = str(
-            decision.get("reason")
-            or "AI40 entry requirements not met"
+            and ai >= self.LEARNING_AI_MIN
+            and quant >= self.LEARNING_QUANT_MIN
+            and fast >= self.LEARNING_FAST_MIN
+            and quality in {"B", "B+", "A", "A+"}
         )
 
-        if (
-            trade_eligible
-            and direction_match
-            and not ai_pass
-        ):
-            reason = (
-                "AI40 autonomous PAPER path rejected: "
-                "direction agrees but directional model-AI "
-                "confidence is below 40%"
+        if invalid:
+            state, trade_class, enter = "INVALID", "INVALID", False
+        elif strict:
+            state = "ELITE_A_PLUS" if quality == "A+" and score >= 85.0 else "ELITE_A"
+            trade_class, enter = "ELITE", True
+        elif learning_floor:
+            near_boundary = (
+                abs(ai - self.ELITE_AI_MIN) <= 0.05
+                or abs(quant - self.ELITE_QUANT_MIN) <= 0.05
+                or abs(fast - self.ELITE_FAST_MIN) <= 10.0
+                or len(failed) == 1
             )
+            state = "LEARNING_PLUS" if near_boundary else "LEARNING"
+            trade_class = "BOUNDARY" if near_boundary else "LEARNING"
+            enter = True
+        else:
+            state, trade_class, enter = "OBSERVE", "OBSERVE", False
 
         return {
-            **decision,
-            "class": "S",
-            "enter": False,
-            "reason": reason,
+            "class": trade_class,
+            "enter": enter,
+            "quant": quant,
+            "model_ai_confidence": ai,
+            "ai": None,
+            "normal_pass": quant >= self.ELITE_QUANT_MIN,
+            "ai_pass": ai >= self.ELITE_AI_MIN,
+            "direction_match": direction_match,
+            "elite_state": state,
+            "trade_class": trade_class,
+            "elite_score": score,
+            "failed_gates": failed,
+            "threshold_distance": {
+                "ai_pct_points": round((ai - self.ELITE_AI_MIN) * 100.0, 3),
+                "quant_pct_points": round((quant - self.ELITE_QUANT_MIN) * 100.0, 3),
+                "fast_points": round(fast - self.ELITE_FAST_MIN, 3),
+            },
+            "ig_demo_learning_eligible": enter,
+            "reason": (
+                "Strict Elite gates passed"
+                if strict
+                else (
+                    "IG DEMO boundary/learning evidence: " + "; ".join(failed)
+                    if enter
+                    else "Observe only: " + "; ".join(failed or ["below learning floor"])
+                )
+            ),
         }
 
 # ============================================================
@@ -209,8 +282,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.7.3 API",
-    version="6.7.3",
+    title="Jasong AI Trader V6.8.1 API",
+    version="6.8.1",
 )
 
 app.add_middleware(
@@ -3812,10 +3885,10 @@ V64_LEARNING_ENGINE = AI40OnlyLearningTradeEngine(
 )
 V64_LEARNING_ENGINE.start()
 
-# AI-learning experiment: disable the N30 entry path inside V64.
-# Only the AI40 model path may open an autonomous learning PAPER trade.
-V64_LEARNING_ENGINE.NORMAL_MIN_CONFIDENCE = 1.01
-V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = PAPER_AI_MIN_CONFIDENCE
+# V6.8: the subclass now classifies the full minimum-to-maximum learning
+# curve. These inherited values are retained only for compatibility.
+V64_LEARNING_ENGINE.NORMAL_MIN_CONFIDENCE = 0.15
+V64_LEARNING_ENGINE.AI_MIN_CONFIDENCE = 0.25
 
 # ============================================================
 # IG DEMO BROKER EXECUTION BRIDGE
@@ -5156,305 +5229,140 @@ def get_forward_journal(
 def _v669_model_forward_evidence(
     starting_balance: float = 10000.0,
 ) -> dict:
-    """Forward evidence for the model that is actually creating IG DEMO trades.
+    """Broker-verified model forward evidence (V6.8).
 
-    The legacy V53 forward engine is retained separately. V6.6.9 counts
-    V64/AI-learning entries as soon as they are opened, while win-rate/P&L
-    remain based only on settled outcomes.
-
-    Broker-recovered positions with no surviving model metadata are *not*
-    silently attributed to the model. They remain broker evidence until
-    a model-linked trade_id/metadata exists.
+    IG DEMO is the source of truth for execution and W/L. Internal model trade
+    records are retained only as signal metadata; paper/shadow outcomes do not
+    contribute to the primary forward win rate.
     """
-    learning_status = V64_LEARNING_ENGINE.status()
-    learning_payload = V64_LEARNING_ENGINE.trades(
-        limit=2000
-    )
-    learning_rows = [
-        dict(item)
-        for item in learning_payload.get(
-            "trades",
-            [],
-        )
-        if isinstance(item, dict)
-    ]
-
-    mirrors_payload = IG_DEMO_MIRROR.status()
+    mirror_status = IG_DEMO_MIRROR.status()
     mirrors = [
         dict(item)
-        for item in mirrors_payload.get(
-            "mirrors",
-            [],
-        )
+        for item in mirror_status.get("mirrors", [])
         if isinstance(item, dict)
+        and not bool(item.get("recovered_from_ig"))
+        and item.get("ig_deal_id")
     ]
 
-    mirror_by_trade_id = {
-        str(item.get("trade_id")): item
-        for item in mirrors
-        if item.get("trade_id") is not None
-    }
-
-    # Actual model-generated entries: OPEN + CLOSED learning trades.
-    actual_rows = []
-    for trade in learning_rows:
-        status = str(
-            trade.get("status")
-            or ""
-        ).upper()
-
-        if status not in {
-            "OPEN",
-            "CLOSED",
-        }:
-            continue
-
-        row = dict(trade)
-        trade_id = str(
-            row.get("trade_id")
-            or ""
+    def stats(rows):
+        accepted = list(rows)
+        settled = [
+            r for r in accepted
+            if str(r.get("broker_result") or "").upper() in {"WIN", "LOSS"}
+        ]
+        open_rows = [
+            r for r in accepted
+            if str(r.get("broker_status") or "").upper() in {
+                "OPEN", "SUBMITTING", "RETRY_WAIT", "CLOSE_PENDING"
+            }
+        ]
+        wins = sum(
+            1 for r in settled
+            if str(r.get("broker_result") or "").upper() == "WIN"
         )
-        mirror = mirror_by_trade_id.get(
-            trade_id
-        )
-
-        if mirror:
-            row["broker_linked"] = bool(
-                mirror.get("ig_deal_id")
-            )
-            row["ig_deal_id"] = mirror.get(
-                "ig_deal_id"
-            )
-            row["broker_status"] = mirror.get(
-                "broker_status"
-            )
-            row["broker_result"] = mirror.get(
-                "broker_result"
-            )
-
-            # If the broker has a definitive result, retain it as a second
-            # evidence field without overwriting the internal PAPER result.
-            row["broker_outcome_available"] = (
-                str(
-                    mirror.get(
-                        "broker_result"
-                    )
-                    or ""
-                ).upper()
-                in {
-                    "WIN",
-                    "LOSS",
-                }
-            )
-        else:
-            row["broker_linked"] = False
-            row["broker_outcome_available"] = False
-
-        actual_rows.append(row)
-
-    open_rows = [
-        row
-        for row in actual_rows
-        if str(
-            row.get("status")
-            or ""
-        ).upper() == "OPEN"
-    ]
-    settled_rows = [
-        row
-        for row in actual_rows
-        if str(
-            row.get("status")
-            or ""
-        ).upper() == "CLOSED"
-        and str(
-            row.get("result")
-            or ""
-        ).upper()
-        in {
-            "WIN",
-            "LOSS",
+        losses = len(settled) - wins
+        broker_pnl_rows = [
+            r for r in settled
+            if r.get("broker_pnl") is not None
+        ]
+        return {
+            "entries": len(accepted),
+            "open": len(open_rows),
+            "settled": len(settled),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(wins / len(settled) * 100.0, 2) if settled else 0.0,
+            "broker_pnl": (
+                round(sum(float(r.get("broker_pnl") or 0.0) for r in broker_pnl_rows), 2)
+                if broker_pnl_rows else None
+            ),
+            "broker_pnl_available_trades": len(broker_pnl_rows),
         }
-    ]
 
-    wins = sum(
-        1
-        for row in settled_rows
-        if str(
-            row.get("result")
-            or ""
-        ).upper() == "WIN"
-    )
-    losses = len(
-        settled_rows
-    ) - wins
+    by_class = {}
+    for cls in ("ELITE", "BOUNDARY", "LEARNING"):
+        by_class[cls] = stats([
+            r for r in mirrors
+            if str(r.get("trade_class") or r.get("entry_class") or "").upper() == cls
+        ])
 
-    total_pnl = round(
-        sum(
-            float(
-                row.get("pnl")
-                or 0.0
-            )
-            for row in settled_rows
-        ),
-        2,
-    )
+    score_buckets = {}
+    for label, low, high in (
+        ("90-100", 90.0, 101.0),
+        ("80-89", 80.0, 90.0),
+        ("70-79", 70.0, 80.0),
+        ("60-69", 60.0, 70.0),
+        ("50-59", 50.0, 60.0),
+        ("<50", -1.0, 50.0),
+    ):
+        score_buckets[label] = stats([
+            r for r in mirrors
+            if low <= float(r.get("elite_score") or 0.0) < high
+        ])
 
-    broker_matched = sum(
-        1
-        for row in actual_rows
-        if row.get(
-            "broker_linked"
-        )
-    )
+    overall = stats(mirrors)
+    current_phase = mirror_status.get("current_phase_performance") or {}
+    phase_history = mirror_status.get("phase_history") or []
 
-    recovered_unattributed = sum(
-        1
-        for mirror in mirrors
-        if mirror.get(
-            "ig_deal_id"
-        )
-        and bool(
-            mirror.get(
-                "recovered_from_ig"
-            )
-        )
-        and str(
-            mirror.get(
-                "entry_class"
-            )
-            or ""
-        ).upper()
-        == "IG_RECOVERED"
-    )
+    internal_rows = V64_LEARNING_ENGINE.trades(limit=2000).get("trades", [])
+    internal_by_id = {
+        str(r.get("trade_id")): r
+        for r in internal_rows
+        if isinstance(r, dict) and r.get("trade_id")
+    }
+    internal_reference_pnl = round(sum(
+        float(internal_by_id.get(str(r.get("trade_id")), {}).get("pnl") or 0.0)
+        for r in mirrors
+        if str(internal_by_id.get(str(r.get("trade_id")), {}).get("result") or "").upper() in {"WIN", "LOSS"}
+    ), 2)
 
-    by_entry_class = {}
-    for row in actual_rows:
-        cls = str(
-            row.get(
-                "entry_class"
-            )
-            or "UNKNOWN"
-        ).upper()
-        bucket = by_entry_class.setdefault(
-            cls,
-            {
-                "entries": 0,
-                "open": 0,
-                "settled": 0,
-                "wins": 0,
-                "losses": 0,
-            },
-        )
-        bucket["entries"] += 1
-
-        if str(
-            row.get("status")
-            or ""
-        ).upper() == "OPEN":
-            bucket["open"] += 1
-        elif str(
-            row.get("result")
-            or ""
-        ).upper() in {
-            "WIN",
-            "LOSS",
-        }:
-            bucket["settled"] += 1
-            if str(
-                row.get(
-                    "result"
-                )
-                or ""
-            ).upper() == "WIN":
-                bucket["wins"] += 1
-            else:
-                bucket["losses"] += 1
-
-    for bucket in by_entry_class.values():
-        bucket["win_rate_pct"] = (
-            round(
-                bucket["wins"]
-                / bucket["settled"]
-                * 100.0,
-                2,
-            )
-            if bucket["settled"]
-            else 0.0
-        )
-
-    legacy = V53_WATCHER_ENGINE.forward_stats(
-        starting_balance=
-            starting_balance
-    )
+    rows = []
+    for mirror in mirrors:
+        row = dict(mirror)
+        internal = internal_by_id.get(str(mirror.get("trade_id")))
+        if internal:
+            row["model_signal_result_reference"] = internal.get("result")
+            row["model_signal_pnl_reference"] = internal.get("pnl")
+        row["evidence_source"] = "IG_DEMO_BROKER"
+        row["ig_verified"] = True
+        rows.append(row)
 
     return {
-        "version":
-            "6.7.2",
-        "source":
-            "V64_AI_LEARNING_FORWARD_EVIDENCE_INTEGRITY",
-        "entries":
-            len(actual_rows),
-        # Compatibility aliases used by existing mobile code.
-        "forward_trades":
-            len(actual_rows),
-        "trades":
-            len(actual_rows),
-        "open_entries":
-            len(open_rows),
-        "settled_entries":
-            len(settled_rows),
-        "wins":
-            wins,
-        "losses":
-            losses,
-        "win_rate_pct":
-            (
-                round(
-                    wins
-                    / len(settled_rows)
-                    * 100.0,
-                    2,
-                )
-                if settled_rows
-                else 0.0
-            ),
-        "total_pnl":
-            total_pnl,
-        "paper_balance":
-            learning_status.get(
-                "paper_balance"
-            ),
-        "starting_balance":
-            learning_status.get(
-                "starting_balance"
-            ),
-        "broker_matched_entries":
-            broker_matched,
-        "broker_recovered_unattributed":
-            recovered_unattributed,
-        "by_entry_class":
-            by_entry_class,
-        "confidence_buckets":
-            learning_status.get(
-                "confidence_buckets"
-            )
-            or {},
-        "rows":
-            actual_rows[:100],
-        "legacy_v53_forward":
-            legacy,
-        "note":
-            (
-                "Entries count immediately when the V64/AI-learning model "
-                "opens them. W/L, win rate and Model P&L populate only after "
-                "those model entries settle. IG_RECOVERED positions without "
-                "surviving model metadata remain broker evidence only."
-            ),
-        "live_money_execution":
-            False,
-        "demo_only":
-            True,
+        "version": "6.8.1",
+        "source": "IG_DEMO_BROKER_VERIFIED_FORWARD_EVIDENCE",
+        "entries": overall["entries"],
+        "forward_trades": overall["entries"],
+        "trades": overall["entries"],
+        "open_entries": overall["open"],
+        "settled_entries": overall["settled"],
+        "wins": overall["wins"],
+        "losses": overall["losses"],
+        "win_rate_pct": overall["win_rate_pct"],
+        "broker_pnl": overall["broker_pnl"],
+        "broker_pnl_available_trades": overall["broker_pnl_available_trades"],
+        # Compatibility only. Never describe this as broker P&L.
+        "total_pnl": overall["broker_pnl"] if overall["broker_pnl"] is not None else 0.0,
+        "pnl_source": (
+            "IG_DEMO_BROKER" if overall["broker_pnl"] is not None
+            else "BROKER_PNL_NOT_AVAILABLE_IN_CURRENT_CLOSE_CONFIRMATION"
+        ),
+        "internal_model_pnl_reference": internal_reference_pnl,
+        "current_phase_id": mirror_status.get("current_phase_id"),
+        "current_phase": current_phase,
+        "phase_history": phase_history,
+        "lifetime": mirror_status.get("lifetime_performance") or overall,
+        "by_entry_class": by_class,
+        "by_trade_class": by_class,
+        "elite_score_buckets": score_buckets,
+        "rows": rows[:200],
+        "note": (
+            "V6.8 forward W/L is derived only from broker-executed IG DEMO trades. "
+            "ELITE, BOUNDARY and LEARNING evidence remain separated. Paper/shadow "
+            "settlement is excluded from the primary forward evidence."
+        ),
+        "environment": "DEMO",
+        "demo_only": True,
+        "live_money_execution": False,
     }
 
 
@@ -7332,9 +7240,9 @@ def _v664_overnight_demo_snapshot() -> dict:
         or 0
     )
 
-    if phase_complete:
-        run_state = "PHASE_COMPLETE"
-    elif (
+    # V6.8 phases roll automatically. A completed phase is archived and the
+    # next phase becomes active, so completion no longer pauses learning.
+    if (
         demo_only
         and manager_enabled
         and learning_enabled
@@ -7489,7 +7397,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.7.3-GLOBAL-MULTI-MARKET",
+            "6.8.1-IG-DEMO-FORWARD-LEARNING",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
@@ -7518,6 +7426,10 @@ def _v664_overnight_demo_snapshot() -> dict:
                     )
                     or 10
                 ),
+            "current_phase_id":
+                int(ig_demo.get("current_phase_id") or 1),
+            "phase_settled_trades":
+                int(ig_demo.get("phase_settled_trades") or 0),
             "phase_accepted_trades":
                 int(
                     ig_demo.get(
@@ -7534,6 +7446,12 @@ def _v664_overnight_demo_snapshot() -> dict:
                 ),
             "phase_complete":
                 phase_complete,
+            "phase_entry_limit_reached":
+                bool(ig_demo.get("phase_entry_limit_reached")),
+            "entry_blocker":
+                ig_demo.get("entry_blocker"),
+            "execution_required":
+                bool(ig_demo.get("execution_required")),
             "active_watchers":
                 int(
                     learning.get(
@@ -7573,6 +7491,8 @@ def _v664_overnight_demo_snapshot() -> dict:
                     )
                     or 0.0
                 ),
+            "paper_balance_legacy_only": True,
+            "forward_evidence_source": "IG_DEMO_BROKER",
             "wins": wins,
             "losses": losses,
             "win_rate_pct":
@@ -7634,6 +7554,9 @@ def _v664_overnight_demo_snapshot() -> dict:
             broker_positions,
         "broker_performance":
             broker_performance,
+        "current_phase": ig_demo.get("current_phase_performance") or {},
+        "phase_history": ig_demo.get("phase_history") or [],
+        "lifetime_performance": ig_demo.get("lifetime_performance") or {},
         "manager": manager,
         "learning": learning,
         "ig_demo": ig_demo,
