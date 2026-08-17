@@ -1631,7 +1631,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.12-IG-DEMO-ONLY-DUAL-TRACK",
+                "version": "6.8.13-FULL-IG-DEMO-DUAL-TRACK",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1674,6 +1674,13 @@ class IGDemoMirror:
                 "execution_mode": "IG_DEMO_ONLY",
                 "paper_execution_enabled": False,
                 "dual_track_execution": True,
+                "jasong_owned_reference_prefixes": [
+                    "JSCMP_",
+                    "JASONG_",
+                    "JSBND_",
+                    "JSLRN_",
+                    "JSELT_",
+                ],
                 "compound_reserved_slots": self.compound_reserved_slots,
                 "open_broker_positions": self._open_count(),
                 "broker_positions": broker_positions,
