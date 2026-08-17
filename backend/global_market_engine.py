@@ -71,7 +71,7 @@ GLOBAL_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 class GlobalMarketEngine:
-    VERSION = "6.8.4"
+    VERSION = "6.8.5"
 
     def __init__(
         self,
@@ -176,7 +176,7 @@ class GlobalMarketEngine:
             search_terms=list(seed.get("ig_search_terms") or [seed.get("name")]),
             expected_types=list(seed.get("expected_types") or []),
             name_tokens=list(seed.get("name_tokens") or []),
-            require_tradeable=False,
+            require_tradeable=True,
             cache_key=str(seed.get("key") or seed.get("name") or ""),
         )
 
@@ -241,6 +241,12 @@ class GlobalMarketEngine:
                 row["ig_expiry"] = market.get("expiry")
             except Exception as exc:
                 row["ig_preflight_error"] = f"{type(exc).__name__}: {exc}"
+                row["rejection_reasons"] = list(
+                    dict.fromkeys(
+                        list(row.get("rejection_reasons") or [])
+                        + [f"IG multi-asset preflight: {type(exc).__name__}: {exc}"]
+                    )
+                )
 
         return row
 
