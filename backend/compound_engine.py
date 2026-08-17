@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.7"
+    VERSION = "6.8.11"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -1120,12 +1120,23 @@ class EliteCompoundEngine:
             row["max_abs_correlation"] = round(max_corr, 4)
             row["diversification_score"] = round(diversification_score, 2)
             row["elite_score"] = round(elite_score, 2)
-            row["elite_state"] = (
-                "ELITE_A_PLUS"
-                if str(row.get("quality_tier")) == "A+" and elite_score >= 85.0
-                else "ELITE_A"
-            )
-            row["trade_class"] = "ELITE"
+
+            # V6.8.11:
+            # Selection by REQUIRED_CONFIDENCE must never mutate the evidence
+            # classification into ELITE. Elite remains a separate evidence
+            # label and is true only when the strict Elite gates passed.
+            if bool(row.get("elite_eligible")):
+                row["elite_state"] = (
+                    "ELITE_A_PLUS"
+                    if str(row.get("quality_tier")) == "A+"
+                    and elite_score >= 85.0
+                    else "ELITE_A"
+                )
+                row["trade_class"] = "ELITE"
+            else:
+                row["elite_state"] = "CONFIDENCE_QUALIFIED"
+                row["trade_class"] = "CONFIDENCE"
+
             row["selected"] = True
             selected.append(row)
             exposures = prospective
