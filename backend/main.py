@@ -1125,7 +1125,7 @@ def health():
             "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
             "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
             "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
-            "paper_only": True,
+            "paper_execution_enabled": False,
         },
         "global_markets": (
             GLOBAL_MARKET_ENGINE.status()
@@ -1417,7 +1417,9 @@ def _v671_store_live_intelligence(
             signal_result.get("reason"),
         "observed_at":
             now,
-        "paper_learning":
+        "execution_mode":
+            "IG_DEMO_ONLY",
+        "broker_execution_required":
             True,
         "ig_demo_compound_eligible_for_evaluation":
             direction
@@ -1536,7 +1538,7 @@ def _v651_signal_bridge(
 
     diagnostic = {
         "version": "6.6.0",
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "live_execution": False,
         "direction": direction,
         "normal_confidence_pct": round(quant * 100.0, 2),
@@ -1645,7 +1647,7 @@ def signal(
             "ai_min_confidence": V64LearningTradeEngine.AI_MIN_CONFIDENCE,
             "ai_min_confidence_pct":
                 V64LearningTradeEngine.AI_MIN_CONFIDENCE * 100.0,
-                        "paper_only": True,
+                        "paper_execution_enabled": False,
         },
         "live_execution": False,
     })
@@ -4399,7 +4401,7 @@ def v6_start(starting_balance:float=10000.0, risk_mode:str="Balanced", payout:fl
     controller=V60_CONTROLLER.enable(starting_balance=starting_balance,overnight_mode=overnight_mode)
     manager=V55_AUTO_MANAGER.enable(risk_mode=risk_mode,starting_balance=starting_balance,payout=payout,
         scan_interval_minutes=scan_interval_minutes,target_active_watchers=target_active_watchers,scan_top_n=scan_top_n)
-    return {"status":"V6_AUTONOMOUS_PAPER_ENABLED","controller":controller,"auto_manager":manager,"execution_mode":"PAPER","live_execution":False}
+    return {"status":"LEGACY_SIMULATION_NOT_EXECUTION_AUTHORITY","controller":controller,"auto_manager":manager,"execution_mode":"IG_DEMO_ONLY","live_execution":False}
 
 @app.post("/v6/stop")
 def v6_stop():
@@ -4904,7 +4906,7 @@ def get_auto_dashboard(
             "result": trade.get("result"),
             "pnl": trade.get("pnl"),
             "stake": trade.get("stake"),
-            "paper_only": True,
+            "paper_execution_enabled": False,
         })
 
     # Broker-reconciled IG DEMO rows survive app restarts and backend
@@ -5490,7 +5492,7 @@ def v65_threshold_policy():
             "AI approval and direction agreement."
         ),
         "shadow_learning": True,
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
         "live_execution": False,
     }
@@ -5654,7 +5656,7 @@ def _v66_ai_learning_cycle() -> dict:
     if not _AI_LEARNING_RUN_LOCK.acquire(blocking=False):
         return {
             "status": "AI_LEARNING_BUSY",
-            "paper_only": True,
+            "paper_execution_enabled": False,
             "live_execution": False,
             "message": (
                 "Another bounded AI-learning evaluation is still running. "
@@ -5675,7 +5677,7 @@ def _v66_ai_learning_cycle() -> dict:
         if open_count >= 1:
             return {
                 "status": "WAIT_EXISTING_TRADE",
-                "paper_only": True,
+                "paper_execution_enabled": False,
                 "live_execution": False,
                 "open_trades": open_count,
                 "learning": current,
@@ -5702,7 +5704,7 @@ def _v66_ai_learning_cycle() -> dict:
         if not watchers:
             return {
                 "status": "NO_LEARNING_WATCHERS",
-                "paper_only": True,
+                "paper_execution_enabled": False,
                 "live_execution": False,
                 "watchers": 0,
                 "message": (
@@ -5994,7 +5996,7 @@ def _v66_ai_learning_cycle() -> dict:
         if not qualified:
             return {
                 "status": "NO_AI40_SETUP",
-                "paper_only": True,
+                "paper_execution_enabled": False,
                 "live_execution": False,
                 "watchers_evaluated": len(evaluated),
                 "qualified": 0,
@@ -6073,7 +6075,7 @@ def _v66_ai_learning_cycle() -> dict:
         if ai_trades:
             return {
                 "status": "PAPER_TRADE_OPENED",
-                "paper_only": True,
+                "paper_execution_enabled": False,
                 "live_execution": False,
                 "selected": selected["row"],
                 "trade": ai_trades[0],
@@ -6087,7 +6089,7 @@ def _v66_ai_learning_cycle() -> dict:
 
         return {
             "status": "ENTRY_NOT_CREATED",
-            "paper_only": True,
+            "paper_execution_enabled": False,
             "live_execution": False,
             "selected": selected["row"],
             "elapsed_seconds": round(
@@ -6106,7 +6108,7 @@ def _v66_ai_learning_cycle() -> dict:
     except Exception as exc:
         return {
             "status": "ERROR",
-            "paper_only": True,
+            "paper_execution_enabled": False,
             "live_execution": False,
             "elapsed_seconds": round(
                 time.time() - cycle_started_at,
@@ -7464,6 +7466,12 @@ def _v664_overnight_demo_snapshot() -> dict:
         ),
         "scanner_universe":
             "IG_DEMO_CORE9",
+        "execution_mode":
+            "IG_DEMO_ONLY",
+        "paper_execution_enabled":
+            False,
+        "broker_execution_required":
+            True,
         "risk_mode": str(
             manager.get("risk_mode")
             or "Balanced"
@@ -7539,26 +7547,26 @@ def _v664_overnight_demo_snapshot() -> dict:
                     )
                     or 0
                 ),
-            "paper_balance":
+            "reference_balance":
                 float(
                     learning.get(
-                        "paper_balance"
+                        "reference_balance"
+                    )
+                    or learning.get(
+                        "starting_reference_balance"
                     )
                     or 0.0
                 ),
-            "paper_balance_legacy_only": True,
+            "reference_balance_is_execution_balance": False,
             "forward_evidence_source": "IG_DEMO_BROKER",
             "wins": wins,
             "losses": losses,
             "win_rate_pct":
                 win_rate_pct,
-            "total_pnl":
-                float(
-                    learning_actual.get(
-                        "total_pnl"
-                    )
-                    or 0.0
-                ),
+            "total_pnl": broker_performance.get(
+                "account_profit_loss"
+            ),
+            "total_pnl_scope": "CURRENT_IG_DEMO_ACCOUNT_RUNNING_PNL",
             "broker_closed_positions":
                 int(
                     broker_performance.get(
@@ -7883,7 +7891,7 @@ def ig_demo_close(
 def ai_learning_status():
     return {
         "mode": "DIRECT_AI40_SHADOW_PROMOTION_V662",
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
         "ig_demo_broker_execution_enabled": bool(
             IG_DEMO_MIRROR.status().get("enabled")
@@ -7921,7 +7929,7 @@ def ai_learning_start():
     V64_LEARNING_ENGINE.start()
     return {
         "status": "AI_LEARNING_ENABLED",
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "live_execution": False,
         "learning": V64_LEARNING_ENGINE.status(),
     }
@@ -7936,7 +7944,7 @@ def ai_learning_run_now():
 def ai_learning_stop():
     return {
         "status": "AI_LEARNING_PAUSED",
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "live_execution": False,
         "learning": V64_LEARNING_ENGINE.pause(),
     }
@@ -7993,7 +8001,7 @@ def adaptive_confidence_load(payload: dict):
     adaptive_confidence_gate.load()
     return {
         "status": "LOADED",
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
         "adaptive": snapshot,
     }
@@ -8023,7 +8031,7 @@ def adaptive_confidence_check(payload: dict):
             "allowed_by_confidence": False,
             "path": "REJECT",
             "reason": "Direction must be BUY or SELL.",
-            "paper_only": True,
+            "paper_execution_enabled": False,
         }
 
     result = adaptive_confidence_gate.evaluate(
@@ -8478,7 +8486,7 @@ def _v69_system_overview():
             "advisory_only": True,
         },
         "issues": issues,
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
     }
 
@@ -8687,7 +8695,7 @@ def v69_system_diagnostic():
             checks
         ),
         "checks": checks,
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
     }
 
@@ -8881,7 +8889,7 @@ def _v68_copilot_context():
         "engine": {
             "version":
                 "V6.7.1",
-            "paper_learning_enabled":
+            "legacy_simulation_engine_enabled":
                 True,
             "ig_demo_broker_execution_enabled":
                 ig_demo_execution_enabled,
@@ -8916,7 +8924,7 @@ def v68_status():
         "model": COPILOT.model,
         "copilot_advisory_only": True,
         "can_execute_trades": False,
-        "paper_only": True,
+        "paper_execution_enabled": False,
         "broker_execution_enabled": False,
         "features": [
             "ASK_JASONG_AI",
