@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.5"
+    VERSION = "6.8.6"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
