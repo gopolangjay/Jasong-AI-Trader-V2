@@ -56,6 +56,15 @@ class IGDemoMirror:
             minimum=1,
             maximum=20,
         )
+        # Keep one broker slot available for Compound whenever
+        # Compound currently has no open JSCMP_ position. This allows fast
+        # forward learning without starving direct Compound execution.
+        self.compound_reserved_slots = self._int_env(
+            "IG_DEMO_COMPOUND_RESERVED_SLOTS",
+            1,
+            minimum=0,
+            maximum=3,
+        )
         self.poll_seconds = self._int_env(
             "IG_DEMO_MIRROR_POLL_SECONDS",
             15,
@@ -433,6 +442,48 @@ class IGDemoMirror:
                     mirror["external_close_confirmation"] = None
 
             self._state["compound_evidence_error"] = None
+
+    @staticmethod
+    def _is_compound_broker_position(item: Dict[str, Any]) -> bool:
+        position = item.get("position") or {}
+        ref = str(
+            position.get("dealReference")
+            or item.get("dealReference")
+            or ""
+        ).upper()
+        return ref.startswith("JSCMP_")
+
+    def _learning_broker_capacity(
+        self,
+        broker_positions: list[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        """Return real IG DEMO capacity for the learning execution track."""
+        total_open = len(broker_positions)
+        compound_open = sum(
+            1
+            for item in broker_positions
+            if isinstance(item, dict)
+            and self._is_compound_broker_position(item)
+        )
+
+        reserve = (
+            0
+            if compound_open > 0
+            else min(
+                self.compound_reserved_slots,
+                self.max_open_positions,
+            )
+        )
+        learning_capacity = max(
+            0,
+            self.max_open_positions - total_open - reserve,
+        )
+        return {
+            "total_open": total_open,
+            "compound_open": compound_open,
+            "reserved_for_compound": reserve,
+            "learning_slots_available": learning_capacity,
+        }
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
@@ -1580,7 +1631,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.10-COMPOUND-BROKER-AUTHORITY",
+                "version": "6.8.12-IG-DEMO-ONLY-DUAL-TRACK",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1620,6 +1671,10 @@ class IGDemoMirror:
                     and item.get("phase_id") is not None
                 ]),
                 "max_open_positions": self.max_open_positions,
+                "execution_mode": "IG_DEMO_ONLY",
+                "paper_execution_enabled": False,
+                "dual_track_execution": True,
+                "compound_reserved_slots": self.compound_reserved_slots,
                 "open_broker_positions": self._open_count(),
                 "broker_positions": broker_positions,
                 "broker_account": broker_account,
