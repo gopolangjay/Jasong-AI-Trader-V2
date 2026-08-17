@@ -5175,13 +5175,33 @@ def get_auto_dashboard(
         "learning": learning_status,
         "learning_watchers": learning_watchers[:20],
         "ig_demo": ig_demo_status,
-        "ig_demo_performance":
-            dict(
+        "ig_demo_performance": {
+            **dict(
                 ig_demo_status.get(
                     "broker_performance"
                 )
                 or {}
             ),
+            "current_phase_id": int(
+                ig_demo_status.get("current_phase_id") or 1
+            ),
+            "current_phase": dict(
+                ig_demo_status.get("current_phase_performance") or {}
+            ),
+            "phase_history": list(
+                ig_demo_status.get("phase_history") or []
+            ),
+            "lifetime": dict(
+                ig_demo_status.get("lifetime_performance") or {}
+            ),
+            "phase_entry_limit_reached": bool(
+                ig_demo_status.get("phase_entry_limit_reached")
+            ),
+            "entry_blocker": ig_demo_status.get("entry_blocker"),
+            "execution_required": bool(
+                ig_demo_status.get("execution_required")
+            ),
+        },
         "compound":
             compound_snapshot,
         "integrity":
@@ -7397,7 +7417,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.8.1-IG-DEMO-FORWARD-LEARNING",
+            "6.8.3-IG-DEMO-CONFIDENCE-LEARNING",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
