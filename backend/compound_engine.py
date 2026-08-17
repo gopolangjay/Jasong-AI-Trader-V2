@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.13"
+    VERSION = "6.8.14"
     DEAL_PREFIX = "JSCMP_"
     LEARNING_PREFIXES = (
         "JASONG_",
@@ -79,6 +79,9 @@ class EliteCompoundEngine:
         )
         self.max_positions = self._int_env(
             "COMPOUND_MAX_POSITIONS", 5, 1, 10
+        )
+        self.global_broker_max_positions = self._int_env(
+            "IG_DEMO_MAX_OPEN_POSITIONS", 15, 1, 50
         )
         self.ai_min_confidence = self._float_env(
             "COMPOUND_AI_MIN_CONFIDENCE", 0.40, 0.0, 1.0
@@ -500,6 +503,36 @@ class EliteCompoundEngine:
         positions: Iterable[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         return cls._external_positions(positions)
+
+    def _compound_open_capacity(
+        self,
+        positions: List[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        """Account-wide IG DEMO capacity with a separate Compound basket cap."""
+        total_open = len(positions)
+        compound_open = len(
+            self._compound_positions(positions)
+        )
+        global_remaining = max(
+            0,
+            self.global_broker_max_positions - total_open,
+        )
+        compound_remaining = max(
+            0,
+            self.max_positions - compound_open,
+        )
+        return {
+            "global_max": self.global_broker_max_positions,
+            "compound_max": self.max_positions,
+            "total_open": total_open,
+            "compound_open": compound_open,
+            "global_remaining": global_remaining,
+            "compound_remaining": compound_remaining,
+            "compound_slots_available": min(
+                global_remaining,
+                compound_remaining,
+            ),
+        }
 
     @staticmethod
     def _same_broker_market(
@@ -1411,6 +1444,35 @@ class EliteCompoundEngine:
             )
         )
 
+        capacity = self._compound_open_capacity(
+            positions
+        )
+        if selected:
+            selected = selected[
+                :capacity["compound_slots_available"]
+            ]
+
+        if (
+            not selected
+            and capacity["compound_slots_available"] <= 0
+        ):
+            with self._lock:
+                self._state["status"] = (
+                    "WAITING_FOR_BROKER_CAPACITY"
+                )
+                self._state["paused_reason"] = (
+                    "No Compound IG DEMO slot is currently available. "
+                    f"Compound {capacity['compound_open']}/"
+                    f"{capacity['compound_max']}; "
+                    f"all broker positions {capacity['total_open']}/"
+                    f"{capacity['global_max']}."
+                )
+                self._state[
+                    "broker_capacity"
+                ] = capacity
+                self._persist()
+            return self.status()
+
         if duplicate_skips:
             with self._lock:
                 ranking = [
@@ -1558,6 +1620,7 @@ class EliteCompoundEngine:
                     if learning_positions
                     else "IG_ACCOUNT_PNL_CLEAN"
                 ),
+                "broker_capacity_at_start": capacity,
                 "positions": [],
                 "selected_candidates": [dict(row) for row in selected],
                 "running_pnl": 0.0,
@@ -2261,6 +2324,14 @@ class EliteCompoundEngine:
 
         cycle["pnl_isolation_state"] = "OK"
         cycle["pnl_isolation_detail"] = pnl_detail
+        cycle["last_pnl_isolation_error"] = None
+
+        with self._lock:
+            paused = str(
+                self._state.get("paused_reason") or ""
+            )
+            if "isolated JSCMP P&L could not be valued" in paused:
+                self._state["paused_reason"] = None
         cycle["learning_broker_positions"] = [
             dict(row)
             for row in learning_positions
@@ -2646,6 +2717,12 @@ class EliteCompoundEngine:
             "paper_execution_enabled": False,
             "dual_track_execution": True,
             "learning_coexistence_allowed": True,
+            "global_ig_demo_max_positions":
+                self.global_broker_max_positions,
+            "compound_max_positions":
+                self.max_positions,
+            "broker_capacity":
+                self._compound_open_capacity(positions),
             "auto_restart": bool(state.get("auto_restart")),
             "status": state.get("status") or "STOPPED",
             "paused_reason": state.get("paused_reason"),
