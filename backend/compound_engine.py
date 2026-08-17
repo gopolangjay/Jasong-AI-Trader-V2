@@ -751,12 +751,19 @@ class EliteCompoundEngine:
         }
 
     def _rank_candidates(self, capital: float) -> List[Dict[str, Any]]:
-        """Rank all signals, but return only strict Elite selections for Compound.
+        """Rank all signals for IG DEMO confidence-first execution.
 
-        V6.8.0 separates *quality information* from *execution eligibility*.
-        Near-miss signals retain a real Elite score and an Elite State so the
-        IG DEMO learning path can study minimum-to-maximum performance without
-        weakening the Compound execution gates.
+        V6.8.2 learning rule:
+        - AI, Quant and Fast are the REQUIRED confidence gates.
+        - A/A+ Quality and Deep Validation still contribute evidence and the
+          Elite label, but they no longer block an otherwise confidence-qualified
+          IG DEMO trade.
+        - Direction agreement, exact IG mapping/tradeability and spread remain
+          hard execution-safety requirements.
+        - Correlation/exposure limits remain portfolio safety controls.
+
+        This deliberately increases genuine broker-forward observations while
+        keeping live-money execution disabled.
         """
         source_rows = self.candidate_source(capital) or []
         screened: List[Dict[str, Any]] = []
@@ -802,43 +809,82 @@ class EliteCompoundEngine:
             })
 
             technical_invalid = (not symbol or direction not in {"BUY", "SELL"})
-            strict_reasons: List[str] = []
-            if technical_invalid:
-                strict_reasons.append("Invalid symbol/direction")
-            if ai < self.ai_min_confidence:
-                strict_reasons.append(f"AI {ai*100:.1f}% < {self.ai_min_confidence*100:.0f}%")
-            if quant < self.quant_min_confidence:
-                strict_reasons.append(f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%")
-            if fast < self.fast_score_min:
-                strict_reasons.append(f"Fast score {fast:.1f} < {self.fast_score_min:.0f}")
-            if quality not in {"A+", "A"}:
-                strict_reasons.append(f"Quality {quality or '-'} is not A/A+")
-            if deep not in allowed_deep:
-                strict_reasons.append(f"Deep status {deep or '-'} not elite-eligible")
-            if not direction_match:
-                strict_reasons.append("Live direction does not agree")
 
-            # OBSERVE-only signals do not spend an IG market-details call.
-            spread = {"ok": None, "spread_score": 0.0, "spread_bps": None, "spread_limit_bps": None, "market": {}}
-            if not technical_invalid and self._learning_floor_passes(ai, quant, fast, quality):
+            confidence_reasons: List[str] = []
+            if technical_invalid:
+                confidence_reasons.append("Invalid symbol/direction")
+            if ai < self.ai_min_confidence:
+                confidence_reasons.append(
+                    f"AI {ai*100:.1f}% < {self.ai_min_confidence*100:.0f}%"
+                )
+            if quant < self.quant_min_confidence:
+                confidence_reasons.append(
+                    f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%"
+                )
+            if fast < self.fast_score_min:
+                confidence_reasons.append(
+                    f"Fast score {fast:.1f} < {self.fast_score_min:.0f}"
+                )
+            if not direction_match:
+                confidence_reasons.append("Live direction does not agree")
+
+            # Elite evidence is still measured, but no longer blocks an IG DEMO
+            # trade once the required confidence gates have passed.
+            elite_only_reasons: List[str] = []
+            if quality not in {"A+", "A"}:
+                elite_only_reasons.append(
+                    f"Quality {quality or '-'} is not A/A+"
+                )
+            if deep not in allowed_deep:
+                elite_only_reasons.append(
+                    f"Deep status {deep or '-'} not elite-eligible"
+                )
+
+            confidence_pass = (
+                not technical_invalid
+                and ai >= self.ai_min_confidence
+                and quant >= self.quant_min_confidence
+                and fast >= self.fast_score_min
+                and direction_match
+            )
+
+            # A confidence-qualified signal MUST get an IG execution preflight.
+            # We still refuse malformed/untradeable broker data even in DEMO.
+            spread = {
+                "ok": None,
+                "spread_score": 0.0,
+                "spread_bps": None,
+                "spread_limit_bps": None,
+                "market": {},
+            }
+            if confidence_pass:
                 try:
                     spread = self._spread_metrics(row)
                 except Exception as exc:
                     spread = {
                         "ok": False,
-                        "reason": f"IG DEMO preflight: {type(exc).__name__}: {exc}",
+                        "reason": (
+                            f"IG DEMO preflight: {type(exc).__name__}: {exc}"
+                        ),
                         "spread_bps": None,
                         "spread_score": 0.0,
                         "spread_limit_bps": None,
                         "market": {},
                     }
+
                 row["spread_bps"] = spread.get("spread_bps")
                 row["spread_score"] = spread.get("spread_score")
                 row["spread_limit_bps"] = spread.get("spread_limit_bps")
-                row["ig_epic"] = (spread.get("market") or {}).get("epic") or row.get("ig_epic")
-                if spread.get("ok") is False:
-                    strict_reasons.append(str(spread.get("reason") or "Spread gate failed"))
-                    technical_invalid = True
+                row["ig_epic"] = (
+                    (spread.get("market") or {}).get("epic")
+                    or row.get("ig_epic")
+                )
+
+                if spread.get("ok") is not True:
+                    confidence_reasons.append(
+                        str(spread.get("reason") or "IG spread/tradeability failed")
+                    )
+                    confidence_pass = False
 
             deep_quality = self._quality_score(quality, deep)
             # Always produce a quality score. A failed gate must never collapse
@@ -853,33 +899,58 @@ class EliteCompoundEngine:
             row["deep_quality_score"] = round(deep_quality, 2)
             row["elite_base_score"] = round(base_score, 2)
             row["elite_score"] = round(base_score, 2)
-            row["rejection_reasons"] = list(dict.fromkeys(strict_reasons))
 
-            strict_pass = not technical_invalid and not strict_reasons
+            strict_pass = bool(
+                confidence_pass
+                and quality in {"A+", "A"}
+                and deep in allowed_deep
+            )
+
+            # Confidence execution is the V6.8.2 IG DEMO rule.
+            execution_reasons = list(dict.fromkeys(confidence_reasons))
+            row["rejection_reasons"] = execution_reasons
+            row["elite_reasons"] = list(dict.fromkeys(elite_only_reasons))
+            row["confidence_qualified"] = bool(confidence_pass)
+            row["execution_eligible"] = bool(confidence_pass)
             row["elite_eligible"] = strict_pass
-            row["eligible"] = strict_pass  # backward compatibility
-            row["learning_eligible"] = bool(
-                not technical_invalid
-                and not strict_pass
-                and self._learning_floor_passes(ai, quant, fast, quality)
-                and direction_match
+            row["eligible"] = bool(confidence_pass)
+            row["learning_eligible"] = bool(confidence_pass and not strict_pass)
+
+            row["elite_state"] = (
+                self._elite_state(
+                    ai=ai,
+                    quant=quant,
+                    fast=fast,
+                    quality=quality,
+                    deep=deep,
+                    direction_match=direction_match,
+                    spread_ok=spread.get("ok"),
+                    elite_score=row["elite_score"],
+                    strict_reasons=elite_only_reasons,
+                    technical_invalid=False,
+                )
+                if confidence_pass
+                else "OBSERVE"
             )
-            row["elite_state"] = self._elite_state(
-                ai=ai, quant=quant, fast=fast, quality=quality, deep=deep,
-                direction_match=direction_match, spread_ok=spread.get("ok"),
-                elite_score=row["elite_score"], strict_reasons=row["rejection_reasons"],
-                technical_invalid=technical_invalid,
-            )
+
             row["trade_class"] = (
-                "ELITE" if strict_pass else
-                "BOUNDARY" if row["elite_state"] == "LEARNING_PLUS" else
-                "LEARNING" if row["elite_state"] == "LEARNING" else
-                row["elite_state"]
+                "ELITE"
+                if strict_pass
+                else "CONFIDENCE"
+                if confidence_pass
+                else "OBSERVE"
             )
-            row["ig_demo_learning_eligible"] = row["trade_class"] in {"ELITE", "BOUNDARY", "LEARNING"}
+            row["execution_basis"] = (
+                "REQUIRED_CONFIDENCE"
+                if confidence_pass
+                else "NOT_QUALIFIED"
+            )
+            row["ig_demo_learning_eligible"] = bool(confidence_pass)
             screened.append(row)
 
-        eligible = [row for row in screened if row.get("elite_eligible")]
+        # V6.8.2: select all signals that pass the required confidence +
+        # broker-safety gates. Elite is now an evidence label, not a trade gate.
+        eligible = [row for row in screened if row.get("execution_eligible")]
         eligible.sort(
             key=lambda r: (
                 self._safe_float(r.get("elite_base_score"), 0.0),
@@ -898,6 +969,7 @@ class EliteCompoundEngine:
             symbol = str(row.get("symbol") or "")
             if any(str(x.get("symbol")) == symbol for x in selected):
                 row["eligible"] = False
+                row["execution_eligible"] = False
                 row["elite_eligible"] = False
                 row["rejection_reasons"].append("Duplicate market")
                 continue
@@ -911,6 +983,7 @@ class EliteCompoundEngine:
                     exposure_block = True
             if exposure_block:
                 row["eligible"] = False
+                row["execution_eligible"] = False
                 row["elite_eligible"] = False
                 row["rejection_reasons"].append("Currency exposure limit")
                 continue
@@ -929,6 +1002,7 @@ class EliteCompoundEngine:
                     break
             if theme_block:
                 row["eligible"] = False
+                row["execution_eligible"] = False
                 row["elite_eligible"] = False
                 row["rejection_reasons"].append(f"Theme exposure limit: {theme_block}")
                 continue
@@ -1076,15 +1150,15 @@ class EliteCompoundEngine:
                     for row in selected
                 ]
                 self._state["intelligence_bridge_state"] = (
-                    "ELITE_READY_BROKER_BLOCKED"
+                    "CONFIDENCE_READY_BROKER_BLOCKED"
                     if selected
-                    else "BROKER_BLOCKED_NO_ELITE"
+                    else "BROKER_BLOCKED_NO_CONFIDENCE"
                 )
                 self._state["paused_reason"] = (
                     f"{len(foreign)} legacy/manual IG DEMO position(s) block "
                     "Compound execution because IG account P&L is account-wide. "
                     + (
-                        f"{len(selected)} Elite setup(s) are ready and will be "
+                        f"{len(selected)} confidence-qualified setup(s) are ready and will be "
                         "revalidated automatically when the broker becomes clean. "
                         if selected
                         else
@@ -1101,14 +1175,14 @@ class EliteCompoundEngine:
 
         if not selected:
             with self._lock:
-                self._state["status"] = "WAITING_FOR_ELITE_MARKETS"
+                self._state["status"] = "WAITING_FOR_REQUIRED_CONFIDENCE"
                 self._state["paused_reason"] = (
-                    "No market currently passes every Elite gate. "
+                    "No market currently passes all required confidence and broker-safety gates. "
                     "Unified Live Intelligence remains connected and will wake "
                     "the Compound engine when a new directional setup arrives."
                 )
                 self._state["pending_elite_candidates"] = []
-                self._state["intelligence_bridge_state"] = "LISTENING_FOR_ELITE"
+                self._state["intelligence_bridge_state"] = "LISTENING_FOR_REQUIRED_CONFIDENCE"
                 self._persist()
             return self.status()
 
@@ -1117,7 +1191,7 @@ class EliteCompoundEngine:
                 dict(row)
                 for row in selected
             ]
-            self._state["intelligence_bridge_state"] = "ELITE_READY"
+            self._state["intelligence_bridge_state"] = "CONFIDENCE_READY"
 
         with self._lock:
             cycle_number = int(self._state.get("cycle_number") or 0) + 1
@@ -1189,6 +1263,10 @@ class EliteCompoundEngine:
                     "exposure_tags": list(candidate.get("exposure_tags") or []),
                     "direction": candidate.get("direction"),
                     "elite_score": candidate.get("elite_score"),
+                    "elite_state": candidate.get("elite_state"),
+                    "trade_class": candidate.get("trade_class"),
+                    "execution_basis": candidate.get("execution_basis"),
+                    "confidence_qualified": candidate.get("confidence_qualified"),
                     "model_ai_confidence": candidate.get("model_ai_confidence"),
                     "quant_confidence": candidate.get("quant_confidence"),
                     "smart_fast_score": candidate.get("smart_fast_score"),
@@ -1247,7 +1325,7 @@ class EliteCompoundEngine:
                 cycles.append(cycle)
                 self._state["cycles"] = cycles[-1000:]
                 self._state["current_cycle"] = None
-                self._state["status"] = "WAITING_FOR_ELITE_MARKETS"
+                self._state["status"] = "WAITING_FOR_REQUIRED_CONFIDENCE"
                 self._state["last_error"] = "; ".join(errors) if errors else "No compound position opened"
                 self._state["next_cycle_at"] = self._now() + self.restart_cooldown_seconds
                 self._state["intelligence_bridge_state"] = "OPEN_FAILED"
@@ -1272,6 +1350,8 @@ class EliteCompoundEngine:
                 "capital": capital,
                 "positions": len(opened),
                 "symbols": [row.get("symbol") for row in opened],
+                "execution_basis": "REQUIRED_CONFIDENCE",
+                "elite_required": False,
             },
         )
 
