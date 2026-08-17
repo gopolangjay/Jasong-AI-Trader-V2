@@ -1309,7 +1309,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.5-IG-DEMO-ROLLING-PHASES",
+                "version": "6.8.6-IG-DEMO-ROLLING-PHASES",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1325,8 +1325,11 @@ class IGDemoMirror:
                 "current_phase_performance": self._phase_stats(),
                 "phase_history": self.phase_history(),
                 "lifetime_performance": self._stats_for_rows([
-                    item for item in self._mirrors().values()
-                    if not item.get("recovered_from_ig")
+                    item
+                    for item in self._mirrors().values()
+                    if isinstance(item, dict)
+                    and item.get("ig_deal_id")
+                    and item.get("phase_id") is not None
                 ]),
                 "max_open_positions": self.max_open_positions,
                 "open_broker_positions": self._open_count(),
