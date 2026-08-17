@@ -157,7 +157,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
-  // V6.7.3 global multi-market intelligence.
+  // V6.8.1 global multi-market intelligence.
   Map<String, dynamic>? globalMarketsStatus;
   List<Map<String, dynamic>> globalMarketCandidates = [];
   bool globalMarketsBusy = false;
@@ -1715,10 +1715,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             response['broker_performance'];
 
         if (rawPerformance is Map) {
-          igDemoPerformance =
+          final enriched =
               Map<String, dynamic>.from(
             rawPerformance,
           );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
         }
       });
     } catch (_) {
@@ -1764,10 +1779,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final rawPerformance =
             response['broker_performance'];
         if (rawPerformance is Map) {
-          igDemoPerformance =
+          final enriched =
               Map<String, dynamic>.from(
             rawPerformance,
           );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
         }
 
         networkStatus =
@@ -1826,10 +1856,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final rawPerformance =
             response['broker_performance'];
         if (rawPerformance is Map) {
-          igDemoPerformance =
+          final enriched =
               Map<String, dynamic>.from(
             rawPerformance,
           );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
         }
 
         networkStatus = response['message']
@@ -4074,22 +4119,86 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         igDemoPerformance ??
             <String, dynamic>{};
 
+    final currentIgPhase =
+        brokerPerf['current_phase'] is Map
+            ? Map<String, dynamic>.from(
+                brokerPerf['current_phase'] as Map,
+              )
+            : <String, dynamic>{};
+
+    final igPhaseHistory =
+        brokerPerf['phase_history'] is List
+            ? (brokerPerf['phase_history'] as List)
+                .whereType<Map>()
+                .map(
+                  (item) =>
+                      Map<String, dynamic>.from(
+                    item,
+                  ),
+                )
+                .toList()
+            : <Map<String, dynamic>>[];
+
+    final igLifetime =
+        brokerPerf['lifetime'] is Map
+            ? Map<String, dynamic>.from(
+                brokerPerf['lifetime'] as Map,
+              )
+            : <String, dynamic>{};
+
+    final igCurrentPhaseId =
+        int.tryParse(
+          '${brokerPerf['current_phase_id'] ?? currentIgPhase['phase_id'] ?? 1}',
+        ) ??
+        1;
+
     final igAccepted =
-        brokerPerf['accepted_trades'] ?? 0;
+        currentIgPhase['accepted'] ??
+            brokerPerf['accepted_trades'] ??
+            0;
     final igOpen =
-        brokerPerf['open_positions'] ?? 0;
+        currentIgPhase['open'] ??
+            brokerPerf['open_positions'] ??
+            0;
     final igClosed =
-        brokerPerf['closed_positions'] ?? 0;
+        currentIgPhase['settled'] ??
+            brokerPerf['closed_positions'] ??
+            0;
     final igGraded =
-        brokerPerf['graded_trades'] ??
+        currentIgPhase['settled'] ??
+            brokerPerf['graded_trades'] ??
             brokerPerf['trades'] ??
             0;
     final igWins =
-        brokerPerf['wins'] ?? 0;
+        currentIgPhase['wins'] ??
+            brokerPerf['wins'] ??
+            0;
     final igLosses =
-        brokerPerf['losses'] ?? 0;
+        currentIgPhase['losses'] ??
+            brokerPerf['losses'] ??
+            0;
     final igWinRate =
-        brokerPerf['win_rate_pct'] ?? 0;
+        currentIgPhase['win_rate_pct'] ??
+            brokerPerf['win_rate_pct'] ??
+            0;
+    final igPhaseTarget =
+        currentIgPhase['target'] ??
+            10;
+
+    final igLifetimeSettled =
+        igLifetime['settled'] ??
+            igLifetime['graded_trades'] ??
+            igGraded;
+    final igLifetimeWins =
+        igLifetime['wins'] ??
+            igWins;
+    final igLifetimeLosses =
+        igLifetime['losses'] ??
+            igLosses;
+    final igLifetimeWinRate =
+        igLifetime['win_rate_pct'] ??
+            igWinRate;
+
     final igBalance =
         brokerPerf['account_balance'];
     final igAvailable =
@@ -4447,7 +4556,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             children: [
               statTile('Watchers', '$activeWatchers / $targetWatchers', Icons.visibility_outlined),
               const SizedBox(width: 10),
-              statTile('Phase', '$igAccepted / 10', Icons.flag_outlined),
+              statTile(
+                'Phase $igCurrentPhaseId',
+                '$igAccepted / $igPhaseTarget',
+                Icons.flag_outlined,
+              ),
             ],
           ),
           const SizedBox(height: 14),
@@ -4805,7 +4918,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Mature FX watcher evidence remains active. V6.7.3 independently rotates through liquid non-FX markets, applies the same Rule+ML direction, held-out validation, IG tradeability preflight and Elite quality gates, then feeds the best opportunities into the same Compound ranking.',
+                  'Mature FX watcher evidence remains active. V6.8.1 independently rotates through liquid non-FX markets, applies the same Rule+ML direction, held-out validation, IG tradeability preflight and Elite quality gates, then feeds the best opportunities into the same Compound ranking.',
                   style: TextStyle(color: Colors.white54, fontSize: 11, height: 1.4),
                 ),
                 const SizedBox(height: 10),
@@ -5147,15 +5260,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 20),
           sectionTitle(
-            'IG DEMO performance',
+            'IG DEMO verified performance',
             subtitle:
-                'Broker-grounded Phase-1 performance • IG is the source of truth',
+                'Current Phase $igCurrentPhaseId • broker-settled IG DEMO evidence',
           ),
           Row(
             children: [
               statTile(
-                'Phase trades',
-                '$igAccepted / 10',
+                'Phase $igCurrentPhaseId trades',
+                '$igAccepted / $igPhaseTarget',
                 Icons.flag_outlined,
               ),
               const SizedBox(width: 10),
@@ -5232,14 +5345,140 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           glassCard(
             child: Text(
               igGraded == 0
-                  ? 'Performance grading starts as IG positions close. Open positions still contribute to the broker running P&L above.'
-                  : '$igGraded settled broker trade(s) currently have a WIN/LOSS outcome.',
+                  ? 'Phase $igCurrentPhaseId is collecting broker-verified evidence. Open positions still contribute to the broker running P&L above.'
+                  : '$igGraded settled IG DEMO trade(s) currently have a WIN/LOSS outcome in Phase $igCurrentPhaseId.',
               style: const TextStyle(
                 color: Colors.white54,
                 fontSize: 11,
               ),
             ),
           ),
+          const SizedBox(height: 10),
+          glassCard(
+            glow: const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Lifetime IG evidence',
+                  style: TextStyle(
+                    fontWeight:
+                        FontWeight.w900,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  '$igLifetimeSettled settled • '
+                  '$igLifetimeWins W / $igLifetimeLosses L • '
+                  '${formatNumber(igLifetimeWinRate, decimals: 1)}% win rate',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (igPhaseHistory.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            glassCard(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Phase history',
+                    style: TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...igPhaseHistory
+                      .where(
+                        (phase) =>
+                            int.tryParse(
+                              '${phase['phase_id'] ?? 0}',
+                            ) !=
+                            igCurrentPhaseId,
+                      )
+                      .toList()
+                      .reversed
+                      .take(5)
+                      .map(
+                    (phase) {
+                      final perf =
+                          phase['performance']
+                                  is Map
+                              ? Map<String,
+                                      dynamic>.from(
+                                  phase[
+                                          'performance']
+                                      as Map,
+                                )
+                              : <String,
+                                  dynamic>{};
+                      final phaseId =
+                          phase['phase_id'] ??
+                              '-';
+                      final settled =
+                          perf['settled'] ?? 0;
+                      final wins =
+                          perf['wins'] ?? 0;
+                      final losses =
+                          perf['losses'] ?? 0;
+                      final wr =
+                          perf['win_rate_pct'] ??
+                              0;
+                      final state =
+                          phase['status']
+                                  ?.toString()
+                                  .toUpperCase() ??
+                              'COMPLETE';
+
+                      return Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          bottom: 7,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Phase $phaseId • $settled settled • $wins W / $losses L',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white70,
+                                  fontSize: 10,
+                                  fontWeight:
+                                      FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${formatNumber(wr, decimals: 1)}% • $state',
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Color(0xFF67F0C1),
+                                fontSize: 9,
+                                fontWeight:
+                                    FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 20),
           sectionTitle(
             'Trade journal',
@@ -5556,9 +5795,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           overnightState ==
               'PHASE_COMPLETE';
 
+      final currentPhaseId =
+          int.tryParse(
+            '${overnightSummary['current_phase_id'] ?? overnight['current_phase_id'] ?? 1}',
+          ) ??
+          1;
+
       final phaseAccepted =
           overnightSummary[
                   'phase_accepted_trades'] ??
+              0;
+
+      final phaseSettled =
+          overnightSummary[
+                  'phase_settled_trades'] ??
               0;
 
       final phaseTarget =
@@ -5569,6 +5819,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           overnightSummary[
                   'phase_remaining'] ??
               phaseTarget;
+
+      final phaseEntryLimitReached =
+          overnightSummary[
+                  'phase_entry_limit_reached'] ==
+              true;
+
+      final executionRequired =
+          overnightSummary[
+                  'execution_required'] ==
+              true;
+
+      final entryBlocker =
+          overnightSummary[
+                  'entry_blocker']
+              ?.toString();
 
       final brokerPositions =
           overnightSummary[
@@ -5618,14 +5883,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   .toList()
               : <Map<String, dynamic>>[];
 
+      final overnightCurrentPhase =
+          overnight['current_phase'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['current_phase'] as Map,
+                )
+              : <String, dynamic>{};
+
       final overnightWins =
-          overnightSummary['wins'] ?? 0;
+          overnightCurrentPhase['wins'] ??
+              overnightSummary['wins'] ??
+              0;
 
       final overnightLosses =
-          overnightSummary['losses'] ?? 0;
+          overnightCurrentPhase['losses'] ??
+              overnightSummary['losses'] ??
+              0;
 
       final overnightWinRate =
-          overnightSummary[
+          overnightCurrentPhase[
+                  'win_rate_pct'] ??
+              overnightSummary[
                   'win_rate_pct'] ??
               0.0;
 
@@ -5922,9 +6200,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         Color stateColor;
         IconData stateIcon;
 
-        if (overnightComplete) {
+        if (phaseEntryLimitReached &&
+            phaseSettled < phaseTarget) {
+          stateColor = Colors.amberAccent;
+          stateIcon = Icons.hourglass_top_rounded;
+        } else if (overnightComplete) {
           stateColor = Colors.greenAccent;
-          stateIcon = Icons.flag_circle_rounded;
+          stateIcon = Icons.autorenew_rounded;
         } else if (overnightActive) {
           stateColor = Colors.greenAccent;
           stateIcon = Icons.nightlight_round;
@@ -5994,13 +6276,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 3),
                         Text(
-                          overnightActive
-                              ? 'Server-side autonomous demo trading is active'
-                              : overnightDraining
-                                  ? 'New entries stopped • current demo trade is settling'
-                                  : overnightComplete
-                                      ? 'Phase target reached • no more demo entries required'
-                                      : 'Ready for a server-side overnight run',
+                          phaseEntryLimitReached &&
+                                  phaseSettled <
+                                      phaseTarget
+                              ? 'Phase $currentPhaseId is full • waiting for broker settlement before automatic rollover'
+                              : overnightActive
+                                  ? 'Phase $currentPhaseId autonomous IG DEMO learning is active'
+                                  : overnightDraining
+                                      ? 'New entries stopped • current demo trade is settling'
+                                      : overnightComplete
+                                          ? 'Phase $currentPhaseId complete • rolling automatically to the next phase'
+                                          : 'Ready for a server-side IG DEMO learning run',
                           style: const TextStyle(
                             color:
                                 Colors.white60,
@@ -6020,12 +6306,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               Row(
                 children: [
                   statTile(
-                    'Phase',
+                    'Phase $currentPhaseId',
                     '$phaseAccepted / $phaseTarget',
                     Icons.flag_outlined,
                     valueColor:
-                        overnightComplete
-                            ? Colors.greenAccent
+                        phaseEntryLimitReached
+                            ? Colors.amberAccent
                             : Colors.white,
                   ),
                   const SizedBox(width: 10),
@@ -6244,7 +6530,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Remaining Phase-1 entries: $phaseRemaining • AI floor ${formatNumber(overnight['ai_min_confidence_pct'] ?? aiFloor, decimals: 0)}%',
+                      phaseEntryLimitReached
+                          ? 'Phase $currentPhaseId accepted $phaseAccepted/$phaseTarget • settled $phaseSettled/$phaseTarget • ${entryBlocker ?? 'waiting for rollover'}'
+                          : 'Phase $currentPhaseId • $phaseAccepted/$phaseTarget accepted • $phaseRemaining settlement(s) remaining • AI floor ${formatNumber(overnight['ai_min_confidence_pct'] ?? aiFloor, decimals: 0)}%',
                       style: const TextStyle(
                         color: Colors.white38,
                         fontSize: 10,
@@ -6271,11 +6559,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: overnightDemoBusy ||
-                              overnightComplete
+                      onPressed: overnightDemoBusy
                           ? null
                           : overnightActive ||
-                                  overnightDraining
+                                  overnightDraining ||
+                                  phaseEntryLimitReached
                               ? stopOvernightDemo
                               : startOvernightDemo,
                       icon: overnightDemoBusy
@@ -6289,7 +6577,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             )
                           : Icon(
                               overnightActive ||
-                                      overnightDraining
+                                      overnightDraining ||
+                                      phaseEntryLimitReached
                                   ? Icons.stop_circle_outlined
                                   : Icons.play_circle_fill_rounded,
                             ),
@@ -6297,7 +6586,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         overnightDemoBusy
                             ? 'Please wait...'
                             : overnightActive ||
-                                    overnightDraining
+                                    overnightDraining ||
+                                    phaseEntryLimitReached
                                 ? 'Stop new overnight entries'
                                 : 'START OVERNIGHT DEMO',
                       ),
@@ -6995,7 +7285,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.7.3 • Global Multi-Market Intelligence DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.8.1 • Rolling IG DEMO Forward Learning', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
