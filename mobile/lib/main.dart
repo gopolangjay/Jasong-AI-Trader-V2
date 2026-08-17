@@ -133,7 +133,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   List<Map<String, dynamic>> paperTrades = [];
 
-  // V6.6.2 autonomous AI PAPER-learning monitor.
+  // IG DEMO forward-learning monitor.
   Map<String, dynamic>? aiLearningStatus;
   Map<String, dynamic>? aiLearningSnapshot;
   List<Map<String, dynamic>> aiLearningWatchers = [];
@@ -2081,43 +2081,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             response['ig_demo_performance'];
 
         if (rawIgPerformance is Map) {
-          final enriched =
+          igDemoPerformance =
               Map<String, dynamic>.from(
             rawIgPerformance,
           );
-
-          // V6.8.3: auto-dashboard used to overwrite the richer overnight
-          // phase snapshot with lifetime-only broker totals. Preserve the
-          // rolling phase fields so Phase 2/3/... cannot visually fall back
-          // to Phase 1 on the next 20-second poll.
-          if (rawModelEvidence is Map) {
-            enriched['current_phase_id'] ??=
-                rawModelEvidence['current_phase_id'];
-            enriched['current_phase'] ??=
-                rawModelEvidence['current_phase'];
-            enriched['phase_history'] ??=
-                rawModelEvidence['phase_history'];
-            enriched['lifetime'] ??=
-                rawModelEvidence['lifetime'];
-          }
-
-          final rawIgStatus = response['ig_demo'];
-          if (rawIgStatus is Map) {
-            enriched['current_phase_id'] ??=
-                rawIgStatus['current_phase_id'];
-            enriched['current_phase'] ??=
-                rawIgStatus['current_phase_performance'];
-            enriched['phase_history'] ??=
-                rawIgStatus['phase_history'];
-            enriched['lifetime'] ??=
-                rawIgStatus['lifetime_performance'];
-            enriched['entry_blocker'] ??=
-                rawIgStatus['entry_blocker'];
-            enriched['execution_required'] ??=
-                rawIgStatus['execution_required'];
-          }
-
-          igDemoPerformance = enriched;
         }
 
         final rawLearning =
@@ -2849,7 +2816,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       case 'LOSS':
         return 'LOSS';
       case 'OPEN':
-        return 'LIVE PAPER TRADE';
+        return 'IG DEMO FORWARD TRADE';
       default:
         return status;
     }
@@ -3288,7 +3255,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
 
   // =========================================================
-  // PAPER TRADE
+  // FORWARD SIGNAL
   // =========================================================
 
   Future<void>
@@ -3353,7 +3320,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         const SnackBar(
           content:
               Text(
-            'Paper trade recorded',
+            'Forward signal recorded',
           ),
         ),
       );
@@ -4038,6 +4005,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final compoundOpen = compound['compound_broker_positions'] is List
         ? (compound['compound_broker_positions'] as List).length
         : 0;
+    final compoundMax =
+        int.tryParse(
+          '${compound['compound_max_positions'] ?? 5}',
+        ) ??
+        5;
+    final compoundCapacity =
+        compound['broker_capacity'] is Map
+            ? Map<String, dynamic>.from(
+                compound['broker_capacity'] as Map,
+              )
+            : <String, dynamic>{};
+    final brokerCapacityOpen =
+        int.tryParse(
+          '${compoundCapacity['total_open'] ?? igOpen}',
+        ) ??
+        0;
+    final brokerCapacityMax =
+        int.tryParse(
+          '${compoundCapacity['global_max'] ?? 15}',
+        ) ??
+        15;
     final compoundPending = int.tryParse(
           '${compound['pending_elite_count'] ?? 0}',
         ) ??
@@ -4124,6 +4112,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           '${summary['open_trades'] ?? paperTrades.where((t) => t['status'] == 'OPEN').length}',
         ) ??
         0;
+
+    final calibration =
+        dashboard['calibration'] is Map
+            ? Map<String, dynamic>.from(
+                dashboard['calibration'] as Map,
+              )
+            : integrity['calibration'] is Map
+                ? Map<String, dynamic>.from(
+                    integrity['calibration'] as Map,
+                  )
+                : <String, dynamic>{};
+    final calibrationFresh =
+        calibration['fresh'] == true ||
+        calibration['status']?.toString().toUpperCase() == 'FRESH';
+    final calibrationKnown = calibration.isNotEmpty;
+    final calibrationLabel =
+        calibrationKnown
+            ? (calibrationFresh ? 'FRESH' : 'STALE')
+            : 'STALE';
 
     final forwardTrades = forwardStats?['forward_trades'] ??
         forwardStats?['trades'] ??
@@ -4570,7 +4577,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                igBalance != null ? 'IG funds' : 'Paper balance',
+                igBalance != null ? 'IG funds' : 'Reference balance',
                 igBalance != null
                     ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}'
                     : '$paperBalance',
@@ -4593,6 +4600,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 'Phase $igCurrentPhaseId',
                 '$igAccepted / $igPhaseTarget',
                 Icons.flag_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Calibration',
+                calibrationLabel,
+                calibrationFresh
+                    ? Icons.check_circle_outline_rounded
+                    : Icons.history_toggle_off_rounded,
+                valueColor: calibrationFresh
+                    ? Colors.greenAccent
+                    : Colors.amberAccent,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Mode',
+                'ADVISORY',
+                Icons.tune_rounded,
+                valueColor: Colors.lightBlueAccent,
               ),
             ],
           ),
@@ -4681,8 +4710,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   children: [
                     Expanded(
                       child: _midnightValue(
-                        'Open elite',
-                        '$compoundOpen / 5',
+                        'Compound',
+                        '$compoundOpen / $compoundMax',
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -4696,6 +4725,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     const Expanded(
                       child: _MidnightValue(
                         'Environment',
+                        'IG DEMO',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Broker capacity',
+                        '$brokerCapacityOpen / $brokerCapacityMax',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Available',
+                        '${(brokerCapacityMax - brokerCapacityOpen).clamp(0, brokerCapacityMax)}',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Execution',
                         'IG DEMO',
                       ),
                     ),
@@ -4873,9 +4927,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Normal PAPER path', '≥ 30%', 'Verified + live direction agrees'),
+                _MidnightRuleRow('Normal forward path', '≥ 30%', 'Verified + live direction agrees'),
                 Divider(height: 24),
-                _MidnightRuleRow('AI PAPER path', '≥ 40%', 'AI approves + direction agrees'),
+                _MidnightRuleRow('AI forward path', '≥ 40%', 'AI approves + direction agrees'),
                 Divider(height: 24),
                 _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
               ],
@@ -5306,7 +5360,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
               const SizedBox(width: 10),
               statTile(
-                'Active IG now',
+                'Open IG',
                 '$igOpen',
                 Icons.swap_horiz_rounded,
               ),
@@ -5379,7 +5433,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: Text(
               igGraded == 0
                   ? 'Phase $igCurrentPhaseId is collecting broker-verified evidence. Open positions still contribute to the broker running P&L above.'
-                  : '$igGraded settled IG DEMO trade(s) have a WIN/LOSS outcome in Phase $igCurrentPhaseId. Active IG now shows only positions open at this moment.',
+                  : '$igGraded settled IG DEMO trade(s) currently have a WIN/LOSS outcome in Phase $igCurrentPhaseId.',
               style: const TextStyle(
                 color: Colors.white54,
                 fontSize: 11,
@@ -5536,7 +5590,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                   SizedBox(height: 4),
                   Text(
-                    'IG DEMO positions and PAPER learning trades will reappear here after server reconciliation.',
+                    'IG DEMO positions and forward-learning evidence will reappear here after server reconciliation.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Colors.white54,
@@ -5728,7 +5782,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
               const SizedBox(width: 10),
               statTile(
-                'Paper balance',
+                'Reference balance',
                 '$paperBalance',
                 Icons.account_balance_wallet_outlined,
               ),
@@ -5798,8 +5852,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final openTrades =
           learning['open_trades'] ?? 0;
 
+      final activeSignalRecords =
+          learning['active_signal_records'] ??
+          learning['open_trades'] ??
+          0;
+
       final learningBalance =
-          learning['paper_balance'] ?? 10000;
+          learning['reference_balance'] ??
+          learning['starting_reference_balance'] ??
+          10000;
 
       final overnight =
           overnightDemoStatus ??
@@ -5876,7 +5937,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final maxBrokerPositions =
           overnightSummary[
                   'max_broker_positions'] ??
-              3;
+              15;
+
+      final mirrors =
+          overnight['ig_demo'] is Map &&
+                  (overnight['ig_demo'] as Map)['mirrors'] is List
+              ? ((overnight['ig_demo'] as Map)['mirrors'] as List)
+                  .whereType<Map>()
+                  .map((row) => Map<String, dynamic>.from(row))
+                  .toList()
+              : <Map<String, dynamic>>[];
+
+      final waitingSignals =
+          mirrors.where((row) {
+            final status =
+                row['broker_status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '';
+            final hasDeal =
+                (row['ig_deal_id']
+                        ?.toString()
+                        .isNotEmpty ??
+                    false);
+            return !hasDeal &&
+                {
+                  'SUBMITTING',
+                  'WAITING_FOR_IG',
+                  'WAITING_FOR_CAPACITY',
+                  'PENDING',
+                }.contains(status);
+          }).length;
 
       final overnightIg =
           overnight['ig_demo'] is Map
@@ -6097,8 +6188,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const SizedBox(height: 4),
               Text(
                 status == 'OPEN'
-                    ? 'Autonomous PAPER trade is being monitored by the backend.'
-                    : 'Settled PAPER outcome: ${trade['result'] ?? status}.',
+                    ? 'IG DEMO forward trade is being monitored by the backend.'
+                    : 'Settled IG DEMO outcome: ${trade['result'] ?? status}.',
                 style: const TextStyle(
                   color: Colors.white54,
                   fontSize: 11,
@@ -6349,9 +6440,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                   const SizedBox(width: 10),
                   statTile(
-                    'IG positions',
+                    'IG Open Trades',
                     '$brokerPositions',
                     Icons.swap_horiz_rounded,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'Waiting Signals',
+                    '$waitingSignals',
+                    Icons.pending_actions_rounded,
+                    valueColor: waitingSignals > 0
+                        ? Colors.amberAccent
+                        : Colors.white,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Broker Capacity',
+                    '$brokerPositions / $maxBrokerPositions',
+                    Icons.hub_rounded,
+                    valueColor:
+                        brokerPositions < maxBrokerPositions
+                            ? Colors.greenAccent
+                            : Colors.amberAccent,
                   ),
                 ],
               ),
@@ -6700,7 +6814,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Existing PAPER/SHADOW learning stays active. Compound execution separately selects the best 1–5 A/A+ markets, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
+                  'IG DEMO forward learning stays active alongside Compound. Compound selects up to 5 broker positions, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -6721,9 +6835,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 22),
           sectionTitle(
-            'Autonomous AI PAPER Learning',
+            'IG DEMO Forward Learning',
             subtitle:
-                'AI40 shadow promotion • monitoring only on your phone',
+                'Broker-forward evidence • execution and reconciliation run on the backend',
           ),
           glassCard(
             glow: engineEnabled
@@ -6759,12 +6873,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       ),
                     ),
                     pill(
-                      liveExecution
-                          ? 'LIVE'
-                          : 'PAPER ONLY',
-                      color: liveExecution
-                          ? Colors.redAccent
-                          : Colors.greenAccent,
+                      'IG DEMO ONLY',
+                      color: Colors.greenAccent,
                     ),
                   ],
                 ),
@@ -6795,15 +6905,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                     const SizedBox(width: 10),
                     statTile(
-                      'Open trades',
+                      'IG Open Trades',
                       '$openTrades',
-                      Icons
-                          .receipt_long_outlined,
+                      Icons.receipt_long_outlined,
                       valueColor:
-                          (openTrades is num &&
-                                  openTrades > 0)
-                              ? Colors
-                                  .lightBlueAccent
+                          (openTrades is num && openTrades > 0)
+                              ? Colors.lightBlueAccent
                               : Colors.white,
                     ),
                   ],
@@ -6812,12 +6919,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 Row(
                   children: [
                     statTile(
-                      'Paper balance',
-                      formatMoney(
-                        learningBalance,
-                      ),
-                      Icons
-                          .account_balance_wallet_outlined,
+                      'Active Signals',
+                      '$activeSignalRecords',
+                      Icons.radar_rounded,
+                      valueColor:
+                          (activeSignalRecords is num &&
+                                  activeSignalRecords > 0)
+                              ? Colors.amberAccent
+                              : Colors.white,
                     ),
                     const SizedBox(width: 10),
                     statTile(
@@ -6880,9 +6989,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           if (openAiTrade != null) ...[
             const SizedBox(height: 20),
             sectionTitle(
-              'Current AI PAPER trade',
+              'Current IG DEMO forward trade',
               subtitle:
-                  'One open learning trade maximum',
+                  'Accepted broker trades only • signals may wait for IG separately',
             ),
             learningTradeCard(
               openAiTrade,
@@ -6890,7 +6999,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ] else if (aiTrades.isNotEmpty) ...[
             const SizedBox(height: 20),
             sectionTitle(
-              'Latest AI PAPER outcome',
+              'Latest IG DEMO learning outcome',
             ),
             learningTradeCard(
               aiTrades.first,
@@ -7009,7 +7118,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           sectionTitle(
             'Jasong AI Copilot',
             subtitle:
-                'Advisory analysis of PAPER performance and risk evidence',
+                'Advisory analysis of forward evidence and risk',
           ),
           glassCard(
             glow: cs.secondary,
@@ -7099,7 +7208,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           sectionTitle(
             'Learning thresholds',
             subtitle:
-                'Experimental PAPER eligibility — not win probabilities',
+                'Experimental forward eligibility — not win probabilities',
           ),
           glassCard(
             child: const Column(
@@ -7113,7 +7222,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 _MidnightRuleRow(
                   'EM',
                   'Experimental',
-                  'High-quality shadow promoted for AI PAPER learning only',
+                  'High-quality shadow promoted for IG DEMO forward learning only',
                 ),
                 Divider(height: 24),
                 _MidnightRuleRow(
@@ -7182,7 +7291,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   controller: balance,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
-                    labelText: 'Paper balance',
+                    labelText: 'Reference balance',
                     prefixIcon: Icon(Icons.account_balance_wallet_outlined),
                   ),
                 ),
@@ -7257,7 +7366,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Divider(height: 24),
                 _MidnightSystemRow('API endpoint', apiBase.replaceFirst('https://', '')),
                 const Divider(height: 24),
-                const _MidnightSystemRow('Execution', 'PAPER + IG DEMO'),
+                const _MidnightSystemRow('Execution', 'IG DEMO ONLY'),
                 const Divider(height: 24),
                 const _MidnightSystemRow('Live money', 'OFF'),
               ],
@@ -7318,7 +7427,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.8.3 • Confidence-First Rolling IG DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.8.1 • Rolling IG DEMO Forward Learning', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -8470,7 +8579,7 @@ class _CompoundDashboardScreenState
             if (positions.isEmpty)
               _card(
                 child: const Text(
-                  'No Compound positions are open. Live Intelligence is evaluated continuously. When AI, Quant and Fast reach the required thresholds and IG broker-safety checks pass, the setup can trade in IG DEMO even if it is not Elite.',
+                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -8543,7 +8652,7 @@ class _CompoundDashboardScreenState
               ),
             const SizedBox(height: 20),
             const Text(
-              'Confidence-first market ranking',
+              'Elite market ranking',
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w900,
@@ -8551,7 +8660,7 @@ class _CompoundDashboardScreenState
             ),
             const SizedBox(height: 3),
             const Text(
-              'IG DEMO trade rule: AI ≥40% • Quant ≥30% • Fast ≥90. Elite/Quality/Deep remain evidence labels; broker safety and diversification still apply.',
+              '40% AI is the eligibility floor — final selection is by Elite Score and diversification.',
               style: TextStyle(
                 color: Colors.white54,
                 fontSize: 10,
@@ -8645,22 +8754,6 @@ class _CompoundDashboardScreenState
                               fontSize: 10,
                             ),
                           ),
-                          if (row['trade_class'] != null ||
-                              row['execution_basis'] != null) ...[
-                            const SizedBox(height: 5),
-                            Text(
-                              '${row['trade_class'] ?? '-'}'
-                              '${row['execution_basis'] != null ? ' • ${row['execution_basis']}' : ''}',
-                              style:
-                                  const TextStyle(
-                                color:
-                                    Color(0xFF67F0C1),
-                                fontSize: 10,
-                                fontWeight:
-                                    FontWeight.w800,
-                              ),
-                            ),
-                          ],
                           if (reasons.isNotEmpty) ...[
                             const SizedBox(height: 5),
                             Text(
@@ -8781,7 +8874,7 @@ class _CompoundDashboardScreenState
             const SizedBox(height: 20),
             _card(
               child: const Text(
-                'Unified parallel design: the Home Live Intelligence signal is shared directly with Elite Compound, while Auto Manager, deep validation, PAPER learning and SHADOW evidence continue. Signals are ranked even while legacy/manual IG positions drain. New Compound orders wait for a clean broker because the current +50%/-15% cycle accounting uses IG account-level P&L.',
+                'Unified IG DEMO design: Home Live Intelligence, Compound and forward learning share broker evidence. Compound may hold up to 5 positions, the account may hold up to 15 Jasong positions, and broker state remains the execution source of truth.',
                 style: TextStyle(
                   color: Colors.white54,
                   fontSize: 10,
