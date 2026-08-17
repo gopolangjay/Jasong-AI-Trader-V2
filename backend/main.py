@@ -7063,6 +7063,28 @@ IG_DEMO_MIRROR.set_compound_source(
 
 
 
+@app.get("/execution-policy")
+def execution_policy():
+    """System-wide execution policy: IG DEMO broker only."""
+    return {
+        "execution_mode": "IG_DEMO_ONLY",
+        "paper_execution_enabled": False,
+        "live_money_execution": False,
+        "compound_direct_ig_demo": True,
+        "learning_direct_ig_demo": True,
+        "unified_forward_evidence": True,
+        "max_ig_demo_positions": int(
+            os.getenv("IG_DEMO_MAX_OPEN_POSITIONS", "3")
+        ),
+        "compound_reserved_slots": int(
+            os.getenv("IG_DEMO_COMPOUND_RESERVED_SLOTS", "1")
+        ),
+        "broker_reconcile_seconds": int(
+            os.getenv("IG_DEMO_MIRROR_POLL_SECONDS", "15")
+        ),
+    }
+
+
 @app.get("/compound/status")
 def compound_status():
     return COMPOUND_ENGINE.status()
