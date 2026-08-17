@@ -66,6 +66,7 @@ from ig_demo_broker import IGDemoError
 from ig_demo_bridge import IGDemoMirror
 from compound_engine import EliteCompoundEngine
 from integrity_engine import EvidenceExecutionIntegrityEngine
+from global_market_engine import GlobalMarketEngine, GLOBAL_MARKET_SEEDS
 
 from database import (
     SessionLocal,
@@ -208,8 +209,8 @@ _FX_DISCOVERY_LOCK = threading.RLock()
 
 
 app = FastAPI(
-    title="Jasong AI Trader V6.7.2a API",
-    version="6.7.2a",
+    title="Jasong AI Trader V6.7.3 API",
+    version="6.7.3",
 )
 
 app.add_middleware(
@@ -1023,8 +1024,8 @@ def health():
 
     return {
         "status": "ok",
-        "version": "6.7.2a",
-        "engine": "JASONG_AI_V6.7.2a_MARKET_AWARE_CLOSE",
+        "version": "6.7.3",
+        "engine": "JASONG_AI_V6.7.3_GLOBAL_MULTI_MARKET",
         "auto_manager_enabled": bool(
             manager.get("enabled", False)
         ),
@@ -1051,8 +1052,13 @@ def health():
             "normal_min_confidence_pct": PAPER_NORMAL_MIN_CONFIDENCE * 100.0,
             "ai_min_confidence": PAPER_AI_MIN_CONFIDENCE,
             "ai_min_confidence_pct": PAPER_AI_MIN_CONFIDENCE * 100.0,
-                        "paper_only": True,
+            "paper_only": True,
         },
+        "global_markets": (
+            GLOBAL_MARKET_ENGINE.status()
+            if "GLOBAL_MARKET_ENGINE" in globals()
+            else {"status": "STARTING"}
+        ),
         "live_execution": False,
     }
 
@@ -1302,7 +1308,7 @@ def _v671_store_live_intelligence(
 
     now = time.time()
     snapshot = {
-        "version": "6.7.2a",
+        "version": "6.7.3",
         "source":
             "HOME_LIVE_INTELLIGENCE",
         "symbol": symbol,
@@ -6815,6 +6821,287 @@ def _v671_compound_candidate_source(
     return evaluated
 
 
+
+
+# ============================================================
+# V6.7.3 GLOBAL MULTI-MARKET INTELLIGENCE
+# ============================================================
+
+_V673_GLOBAL_DATA_LOCK = threading.RLock()
+_V673_GLOBAL_DATA_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
+_V673_GLOBAL_DATA_TTL_SECONDS = int(
+    max(300, min(3600, float(os.getenv("GLOBAL_DATA_TTL_SECONDS", "900"))))
+)
+
+
+def _v673_global_market_data(seed: dict) -> pd.DataFrame:
+    """Public analysis data for non-FX discovery.
+
+    IG remains the execution/preflight source of truth.  This function avoids
+    consuming IG's small weekly historical-price allowance for broad scanning.
+    """
+    ticker = str(seed.get("analysis_symbol") or "").strip()
+    if not ticker:
+        raise ValueError("Global market has no analysis symbol")
+    now = time.time()
+    with _V673_GLOBAL_DATA_LOCK:
+        cached = _V673_GLOBAL_DATA_CACHE.get(ticker)
+        if cached and now - float(cached[0]) <= _V673_GLOBAL_DATA_TTL_SECONDS:
+            return cached[1].copy()
+
+    data = yf.download(
+        ticker,
+        period="1mo",
+        interval="15m",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+    )
+    if data is None or data.empty:
+        raise ValueError(f"No public 15m market data for {ticker}")
+
+    if isinstance(data.columns, pd.MultiIndex):
+        # yfinance may return (field,ticker) even for one symbol.
+        data.columns = [str(col[0]) for col in data.columns]
+    data = data.rename(columns={"Adj Close": "Adj_Close"})
+    needed = ["Open", "High", "Low", "Close"]
+    missing = [col for col in needed if col not in data.columns]
+    if missing:
+        raise ValueError(f"Missing OHLC columns for {ticker}: {missing}")
+    data = data.dropna(subset=needed).copy()
+    if len(data) < 180:
+        raise ValueError(f"Insufficient 15m history for {ticker}: {len(data)} rows")
+
+    with _V673_GLOBAL_DATA_LOCK:
+        _V673_GLOBAL_DATA_CACHE[ticker] = (now, data.copy())
+    return data
+
+
+def _v673_profit_factor(values: list[float]) -> float:
+    gp = sum(v for v in values if v > 0)
+    gl = abs(sum(v for v in values if v < 0))
+    if gl <= 1e-12:
+        return 9.99 if gp > 0 else 0.0
+    return gp / gl
+
+
+def _v673_max_drawdown(values: list[float]) -> float:
+    equity = 1.0
+    peak = 1.0
+    worst = 0.0
+    for value in values:
+        # Cap pathological one-bar public-data errors from breaking validation.
+        r = max(-0.25, min(0.25, float(value)))
+        equity *= max(0.000001, 1.0 + r)
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak if peak > 0 else 0.0
+        worst = max(worst, dd)
+    return worst
+
+
+def _v673_global_analysis(seed: dict) -> dict:
+    """Asset-agnostic Rule+ML analysis plus genuine held-out validation."""
+    raw = _v673_global_market_data(seed)
+    indicators = add_indicators(raw)
+    model = train_model(indicators)
+    enriched = enrich(indicators, model)
+    if enriched is None or enriched.empty:
+        raise ValueError("Global analysis enrichment returned no rows")
+
+    adaptive_profile = replace(PROFILES["Balanced"], min_confidence=0.0)
+    live = decision(enriched, adaptive_profile)
+    latest = enriched.dropna().iloc[-1]
+    live_direction = str(live.get("decision") or "WAIT").upper()
+    proposed_direction = str(latest.get("DIRECTION") or "WAIT").upper()
+    direction = live_direction if live_direction in {"BUY", "SELL"} else "WAIT"
+    quant = _v651_confidence01(live.get("confidence"))
+    up = _v651_confidence01(live.get("combined_up_probability"))
+    directional_ai = (
+        up if proposed_direction == "BUY"
+        else (1.0 - up if proposed_direction == "SELL" else 0.0)
+    )
+
+    # The ML model is fitted on the first 70% by train_model().  Validate on
+    # the final 30% only so the grade is not simply in-sample curve fitting.
+    x = enriched.copy()
+    x["FUTURE_RETURN"] = x["Close"].shift(-1) / x["Close"] - 1.0
+    cut = max(1, int(len(x) * 0.70))
+    oos = x.iloc[cut:].copy()
+    if "QUALITY_OK" in oos.columns:
+        oos = oos[oos["QUALITY_OK"] == True]  # noqa: E712
+    oos = oos.dropna(subset=["FUTURE_RETURN", "DIRECTION", "CONFIDENCE", "UP_PROB"])
+
+    strategy_returns: list[float] = []
+    for _, row in oos.iterrows():
+        d = str(row.get("DIRECTION") or "WAIT").upper()
+        r = float(row.get("FUTURE_RETURN") or 0.0)
+        if d == "BUY":
+            strategy_returns.append(r)
+        elif d == "SELL":
+            strategy_returns.append(-r)
+
+    trades = len(strategy_returns)
+    wins = sum(1 for v in strategy_returns if v > 0)
+    losses = sum(1 for v in strategy_returns if v <= 0)
+    win_rate = wins / trades if trades else 0.0
+    profit_factor = _v673_profit_factor(strategy_returns)
+    max_dd = _v673_max_drawdown(strategy_returns)
+
+    wr_component = 25.0 * max(0.0, min(1.0, (win_rate - 0.50) / 0.25))
+    pf_component = 15.0 * max(0.0, min(1.0, (profit_factor - 1.0) / 1.50))
+    sample_component = 10.0 * max(0.0, min(1.0, trades / 40.0))
+    smart_fast_score = max(0.0, min(100.0, 50.0 + wr_component + pf_component + sample_component))
+
+    if trades >= 25 and win_rate >= 0.68 and profit_factor >= 1.65 and max_dd <= 0.08:
+        quality = "A+"
+        deep = "GLOBAL_VERIFIED"
+    elif trades >= 20 and win_rate >= 0.62 and profit_factor >= 1.35 and max_dd <= 0.12:
+        quality = "A"
+        deep = "GLOBAL_NEAR_VERIFIED"
+    else:
+        quality = "B"
+        deep = "GLOBAL_REJECT"
+
+    recent_returns = (
+        raw["Close"].pct_change().replace([float("inf"), float("-inf")], 0.0).fillna(0.0).tail(120).tolist()
+    )
+
+    return {
+        "market": seed.get("name"),
+        "symbol": seed.get("key"),
+        "analysis_symbol": seed.get("analysis_symbol"),
+        "asset_class": seed.get("asset_class"),
+        "exposure_tags": list(seed.get("exposure_tags") or []),
+        "direction": direction,
+        "proposed_direction": proposed_direction,
+        "live_direction": direction,
+        "direction_match": direction in {"BUY", "SELL"},
+        "quant_confidence": quant,
+        "quant_confidence_pct": round(quant * 100.0, 2),
+        "model_ai_confidence": directional_ai,
+        "model_ai_directional_confidence_pct": round(directional_ai * 100.0, 2),
+        "smart_fast_score": round(smart_fast_score, 2),
+        "quality_tier": quality,
+        "deep_status": deep,
+        "historical_win_rate": win_rate,
+        "historical_win_rate_pct": round(win_rate * 100.0, 2),
+        "historical_profit_factor": round(profit_factor, 4),
+        "historical_trades": trades,
+        "historical_wins": wins,
+        "historical_losses": losses,
+        "historical_max_drawdown_pct": round(max_dd * 100.0, 2),
+        "live_price": live.get("price"),
+        "rsi": live.get("rsi"),
+        "signal_reason": live.get("reason"),
+        "reason": live.get("reason"),
+        "recent_returns": recent_returns,
+        "analysis_source": "PUBLIC_DATA_RULE_ML_HELD_OUT",
+        "observed_at": time.time(),
+        "live_money_execution": False,
+    }
+
+
+GLOBAL_MARKET_STATE_PATH = os.getenv(
+    "GLOBAL_MARKET_STATE_PATH",
+    "/var/data/jasong_global_markets.json"
+    if os.path.isdir("/var/data")
+    else "/tmp/jasong_global_markets.json",
+)
+
+GLOBAL_MARKET_ENGINE = GlobalMarketEngine(
+    broker=IG_DEMO_BROKER,
+    analysis_func=_v673_global_analysis,
+    state_path=GLOBAL_MARKET_STATE_PATH,
+)
+GLOBAL_MARKET_ENGINE.start_thread()
+
+
+def _v673_compound_candidate_source(cycle_capital: float) -> list[dict]:
+    """Merge mature FX watcher intelligence with the global multi-asset pool."""
+    legacy_rows = _v671_compound_candidate_source(cycle_capital)
+    global_rows = GLOBAL_MARKET_ENGINE.candidates()
+    merged: list[dict] = []
+    seen: set[str] = set()
+
+    # Mature V64 FX evidence wins a duplicate tie; non-FX follows.
+    for raw in list(legacy_rows) + list(global_rows):
+        row = dict(raw or {})
+        epic = str(row.get("ig_epic") or "").upper().strip()
+        symbol = str(row.get("symbol") or row.get("market") or "").upper().strip()
+        key = epic or f"{row.get('asset_class') or 'FX'}:{symbol}:{row.get('direction')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if not row.get("asset_class"):
+            row["asset_class"] = "FX"
+        merged.append(row)
+
+    merged.sort(
+        key=lambda row: (
+            float(row.get("smart_fast_score") or 0.0),
+            float(row.get("model_ai_confidence") or 0.0),
+            float(row.get("quant_confidence") or 0.0),
+        ),
+        reverse=True,
+    )
+    return merged
+
+
+def _v673_global_correlation_matrix() -> dict:
+    matrix: dict = {}
+    try:
+        fx = _v66_fx_correlation_matrix() or {}
+        if isinstance(fx, dict):
+            matrix.update(fx)
+    except Exception:
+        pass
+    try:
+        global_matrix = GLOBAL_MARKET_ENGINE.correlation_matrix() or {}
+        if isinstance(global_matrix, dict):
+            for key, row in global_matrix.items():
+                if isinstance(row, dict):
+                    matrix.setdefault(key, {}).update(row)
+    except Exception:
+        pass
+    return matrix
+
+
+@app.get("/global-markets/status")
+def global_markets_status():
+    return GLOBAL_MARKET_ENGINE.status()
+
+
+@app.get("/global-markets/universe")
+def global_markets_universe():
+    return {
+        "version": "6.7.3",
+        "fx": [
+            {"key": key, "name": value, "asset_class": "FX"}
+            for key, value in CORE_MARKETS.items()
+        ],
+        "global": GLOBAL_MARKET_ENGINE.universe(),
+        "total": len(CORE_MARKETS) + len(GLOBAL_MARKET_ENGINE.universe()),
+        "live_money_execution": False,
+    }
+
+
+@app.get("/global-markets/candidates")
+def global_markets_candidates(limit: int = 100):
+    rows = GLOBAL_MARKET_ENGINE.candidates()
+    limit = max(1, min(int(limit), 500))
+    return {
+        "version": "6.7.3",
+        "count": len(rows),
+        "candidates": rows[:limit],
+        "live_money_execution": False,
+    }
+
+
+@app.post("/global-markets/run-now")
+def global_markets_run_now():
+    return GLOBAL_MARKET_ENGINE.run_now()
+
+
 COMPOUND_STATE_PATH = os.getenv(
     "COMPOUND_STATE_PATH",
     (
@@ -6827,9 +7114,9 @@ COMPOUND_STATE_PATH = os.getenv(
 COMPOUND_ENGINE = EliteCompoundEngine(
     broker=IG_DEMO_BROKER,
     candidate_source=
-        _v671_compound_candidate_source,
+        _v673_compound_candidate_source,
     correlation_source=
-        _v66_fx_correlation_matrix,
+        _v673_global_correlation_matrix,
     state_path=COMPOUND_STATE_PATH,
 )
 COMPOUND_ENGINE.start_thread()
@@ -6844,11 +7131,13 @@ def compound_status():
 def compound_intelligence():
     """Inspect the shared Home ↔ Compound Live Intelligence bridge."""
     return {
-        "version": "6.7.2a",
+        "version": "6.7.3",
         "recent_live_intelligence":
             _v671_recent_intelligence(),
         "compound":
             COMPOUND_ENGINE.status(),
+        "global_markets":
+            GLOBAL_MARKET_ENGINE.status(),
         "environment": "DEMO",
         "live_money_execution": False,
     }
@@ -7200,7 +7489,7 @@ def _v664_overnight_demo_snapshot() -> dict:
 
     return {
         "version":
-            "6.7.2a-MARKET-AWARE-CLOSE",
+            "6.7.3-GLOBAL-MULTI-MARKET",
         "status": run_state,
         "demo_only": demo_only,
         "safe_to_run": bool(
