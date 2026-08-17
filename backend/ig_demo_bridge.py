@@ -366,6 +366,8 @@ class IGDemoMirror:
                     "confidence_qualified": position.get("confidence_qualified"),
                     "externally_managed": True,
                     "evidence_source": "COMPOUND",
+                    "compound_broker_authority": True,
+                    "broker_state_authority": "COMPOUND_ENGINE",
                     "last_seen_on_compound_at": now,
                 })
 
@@ -379,6 +381,16 @@ class IGDemoMirror:
                     )
                     mirror["close_verified"] = True
                     mirror["remaining_size"] = 0.0
+                    mirror["externally_closed"] = False
+                    mirror["broker_presence_state"] = (
+                        "COMPOUND_CONFIRMED_CLOSED"
+                    )
+                    mirror["compound_broker_authority"] = True
+                    mirror["missing_on_ig_count"] = 0
+                    mirror["first_missing_on_ig_at"] = None
+                    mirror["last_missing_on_ig_at"] = None
+                    mirror["external_close_confirmation"] = None
+
                     if result in {"WIN", "LOSS"}:
                         mirror["broker_result"] = result
                         close_result = position.get("close_result") or {}
@@ -387,6 +399,12 @@ class IGDemoMirror:
                     broker_status = str(
                         position.get("broker_status") or "OPEN"
                     ).upper()
+
+                    # V6.8.10:
+                    # CompoundEngine is the authoritative owner of JSCMP_
+                    # broker positions. If Compound says this exact broker deal
+                    # is OPEN/TRADEABLE, the phase ledger must not override it
+                    # based on an independent /positions absence check.
                     mirror["broker_status"] = (
                         "OPEN"
                         if broker_status in {"OPEN", "TRADEABLE"}
@@ -397,6 +415,22 @@ class IGDemoMirror:
                         or mirror.get("opened_at")
                         or now
                     )
+                    mirror["close_verified"] = False
+                    mirror["externally_closed"] = False
+                    mirror["closed_at"] = None
+                    mirror["remaining_size"] = (
+                        position.get("ig_size")
+                        or position.get("broker_size_now")
+                        or mirror.get("ig_size")
+                    )
+                    mirror["broker_presence_state"] = (
+                        "COMPOUND_CONFIRMED_OPEN"
+                    )
+                    mirror["compound_broker_authority"] = True
+                    mirror["missing_on_ig_count"] = 0
+                    mirror["first_missing_on_ig_at"] = None
+                    mirror["last_missing_on_ig_at"] = None
+                    mirror["external_close_confirmation"] = None
 
             self._state["compound_evidence_error"] = None
 
@@ -1214,6 +1248,12 @@ class IGDemoMirror:
             # reports it, treat IG as authoritative. Do not delete the record:
             # keeping it is what preserves the Phase-1 sample count.
             for mirror in mirrors.values():
+                # Compound JSCMP_ evidence is owned by CompoundEngine.
+                # Do not infer CLOSED_EXTERNALLY from this bridge's independent
+                # /positions snapshot for externally-managed records.
+                if bool(mirror.get("externally_managed")):
+                    continue
+
                 deal_id = str(
                     mirror.get("ig_deal_id")
                     or ""
@@ -1540,7 +1580,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.9-BROKER-CLOSE-VERIFICATION",
+                "version": "6.8.10-COMPOUND-BROKER-AUTHORITY",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1562,6 +1602,15 @@ class IGDemoMirror:
                 ],
                 "compound_evidence_error": self._state.get(
                     "compound_evidence_error"
+                ),
+                "compound_broker_state_authority": "COMPOUND_ENGINE",
+                "compound_evidence_open": sum(
+                    1
+                    for item in self._mirrors().values()
+                    if str(item.get("evidence_source") or "").upper()
+                    == "COMPOUND"
+                    and str(item.get("broker_status") or "").upper()
+                    == "OPEN"
                 ),
                 "lifetime_performance": self._stats_for_rows([
                     item
@@ -2012,6 +2061,12 @@ class IGDemoMirror:
                     for mirror in (
                         self._mirrors().values()
                     ):
+                        # JSCMP_ positions are externally managed by
+                        # CompoundEngine. The unified phase ledger observes
+                        # them, but must never override Compound's broker state.
+                        if bool(mirror.get("externally_managed")):
+                            continue
+
                         deal_id = str(
                             mirror.get(
                                 "ig_deal_id"
