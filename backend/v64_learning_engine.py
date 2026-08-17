@@ -14,21 +14,15 @@ except Exception:  # pragma: no cover
 
 
 class V64LearningTradeEngine:
-    """High-throughput PAPER learning engine with evidence-integrity tracking.
+    """V6.8 signal-lifecycle engine for broker-forward learning.
 
-    This engine is deliberately separate from the strict genuine-forward
-    watcher engine so exploratory PAPER trades do not contaminate the strict
-    baseline. It supports:
-
-    D - BOTH path: normal confidence >= 30% and model-AI >= 40%
-    N - NORMAL path: normal confidence >= 30%
-    M - MODEL_AI path: directional model-AI confidence >= 40%
-    S - shadow trade: rejected/watch-only setup recorded without balance impact
-
-    No broker credentials are accepted and no live order is sent.
+    The engine still creates and times model signal records, but V6.8 treats
+    IG DEMO reconciliation as the source of truth for forward W/L evidence.
+    Counterfactual shadow settlement is no longer part of the primary learning
+    path. Broker credentials remain isolated in IGDemoMirror.
     """
 
-    VERSION = "6.7.2"
+    VERSION = "6.8.0"
     NAMESPACE = "v64_learning_engine"
 
     # V6.6 PAPER-learning entry thresholds.
@@ -162,8 +156,11 @@ class V64LearningTradeEngine:
 
         verified = bool(validated.get("verified", False))
         deep_status = str(validated.get("status") or "NOT_VALIDATED").upper()
-        experimental = (not verified) and deep_status in {"WATCH", "NEAR_VERIFIED"}
-        trade_eligible = verified or experimental
+        # V6.8: a deep-validation reject can still be valuable IG DEMO learning
+        # evidence. Only missing/broken validation is excluded from execution.
+        invalid_deep = deep_status in {"NOT_VALIDATED", "INVALID", "ERROR", ""}
+        experimental = not verified
+        trade_eligible = not invalid_deep
         holding_candles = int(validated.get("holding_candles") or item.get("holding_candles") or 4)
         holding_candles = max(1, min(holding_candles, 24))
 
@@ -190,7 +187,7 @@ class V64LearningTradeEngine:
             "last_quant_confidence": None,
             "last_signal": None,
             "last_ai": None,
-            "status": "WATCHING" if trade_eligible else "SHADOW_WATCH",
+            "status": "WATCHING" if trade_eligible else "OBSERVE_ONLY",
             "expires_at": now + 12 * 3600,
         }
 
@@ -525,6 +522,13 @@ class V64LearningTradeEngine:
         trade = {
             "trade_id": str(uuid.uuid4()),
             "entry_class": decision["class"],
+            "elite_state": decision.get("elite_state"),
+            "trade_class": decision.get("trade_class"),
+            "elite_score": decision.get("elite_score"),
+            "failed_gates": list(decision.get("failed_gates") or []),
+            "threshold_distance": dict(decision.get("threshold_distance") or {}),
+            "ig_demo_learning_eligible": bool(decision.get("ig_demo_learning_eligible")),
+            "model_version": self.VERSION,
             "historical_grade": "VERIFIED" if watcher.get("verified") else ("EXPERIMENTAL" if watcher.get("experimental") else "SHADOW"),
             "symbol": symbol,
             "market": watcher.get("market"),
@@ -861,8 +865,17 @@ class V64LearningTradeEngine:
                 if decision.get("enter"):
                     self._open_trade(watcher, live, decision)
                 else:
-                    # Create a counterfactual outcome so rejected gates teach us too.
-                    self._open_shadow(watcher, live, decision)
+                    # V6.8: no new paper/shadow execution. OBSERVE signals are
+                    # journalled only; broker-forward learning uses actual IG DEMO
+                    # trades for ELITE / LEARNING_PLUS / LEARNING states.
+                    self._journal("LEARNING_SIGNAL_OBSERVED", {
+                        "symbol": watcher.get("symbol"),
+                        "direction": watcher.get("direction"),
+                        "elite_state": decision.get("elite_state") or "OBSERVE",
+                        "elite_score": decision.get("elite_score"),
+                        "failed_gates": list(decision.get("failed_gates") or []),
+                        "reason": decision.get("reason"),
+                    })
                 fresh_watchers.append(watcher)
             except Exception as exc:
                 watcher["last_error"] = str(exc)
@@ -878,7 +891,6 @@ class V64LearningTradeEngine:
         )
 
         self._settle_list("open_trades", "settled_trades", True)
-        self._settle_list("shadow_open", "shadow_settled", False)
 
         with self._lock:
             self._state["last_tick_at"] = now
