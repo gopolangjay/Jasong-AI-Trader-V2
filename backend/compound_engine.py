@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.4"
+    VERSION = "6.8.5"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -732,7 +732,40 @@ class EliteCompoundEngine:
                 "details": details,
             }
         else:
-            market = self.broker.resolve_market(symbol, require_tradeable=True)
+            if asset_class == "FX":
+                market = self.broker.resolve_market(
+                    symbol,
+                    require_tradeable=True,
+                )
+            else:
+                # V6.8.5: non-FX candidates must NEVER be routed through the
+                # six-letter FX parser. Reuse the seed metadata carried by the
+                # global intelligence engine and resolve the actual IG market.
+                search_terms = list(
+                    candidate.get("ig_search_terms")
+                    or [candidate.get("market"), candidate.get("symbol")]
+                )
+                expected_types = list(
+                    candidate.get("expected_types")
+                    or [asset_class]
+                )
+                name_tokens = list(
+                    candidate.get("name_tokens")
+                    or [candidate.get("market"), candidate.get("symbol")]
+                )
+                market = self.broker.resolve_global_market(
+                    search_terms=search_terms,
+                    expected_types=expected_types,
+                    name_tokens=name_tokens,
+                    require_tradeable=True,
+                    cache_key=str(
+                        candidate.get("key")
+                        or candidate.get("symbol")
+                        or candidate.get("market")
+                        or ""
+                    ),
+                )
+
             details = market.get("details") or {}
             snapshot = details.get("snapshot") or {}
 
@@ -904,9 +937,26 @@ class EliteCompoundEngine:
                 row["spread_bps"] = spread.get("spread_bps")
                 row["spread_score"] = spread.get("spread_score")
                 row["spread_limit_bps"] = spread.get("spread_limit_bps")
+                resolved_market = spread.get("market") or {}
                 row["ig_epic"] = (
-                    (spread.get("market") or {}).get("epic")
+                    resolved_market.get("epic")
                     or row.get("ig_epic")
+                )
+                row["ig_market_name"] = (
+                    resolved_market.get("name")
+                    or row.get("ig_market_name")
+                )
+                row["ig_instrument_type"] = (
+                    resolved_market.get("instrument_type")
+                    or row.get("ig_instrument_type")
+                )
+                row["ig_instrument_family"] = (
+                    resolved_market.get("instrument_family")
+                    or row.get("ig_instrument_family")
+                )
+                row["ig_market_status"] = (
+                    resolved_market.get("market_status")
+                    or row.get("ig_market_status")
                 )
 
                 if spread.get("ok") is not True:
