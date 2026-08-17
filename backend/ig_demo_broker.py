@@ -12,6 +12,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 import math
+import re
 
 
 class IGDemoError(RuntimeError):
@@ -86,6 +87,17 @@ class IGDemoBroker:
         self._market_cache: Dict[str, Dict[str, Any]] = {}
         self._market_cache_at: Dict[str, float] = {}
         self._market_cache_ttl = 6 * 3600.0
+
+        # V6.8.13 isolated mark-to-market support.
+        # Compound and Learning can share one IG DEMO account, so Compound
+        # cannot rely on account-wide P&L when a Learning position is open.
+        self._pnl_market_cache: Dict[str, Dict[str, Any]] = {}
+        self._pnl_market_cache_at: Dict[str, float] = {}
+        self._pnl_market_cache_ttl = 30.0
+        self._fx_conversion_cache: Dict[str, float] = {}
+        self._fx_conversion_cache_at: Dict[str, float] = {}
+        self._fx_conversion_cache_ttl = 30.0
+
         self._last_error: Optional[str] = None
 
     @staticmethod
@@ -1203,6 +1215,7 @@ class IGDemoBroker:
             "epic": clean_epic,
             "instrument_type": instrument_type,
             "market_status": market_status,
+            "currencyCode": payload.get("currencyCode"),
             "direction": direction,
             "requestedSize": requested_size,
             "minimumSize": min_size,
@@ -1218,6 +1231,271 @@ class IGDemoBroker:
             "dealStatus": confirmation.get("dealStatus"),
             "reason": confirmation.get("reason"),
             "live_money_execution": False,
+        }
+
+    @staticmethod
+    def _first_number(value: Any) -> Optional[float]:
+        """Extract the first finite numeric token from an IG display string."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                out = float(value)
+                return out if math.isfinite(out) else None
+            except Exception:
+                return None
+        match = re.search(
+            r"[-+]?(?:\d+(?:,\d{3})*|\d*)(?:\.\d+)?",
+            str(value),
+        )
+        if not match or not match.group(0).strip():
+            return None
+        try:
+            out = float(match.group(0).replace(",", ""))
+            return out if math.isfinite(out) else None
+        except Exception:
+            return None
+
+    def _pnl_market_details(self, epic: str) -> Dict[str, Any]:
+        clean = str(epic or "").strip()
+        if not clean:
+            raise IGDemoError("Cannot value position without EPIC")
+        now = time.time()
+        cached = self._pnl_market_cache.get(clean)
+        cached_at = self._pnl_market_cache_at.get(clean, 0.0)
+        if cached and now - cached_at <= self._pnl_market_cache_ttl:
+            return dict(cached)
+
+        details = self.market_details(clean, require_quote=True)
+        self._pnl_market_cache[clean] = dict(details)
+        self._pnl_market_cache_at[clean] = now
+        return details
+
+    def _fx_conversion_factor(
+        self,
+        from_currency: str,
+        to_currency: str,
+    ) -> float:
+        """Return TO currency units for one FROM currency unit.
+
+        Uses an exact IG DEMO FX quote. This avoids guessing the orientation of
+        the `exchangeRate` values in market metadata.
+        """
+        source = str(from_currency or "").upper().strip()
+        target = str(to_currency or "").upper().strip()
+
+        if not source or not target or source == target:
+            return 1.0
+
+        cache_key = f"{source}>{target}"
+        now = time.time()
+        if (
+            cache_key in self._fx_conversion_cache
+            and now - self._fx_conversion_cache_at.get(cache_key, 0.0)
+            <= self._fx_conversion_cache_ttl
+        ):
+            return self._fx_conversion_cache[cache_key]
+
+        direct_error = None
+
+        # 1 SOURCE = x TARGET.
+        direct_symbol = f"{source}/{target}"
+        try:
+            direct = self.resolve_market(
+                direct_symbol,
+                require_tradeable=False,
+            )
+            details = self.market_details(
+                str(direct.get("epic") or ""),
+                require_quote=True,
+            )
+            quote = self.extract_snapshot_quote(details)
+            bid = self._first_number(quote.get("bid"))
+            if bid and bid > 0:
+                factor = float(bid)
+                self._fx_conversion_cache[cache_key] = factor
+                self._fx_conversion_cache_at[cache_key] = now
+                return factor
+        except Exception as exc:
+            direct_error = exc
+
+        # Inverse: 1 TARGET = x SOURCE, therefore 1 SOURCE = 1/x TARGET.
+        inverse_symbol = f"{target}/{source}"
+        try:
+            inverse = self.resolve_market(
+                inverse_symbol,
+                require_tradeable=False,
+            )
+            details = self.market_details(
+                str(inverse.get("epic") or ""),
+                require_quote=True,
+            )
+            quote = self.extract_snapshot_quote(details)
+            offer = self._first_number(quote.get("offer"))
+            if offer and offer > 0:
+                factor = 1.0 / float(offer)
+                self._fx_conversion_cache[cache_key] = factor
+                self._fx_conversion_cache_at[cache_key] = now
+                return factor
+        except Exception as inverse_error:
+            raise IGDemoError(
+                "Unable to convert "
+                f"{source} P&L to {target}; "
+                f"direct={type(direct_error).__name__ if direct_error else '-'} "
+                f"inverse={type(inverse_error).__name__}: {inverse_error}"
+            ) from inverse_error
+
+        raise IGDemoError(
+            f"Unable to convert {source} P&L to {target}"
+        )
+
+    def estimate_open_position_pnl(
+        self,
+        position: Dict[str, Any],
+        *,
+        account_currency: str,
+    ) -> Dict[str, Any]:
+        """Estimate one open IG DEMO position's current P&L in account currency.
+
+        IG's /positions response provides entry level, size and current bid/offer,
+        but the account P&L is account-wide. For dual-track execution we isolate
+        JSCMP_ P&L using the instrument's documented `valueOfOnePip` and
+        `snapshot.scalingFactor`.
+
+        Formula:
+            pip_size = 1 / scalingFactor
+            pips = signed_price_move / pip_size
+            native_pnl = pips * valueOfOnePip * size
+            account_pnl = native_pnl * FX(native_currency -> account_currency)
+
+        If IG does not provide enough valuation metadata, this method raises
+        IGDemoError instead of fabricating a P&L.
+        """
+        epic = str(position.get("epic") or "").strip()
+        direction = str(position.get("direction") or "").upper().strip()
+        entry = self._first_number(position.get("entry_level"))
+        size = self._first_number(position.get("size"))
+        bid = self._first_number(position.get("bid"))
+        offer = self._first_number(position.get("offer"))
+
+        if direction not in {"BUY", "SELL"}:
+            raise IGDemoError("Position direction is not BUY/SELL")
+        if not epic or not entry or entry <= 0 or not size or size <= 0:
+            raise IGDemoError("Position is missing EPIC/entry/size")
+        if direction == "BUY":
+            if bid is None:
+                raise IGDemoError("BUY position is missing current bid")
+            current = bid
+            signed_move = current - entry
+        else:
+            if offer is None:
+                raise IGDemoError("SELL position is missing current offer")
+            current = offer
+            signed_move = entry - current
+
+        details = self._pnl_market_details(epic)
+        instrument = details.get("instrument") or {}
+        snapshot = details.get("snapshot") or {}
+
+        scaling_factor = self._first_number(
+            snapshot.get("scalingFactor")
+        )
+        value_one_pip = self._first_number(
+            instrument.get("valueOfOnePip")
+        )
+
+        if not scaling_factor or scaling_factor <= 0:
+            raise IGDemoError(
+                f"IG market {epic} has no usable scalingFactor"
+            )
+        if value_one_pip is None or value_one_pip <= 0:
+            raise IGDemoError(
+                f"IG market {epic} has no usable valueOfOnePip"
+            )
+
+        pip_size = 1.0 / scaling_factor
+        pips = signed_move / pip_size
+        native_pnl = pips * value_one_pip * size
+
+        settlement_currency = str(
+            position.get("currency")
+            or position.get("currencyCode")
+            or ""
+        ).upper().strip()
+
+        if not settlement_currency:
+            currencies = instrument.get("currencies") or []
+            default_row = next(
+                (
+                    row
+                    for row in currencies
+                    if isinstance(row, dict)
+                    and row.get("isDefault") is True
+                ),
+                None,
+            )
+            if default_row is None and currencies:
+                default_row = (
+                    currencies[0]
+                    if isinstance(currencies[0], dict)
+                    else None
+                )
+            if default_row:
+                settlement_currency = str(
+                    default_row.get("code") or ""
+                ).upper().strip()
+
+        account_ccy = str(account_currency or "").upper().strip()
+        if not account_ccy:
+            raise IGDemoError("Account currency is unavailable")
+
+        conversion = self._fx_conversion_factor(
+            settlement_currency or account_ccy,
+            account_ccy,
+        )
+        account_pnl = native_pnl * conversion
+
+        return {
+            "deal_id": position.get("deal_id"),
+            "epic": epic,
+            "direction": direction,
+            "entry_level": entry,
+            "current_level": current,
+            "size": size,
+            "scaling_factor": scaling_factor,
+            "pip_size": pip_size,
+            "value_of_one_pip": value_one_pip,
+            "signed_move": signed_move,
+            "pips": pips,
+            "native_currency": settlement_currency or account_ccy,
+            "native_pnl": native_pnl,
+            "conversion_to_account": conversion,
+            "account_currency": account_ccy,
+            "account_pnl": account_pnl,
+            "valuation_source": "IG_MARKET_METADATA_AND_LIVE_QUOTE",
+        }
+
+    def estimate_positions_pnl(
+        self,
+        positions: list[Dict[str, Any]],
+        *,
+        account_currency: str,
+    ) -> Dict[str, Any]:
+        rows = [
+            self.estimate_open_position_pnl(
+                row,
+                account_currency=account_currency,
+            )
+            for row in positions
+        ]
+        return {
+            "account_currency": str(account_currency or "").upper(),
+            "positions": rows,
+            "total_pnl": sum(
+                float(row.get("account_pnl") or 0.0)
+                for row in rows
+            ),
+            "valuation_source": "ISOLATED_JSCMP_MARK_TO_MARKET",
         }
 
     def historical_prices(
