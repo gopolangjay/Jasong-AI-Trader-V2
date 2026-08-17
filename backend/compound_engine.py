@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.6"
+    VERSION = "6.8.7"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -895,11 +895,11 @@ class EliteCompoundEngine:
             elite_only_reasons: List[str] = []
             if quality not in {"A+", "A"}:
                 elite_only_reasons.append(
-                    f"Quality {quality or '-'} is not A/A+"
+                    f"Quality {quality or '-'} below Elite A/A+ evidence standard"
                 )
             if deep not in allowed_deep:
                 elite_only_reasons.append(
-                    f"Deep status {deep or '-'} not elite-eligible"
+                    f"Deep status {deep or '-'} below Elite evidence standard"
                 )
 
             confidence_pass = (
@@ -989,6 +989,12 @@ class EliteCompoundEngine:
             execution_reasons = list(dict.fromkeys(confidence_reasons))
             row["rejection_reasons"] = execution_reasons
             row["elite_reasons"] = list(dict.fromkeys(elite_only_reasons))
+            row["elite_evidence_notes"] = [
+                note
+                .replace("not elite-eligible", "below Elite evidence standard")
+                .replace("is not A/A+", "below Elite A/A+ evidence standard")
+                for note in row["elite_reasons"]
+            ]
             row["confidence_qualified"] = bool(confidence_pass)
             row["execution_eligible"] = bool(confidence_pass)
             row["required_fast_score"] = round(required_fast, 2)
@@ -2262,6 +2268,10 @@ class EliteCompoundEngine:
                 "SERVER_FRESH_SIGNAL": self.fast_score_min,
                 "GLOBAL_MULTI_MARKET": self.global_fast_score_min,
             },
+            "execution_policy": "CONFIDENCE_FIRST",
+            "elite_required_for_execution": False,
+            "quality_required_for_execution": False,
+            "deep_required_for_execution": False,
             "quality_tiers": ["A+", "A"],
             "learning_floor": {
                 "model_ai_min_confidence": self.learning_ai_min_confidence,
