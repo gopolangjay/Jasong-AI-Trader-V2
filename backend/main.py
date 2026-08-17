@@ -7054,6 +7054,14 @@ COMPOUND_ENGINE = EliteCompoundEngine(
 )
 COMPOUND_ENGINE.start_thread()
 
+# V6.8.8: unify all genuine IG DEMO evidence.
+# Compound remains execution owner; IGDemoMirror only records JSCMP outcomes
+# into the rolling 10-trade phase ledger.
+IG_DEMO_MIRROR.set_compound_source(
+    lambda: COMPOUND_ENGINE.status()
+)
+
+
 
 @app.get("/compound/status")
 def compound_status():
