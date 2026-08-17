@@ -36,6 +36,9 @@ class IGDemoMirror:
     ) -> None:
         self.broker = broker
         self.trade_source = trade_source
+        # Optional broker-backed Compound evidence source.
+        # Set after CompoundEngine initialisation to avoid circular startup.
+        self.compound_source = None
 
         self.enabled = self._bool_env(
             "IG_DEMO_AUTOTRADE",
@@ -70,6 +73,14 @@ class IGDemoMirror:
             8,
             minimum=1,
             maximum=20,
+        )
+        # Do not infer an external broker close from a single
+        # missing /positions snapshot. Require consecutive misses.
+        self.external_close_confirm_misses = self._int_env(
+            "IG_DEMO_EXTERNAL_CLOSE_CONFIRM_MISSES",
+            3,
+            minimum=2,
+            maximum=10,
         )
         self.default_hold_seconds = self._int_env(
             "IG_DEMO_DEFAULT_HOLD_SECONDS",
@@ -186,6 +197,208 @@ class IGDemoMirror:
             self._state["last_error"] = (
                 f"state persist: {exc}"
             )
+
+    def set_compound_source(self, source) -> None:
+        """Attach the Compound status provider for unified IG evidence."""
+        with self._lock:
+            self.compound_source = source
+
+    @staticmethod
+    def _compound_position_result(position: Dict[str, Any]) -> Optional[str]:
+        """Grade a completed Compound position from broker entry/exit levels."""
+        try:
+            entry = float(
+                position.get("entry_level")
+                or position.get("broker_entry_level")
+                or 0.0
+            )
+        except Exception:
+            entry = 0.0
+
+        close_result = position.get("close_result") or {}
+        try:
+            exit_level = float(
+                close_result.get("level")
+                or position.get("broker_exit_level")
+                or 0.0
+            )
+        except Exception:
+            exit_level = 0.0
+
+        direction = str(position.get("direction") or "").upper().strip()
+        if entry <= 0 or exit_level <= 0 or direction not in {"BUY", "SELL"}:
+            return None
+
+        movement = (
+            exit_level - entry
+            if direction == "BUY"
+            else entry - exit_level
+        )
+        if movement > 0:
+            return "WIN"
+        if movement < 0:
+            return "LOSS"
+        return None
+
+    def _sync_compound_evidence(self) -> None:
+        """Import genuine JSCMP broker trades into the rolling phase ledger.
+
+        Compound remains the execution owner. The mirror observes only:
+        it MUST NOT open, close, resize or otherwise control JSCMP positions.
+        """
+        source = self.compound_source
+        if source is None:
+            return
+
+        try:
+            payload = source() or {}
+        except Exception as exc:
+            with self._lock:
+                self._state["compound_evidence_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        current_phase = int(
+            self._state.get("current_phase_id") or 1
+        )
+        now = time.time()
+
+        rows: list[tuple[Dict[str, Any], bool, Optional[Dict[str, Any]]]] = []
+
+        current_cycle = payload.get("current_cycle")
+        if isinstance(current_cycle, dict):
+            for position in current_cycle.get("positions") or []:
+                if isinstance(position, dict):
+                    rows.append((position, False, current_cycle))
+
+        for cycle in payload.get("recent_cycles") or []:
+            if not isinstance(cycle, dict):
+                continue
+            if str(cycle.get("status") or "").upper() not in {
+                "COMPLETED", "INVALID"
+            }:
+                continue
+            for position in cycle.get("positions") or []:
+                if isinstance(position, dict):
+                    rows.append((position, True, cycle))
+
+        with self._lock:
+            mirrors = self._mirrors()
+
+            for position, completed, cycle in rows:
+                deal_id = str(
+                    position.get("ig_deal_id")
+                    or position.get("deal_id")
+                    or ""
+                ).strip()
+                deal_reference = str(
+                    position.get("ig_deal_reference")
+                    or (
+                        (position.get("open_result") or {})
+                        .get("dealReference")
+                    )
+                    or ""
+                ).strip()
+
+                # Only genuine accepted Compound broker trades count.
+                if not deal_id or not deal_reference.startswith("JSCMP_"):
+                    continue
+
+                key, mirror = self._mirror_by_deal_id(deal_id)
+                if mirror is None:
+                    key = f"COMPOUND_{deal_id}"
+                    mirror = {
+                        "trade_id": key,
+                        "created_at": (
+                            position.get("opened_at")
+                            or (cycle or {}).get("started_at")
+                            or now
+                        ),
+                        "phase_id": current_phase,
+                        "environment": "DEMO",
+                        "live_money_execution": False,
+                        "externally_managed": True,
+                        "evidence_source": "COMPOUND",
+                        "entry_class": "COMPOUND",
+                        "open_attempts": 0,
+                        "close_attempts": 0,
+                    }
+                    mirrors[key] = mirror
+
+                mirror.update({
+                    "symbol": (
+                        position.get("symbol")
+                        or position.get("market")
+                    ),
+                    "market": (
+                        position.get("market")
+                        or position.get("symbol")
+                    ),
+                    "direction": position.get("direction"),
+                    "ig_deal_id": deal_id,
+                    "ig_deal_reference": deal_reference,
+                    "ig_epic": position.get("ig_epic"),
+                    "ig_size": (
+                        position.get("ig_size")
+                        or position.get("broker_size_now")
+                    ),
+                    "broker_entry_level": position.get("entry_level"),
+                    "quality_tier": position.get("quality_tier"),
+                    "deep_status": position.get("deep_status"),
+                    "elite_state": position.get("elite_state"),
+                    "elite_score": position.get("elite_score"),
+                    "trade_class": (
+                        position.get("trade_class")
+                        or (
+                            "CONFIDENCE"
+                            if position.get("confidence_qualified")
+                            else "COMPOUND"
+                        )
+                    ),
+                    "model_ai_confidence": position.get("model_ai_confidence"),
+                    "quant_confidence": position.get("quant_confidence"),
+                    "smart_fast_score": position.get("smart_fast_score"),
+                    "execution_basis": position.get("execution_basis"),
+                    "confidence_qualified": position.get("confidence_qualified"),
+                    "externally_managed": True,
+                    "evidence_source": "COMPOUND",
+                    "last_seen_on_compound_at": now,
+                })
+
+                if completed:
+                    result = self._compound_position_result(position)
+                    mirror["broker_status"] = "CLOSED"
+                    mirror["closed_at"] = (
+                        (cycle or {}).get("completed_at")
+                        or mirror.get("closed_at")
+                        or now
+                    )
+                    mirror["close_verified"] = True
+                    mirror["remaining_size"] = 0.0
+                    if result in {"WIN", "LOSS"}:
+                        mirror["broker_result"] = result
+                        close_result = position.get("close_result") or {}
+                        mirror["broker_exit_level"] = close_result.get("level")
+                else:
+                    broker_status = str(
+                        position.get("broker_status") or "OPEN"
+                    ).upper()
+                    mirror["broker_status"] = (
+                        "OPEN"
+                        if broker_status in {"OPEN", "TRADEABLE"}
+                        else broker_status
+                    )
+                    mirror["opened_at"] = (
+                        position.get("opened_at")
+                        or mirror.get("opened_at")
+                        or now
+                    )
+
+            self._state["compound_evidence_error"] = None
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
@@ -418,6 +631,19 @@ class IGDemoMirror:
             bucket = [r for r in rows if str(r.get("trade_class") or r.get("entry_class") or "").upper() == cls]
             by_class[cls] = self._stats_for_rows(bucket)
         overall["by_class"] = by_class
+
+        by_source: Dict[str, Any] = {}
+        for source in ("LEARNING_MIRROR", "COMPOUND"):
+            bucket = [
+                r for r in rows
+                if str(
+                    r.get("evidence_source")
+                    or "LEARNING_MIRROR"
+                ).upper() == source
+            ]
+            by_source[source] = self._stats_for_rows(bucket)
+        overall["by_source"] = by_source
+
         overall["phase_id"] = pid
         overall["target"] = self.phase_target
         overall["remaining_to_settle"] = max(0, self.phase_target - overall["settled"])
@@ -973,6 +1199,11 @@ class IGDemoMirror:
                     "broker_status": "OPEN",
                     "last_seen_on_ig_at": now,
                     "last_error": None,
+                    "missing_on_ig_count": 0,
+                    "first_missing_on_ig_at": None,
+                    "last_missing_on_ig_at": None,
+                    "broker_presence_state": "CONFIRMED_OPEN",
+                    "external_close_confirmation": None,
                 })
                 self._update_mirror_excursion(
                     mirror,
@@ -1309,7 +1540,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.6-IG-DEMO-ROLLING-PHASES",
+                "version": "6.8.9-BROKER-CLOSE-VERIFICATION",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1324,6 +1555,14 @@ class IGDemoMirror:
                 "execution_required": self.execution_required(),
                 "current_phase_performance": self._phase_stats(),
                 "phase_history": self.phase_history(),
+                "unified_evidence": True,
+                "evidence_sources": [
+                    "LEARNING_MIRROR",
+                    "COMPOUND",
+                ],
+                "compound_evidence_error": self._state.get(
+                    "compound_evidence_error"
+                ),
                 "lifetime_performance": self._stats_for_rows([
                     item
                     for item in self._mirrors().values()
@@ -1373,6 +1612,16 @@ class IGDemoMirror:
                 "poll_seconds": self.poll_seconds,
                 "retry_seconds": self.retry_seconds,
                 "max_open_retries": self.max_open_retries,
+                "external_close_confirm_misses":
+                    self.external_close_confirm_misses,
+                "positions_pending_presence_confirmation": sum(
+                    1
+                    for item in self._mirrors().values()
+                    if str(
+                        item.get("broker_status") or ""
+                    ).upper()
+                    == "MISSING_PENDING_CONFIRMATION"
+                ),
                 "default_hold_seconds":
                     self.default_hold_seconds,
                 "last_sync_at": self._state.get("last_sync_at"),
@@ -1781,6 +2030,7 @@ class IGDemoMirror:
                             in {
                                 "OPEN",
                                 "CLOSE_PENDING",
+                                "MISSING_PENDING_CONFIRMATION",
                             }
                             and deal_id
                             not in current_ids
@@ -1790,32 +2040,87 @@ class IGDemoMirror:
                                     "close_requested_at"
                                 )
                             )
-                            mirror[
-                                "broker_status"
-                            ] = (
-                                "CLOSED"
-                                if initiated_close
-                                else "CLOSED_EXTERNALLY"
-                            )
-                            mirror[
-                                "closed_at"
-                            ] = (
-                                mirror.get(
-                                    "closed_at"
+
+                            if initiated_close:
+                                # Jasong itself requested the close. Absence
+                                # from /positions is therefore expected.
+                                mirror["broker_status"] = "CLOSED"
+                                mirror["closed_at"] = (
+                                    mirror.get("closed_at") or now
                                 )
-                                or now
-                            )
-                            mirror[
-                                "close_verified"
-                            ] = True
-                            mirror[
-                                "remaining_size"
-                            ] = 0.0
-                            mirror[
-                                "externally_closed"
-                            ] = (
-                                not initiated_close
-                            )
+                                mirror["close_verified"] = True
+                                mirror["remaining_size"] = 0.0
+                                mirror["externally_closed"] = False
+                                mirror["broker_presence_state"] = (
+                                    "CLOSE_CONFIRMED_AFTER_REQUEST"
+                                )
+                                mirror["missing_on_ig_count"] = 0
+                                mirror["external_close_confirmation"] = {
+                                    "confirmed": True,
+                                    "method": (
+                                        "OUR_CLOSE_REQUEST_PLUS_POSITION_ABSENCE"
+                                    ),
+                                    "confirmed_at": now,
+                                }
+                            else:
+                                # V6.8.9: a single missing broker snapshot is
+                                # only a presence warning, NOT proof of closure.
+                                miss_count = int(
+                                    mirror.get("missing_on_ig_count") or 0
+                                ) + 1
+                                mirror["missing_on_ig_count"] = miss_count
+                                mirror["first_missing_on_ig_at"] = (
+                                    mirror.get("first_missing_on_ig_at")
+                                    or now
+                                )
+                                mirror["last_missing_on_ig_at"] = now
+                                mirror["broker_presence_state"] = (
+                                    "VERIFYING_EXTERNAL_CLOSE"
+                                )
+
+                                if (
+                                    miss_count
+                                    < self.external_close_confirm_misses
+                                ):
+                                    mirror["broker_status"] = (
+                                        "MISSING_PENDING_CONFIRMATION"
+                                    )
+                                    mirror["close_verified"] = False
+                                    mirror["externally_closed"] = False
+                                    mirror["external_close_confirmation"] = {
+                                        "confirmed": False,
+                                        "method": (
+                                            "CONSECUTIVE_POSITION_MISSES"
+                                        ),
+                                        "miss_count": miss_count,
+                                        "required_misses": (
+                                            self.external_close_confirm_misses
+                                        ),
+                                    }
+                                else:
+                                    mirror["broker_status"] = (
+                                        "CLOSED_EXTERNALLY"
+                                    )
+                                    mirror["closed_at"] = (
+                                        mirror.get("closed_at") or now
+                                    )
+                                    mirror["close_verified"] = True
+                                    mirror["remaining_size"] = 0.0
+                                    mirror["externally_closed"] = True
+                                    mirror["broker_presence_state"] = (
+                                        "EXTERNAL_CLOSE_CONFIRMED"
+                                    )
+                                    mirror["external_close_confirmation"] = {
+                                        "confirmed": True,
+                                        "method": (
+                                            "CONSECUTIVE_POSITION_MISSES"
+                                        ),
+                                        "miss_count": miss_count,
+                                        "required_misses": (
+                                            self.external_close_confirm_misses
+                                        ),
+                                        "confirmed_at": now,
+                                    }
 
                     self._state[
                         "broker_positions"
@@ -1834,6 +2139,11 @@ class IGDemoMirror:
                         f"{type(exc).__name__}: {exc}"
                     )
 
+            # Import Compound's genuine JSCMP trades into the same
+            # phase evidence ledger before evaluating new learning entries.
+            self._sync_compound_evidence()
+            self._maybe_roll_phase()
+
             trade_payload = self.trade_source()
             trades = self._trade_rows(
                 trade_payload
@@ -1850,10 +2160,22 @@ class IGDemoMirror:
             for trade_id, mirror in list(
                 self._mirrors().items()
             ):
-                if str(
+                mirror_status = str(
                     mirror.get("broker_status")
                     or ""
-                ).upper() != "OPEN":
+                ).upper()
+
+                if mirror_status == "MISSING_PENDING_CONFIRMATION":
+                    # Do not send a broker close while we are still verifying
+                    # whether the deal is genuinely absent.
+                    continue
+
+                if mirror_status != "OPEN":
+                    continue
+
+                # Compound positions are evidence-only here. CompoundEngine
+                # remains the sole execution/exit owner.
+                if bool(mirror.get("externally_managed")):
                     continue
 
                 trade = by_id.get(trade_id)
