@@ -179,7 +179,7 @@ class IGDemoBroker:
             "Content-Type": "application/json",
             "Accept": "application/json; charset=UTF-8",
             "Version": str(version),
-            "User-Agent": "Jasong-AI-Trader/6.7.2a-MARKET-AWARE-CLOSE",
+            "User-Agent": "Jasong-AI-Trader/6.7.3-GLOBAL-MULTI-MARKET",
         }
 
         if authenticated:
@@ -673,6 +673,254 @@ class IGDemoBroker:
             f"/markets/{urlparse.quote(epic, safe='')}",
             version=4,
         )
+
+
+    def search_markets(
+        self,
+        search_term: str,
+    ) -> Dict[str, Any]:
+        """Search IG DEMO markets using IG's own market search endpoint."""
+        term = str(search_term or "").strip()
+        if not term:
+            raise IGDemoError("IG DEMO market search term is empty")
+        return self._request(
+            "GET",
+            "/markets",
+            version=1,
+            query={"searchTerm": term},
+        )
+
+    @staticmethod
+    def _letters_words(value: Any) -> tuple[str, set[str]]:
+        text = str(value or "").upper()
+        letters = "".join(ch for ch in text if ch.isalnum())
+        words = {
+            "".join(ch for ch in word if ch.isalnum())
+            for word in text.replace("/", " ").replace("-", " ").split()
+        }
+        words.discard("")
+        return letters, words
+
+    def resolve_global_market(
+        self,
+        *,
+        search_terms: list[str],
+        expected_types: Optional[list[str]] = None,
+        name_tokens: Optional[list[str]] = None,
+        require_tradeable: bool = True,
+        cache_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve a non-FX IG market safely from one or more search terms.
+
+        Unlike resolve_market(), this method is not limited to six-letter FX
+        pairs.  It still refuses obviously unrelated fuzzy search hits by
+        scoring the actual instrument name/type returned by /markets/{epic}.
+        """
+        terms = [str(x or "").strip() for x in (search_terms or []) if str(x or "").strip()]
+        if not terms:
+            raise IGDemoError("No IG DEMO global market search terms supplied")
+
+        allowed_types = {str(x or "").upper().strip() for x in (expected_types or []) if str(x or "").strip()}
+        tokens = [str(x or "").upper().strip() for x in (name_tokens or []) if str(x or "").strip()]
+        ck = str(cache_key or "|".join(terms)).upper().strip()
+        cache_id = f"GLOBAL:{ck}:{int(require_tradeable)}"
+        now = time.time()
+        cached = self._market_cache.get(cache_id)
+        cached_at = self._market_cache_at.get(cache_id, 0.0)
+        if cached and now - cached_at < self._market_cache_ttl:
+            return dict(cached)
+
+        rows: list[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for term in terms[:3]:
+            response = self.search_markets(term)
+            for raw in response.get("markets", []) or []:
+                if not isinstance(raw, dict):
+                    continue
+                epic = str(raw.get("epic") or "").strip()
+                if not epic or epic in seen:
+                    continue
+                seen.add(epic)
+                rows.append(dict(raw))
+            if rows:
+                # Search is account-rate-limited.  Prefer one good query and
+                # only consume fallbacks when the first query found nothing.
+                break
+
+        if not rows:
+            raise IGDemoError(f"IG DEMO has no market matching {terms[0]}")
+
+        def row_score(row: Dict[str, Any]) -> tuple:
+            name = str(row.get("instrumentName") or row.get("name") or "").upper()
+            market_type = str(row.get("instrumentType") or row.get("type") or "").upper()
+            status = str(row.get("marketStatus") or "").upper()
+            expiry = str(row.get("expiry") or "").upper()
+            name_letters, name_words = self._letters_words(name)
+            token_hits = 0
+            for token in tokens:
+                token_letters = "".join(ch for ch in token if ch.isalnum())
+                if token_letters and (token_letters in name_letters or token_letters in name_words):
+                    token_hits += 1
+            type_ok = (not allowed_types) or market_type in allowed_types
+            banned = any(x in market_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE"))
+            cash_like = expiry in {"", "-", "DFB"} or "CASH" in name
+            return (
+                token_hits,
+                int(type_ok),
+                int(status == "TRADEABLE"),
+                int(cash_like),
+                -int(banned),
+            )
+
+        rows.sort(key=row_score, reverse=True)
+
+        for candidate in rows[:12]:
+            epic = str(candidate.get("epic") or "").strip()
+            if not epic:
+                continue
+            try:
+                details = self.market_details(epic)
+            except Exception:
+                continue
+            instrument = details.get("instrument") or {}
+            snapshot = details.get("snapshot") or {}
+            status = str(snapshot.get("marketStatus") or candidate.get("marketStatus") or "").upper()
+            instrument_type = str(instrument.get("type") or candidate.get("instrumentType") or "").upper()
+            if allowed_types and instrument_type not in allowed_types:
+                continue
+            if any(x in instrument_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
+                continue
+            if require_tradeable and status != "TRADEABLE":
+                continue
+
+            instrument_name = str(instrument.get("name") or candidate.get("instrumentName") or candidate.get("name") or "")
+            name_letters, _ = self._letters_words(instrument_name)
+            # At least one explicit token must match when tokens were supplied.
+            if tokens:
+                matched = False
+                for token in tokens:
+                    token_letters = "".join(ch for ch in token if ch.isalnum())
+                    if token_letters and token_letters in name_letters:
+                        matched = True
+                        break
+                if not matched:
+                    continue
+
+            expiry = instrument.get("expiry") or candidate.get("expiry") or "-"
+            resolved = {
+                "symbol": ck,
+                "epic": epic,
+                "expiry": expiry,
+                "name": instrument_name,
+                "instrument_type": instrument_type,
+                "market_status": status,
+                "details": details,
+                "min_deal_size": self._min_deal_size(details),
+                "streaming_prices_available": instrument.get("streamingPricesAvailable"),
+                "unit": instrument.get("unit"),
+                "value_of_one_pip": instrument.get("valueOfOnePip"),
+            }
+            self._market_cache[cache_id] = resolved
+            self._market_cache_at[cache_id] = now
+            return dict(resolved)
+
+        raise IGDemoError(
+            f"IG DEMO search results for {terms[0]} did not contain a safe matching instrument"
+        )
+
+    def historical_prices_epic(
+        self,
+        epic: str,
+        *,
+        resolution: str = "MINUTE_15",
+        num_points: int = 160,
+    ) -> Dict[str, Any]:
+        clean_epic = str(epic or "").strip()
+        if not clean_epic:
+            raise IGDemoError("IG DEMO historical price EPIC is empty")
+        points = max(1, min(int(num_points), 500))
+        response = self._request(
+            "GET",
+            f"/prices/{urlparse.quote(clean_epic, safe='')}/{urlparse.quote(str(resolution), safe='')}/{points}",
+            version=2,
+        )
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "epic": clean_epic,
+            "resolution": str(resolution),
+            "requested_points": points,
+            "prices": response.get("prices") or [],
+            "metadata": response.get("metadata") or {},
+            "live_money_execution": False,
+        }
+
+    def open_epic_position(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        size: Optional[float] = None,
+        deal_reference: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Open an IG DEMO position on an already-resolved EPIC."""
+        direction = str(direction or "").upper().strip()
+        if direction not in {"BUY", "SELL"}:
+            raise IGDemoError("Direction must be BUY or SELL")
+        clean_epic = str(epic or "").strip()
+        if not clean_epic:
+            raise IGDemoError("IG DEMO EPIC is empty")
+
+        details = self.market_details(clean_epic)
+        instrument = details.get("instrument") or {}
+        snapshot = details.get("snapshot") or {}
+        market_status = str(snapshot.get("marketStatus") or "").upper()
+        if market_status != "TRADEABLE":
+            raise IGDemoError(f"IG DEMO market is not tradeable: {market_status or 'UNKNOWN'}")
+
+        instrument_type = str(instrument.get("type") or "").upper()
+        if any(x in instrument_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
+            raise IGDemoError(f"Unsupported IG DEMO instrument type for autonomous execution: {instrument_type}")
+
+        requested_size = self.default_size if size is None else float(size)
+        min_size = self._min_deal_size(details)
+        final_size = max(requested_size, min_size)
+        payload: Dict[str, Any] = {
+            "currencyCode": self._default_currency(instrument),
+            "dealReference": (deal_reference or f"JSCMP_{uuid.uuid4().hex[:20]}")[:30],
+            "direction": direction,
+            "epic": clean_epic,
+            "expiry": str(instrument.get("expiry") or "-"),
+            "forceOpen": True,
+            "guaranteedStop": False,
+            "orderType": "MARKET",
+            "size": round(final_size, 12),
+        }
+        acknowledgement = self._request("POST", "/positions/otc", version=2, payload=payload)
+        ref = str(acknowledgement.get("dealReference") or payload["dealReference"])
+        confirmation = self.confirm(ref)
+        if str(confirmation.get("dealStatus") or "").upper() == "REJECTED":
+            raise IGDemoError(
+                "IG DEMO rejected order: " + str(confirmation.get("reason") or confirmation)
+            )
+        return {
+            "broker": "IG",
+            "environment": "DEMO",
+            "symbol": str(instrument.get("name") or clean_epic),
+            "epic": clean_epic,
+            "instrument_type": instrument_type,
+            "market_status": market_status,
+            "direction": direction,
+            "requestedSize": requested_size,
+            "minimumSize": min_size,
+            "size": final_size,
+            "dealReference": ref,
+            "dealId": confirmation.get("dealId"),
+            "level": confirmation.get("level"),
+            "dealStatus": confirmation.get("dealStatus"),
+            "reason": confirmation.get("reason"),
+            "live_money_execution": False,
+        }
 
     def historical_prices(
         self,
