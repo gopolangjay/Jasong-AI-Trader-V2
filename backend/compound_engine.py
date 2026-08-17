@@ -46,8 +46,14 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.12"
+    VERSION = "6.8.13"
     DEAL_PREFIX = "JSCMP_"
+    LEARNING_PREFIXES = (
+        "JASONG_",
+        "JSBND_",
+        "JSLRN_",
+        "JSELT_",
+    )
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
     def __init__(
@@ -431,7 +437,17 @@ class EliteCompoundEngine:
                     "bid": market.get("bid"),
                     "offer": market.get("offer"),
                     "market_status": market.get("marketStatus"),
+                    "currency": position.get("currency"),
                     "is_compound": ref.startswith(self.DEAL_PREFIX),
+                    "is_learning": ref.startswith(self.LEARNING_PREFIXES),
+                    "is_jasong_owned": (
+                        ref.startswith(self.DEAL_PREFIX)
+                        or ref.startswith(self.LEARNING_PREFIXES)
+                    ),
+                    "is_external_manual": not (
+                        ref.startswith(self.DEAL_PREFIX)
+                        or ref.startswith(self.LEARNING_PREFIXES)
+                    ),
                     "is_legacy_jasong": ref.startswith("JASONG_"),
                 }
             )
@@ -447,12 +463,165 @@ class EliteCompoundEngine:
         return account, positions
 
     @staticmethod
-    def _foreign_positions(positions: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [dict(row) for row in positions if not bool(row.get("is_compound"))]
+    def _external_positions(
+        positions: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            dict(row)
+            for row in positions
+            if bool(row.get("is_external_manual"))
+        ]
 
     @staticmethod
-    def _compound_positions(positions: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [dict(row) for row in positions if bool(row.get("is_compound"))]
+    def _learning_positions(
+        positions: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            dict(row)
+            for row in positions
+            if bool(row.get("is_learning"))
+        ]
+
+    @staticmethod
+    def _compound_positions(
+        positions: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return [
+            dict(row)
+            for row in positions
+            if bool(row.get("is_compound"))
+        ]
+
+    # Backward-compatible name. In V6.8.13 "foreign" means genuinely external,
+    # not another Jasong-owned Learning position.
+    @classmethod
+    def _foreign_positions(
+        cls,
+        positions: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        return cls._external_positions(positions)
+
+    @staticmethod
+    def _same_broker_market(
+        candidate: Dict[str, Any],
+        position: Dict[str, Any],
+    ) -> bool:
+        candidate_epic = str(
+            candidate.get("ig_epic") or ""
+        ).upper().strip()
+        position_epic = str(
+            position.get("epic") or ""
+        ).upper().strip()
+        if candidate_epic and position_epic:
+            return candidate_epic == position_epic
+
+        candidate_symbol = "".join(
+            ch
+            for ch in str(
+                candidate.get("symbol")
+                or candidate.get("market")
+                or ""
+            ).upper()
+            if ch.isalnum()
+        )
+        position_symbol = "".join(
+            ch
+            for ch in str(
+                position.get("symbol")
+                or ""
+            ).upper()
+            if ch.isalnum()
+        )
+        return bool(
+            candidate_symbol
+            and position_symbol
+            and (
+                candidate_symbol in position_symbol
+                or position_symbol in candidate_symbol
+            )
+        )
+
+    def _remove_learning_duplicate_exposure(
+        self,
+        selected: List[Dict[str, Any]],
+        learning_positions: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Do not let Compound duplicate a market already owned by Learning."""
+        clean: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+
+        for candidate in selected:
+            blocker = next(
+                (
+                    position
+                    for position in learning_positions
+                    if self._same_broker_market(
+                        candidate,
+                        position,
+                    )
+                ),
+                None,
+            )
+            if blocker is None:
+                clean.append(candidate)
+                continue
+
+            row = dict(candidate)
+            row["selected"] = False
+            row["execution_eligible"] = False
+            reasons = list(
+                row.get("rejection_reasons") or []
+            )
+            reasons.append(
+                "Existing Jasong Learning IG DEMO exposure on the same market"
+            )
+            row["rejection_reasons"] = list(
+                dict.fromkeys(reasons)
+            )
+            row["duplicate_broker_deal_id"] = blocker.get(
+                "deal_id"
+            )
+            row["duplicate_broker_reference"] = blocker.get(
+                "deal_reference"
+            )
+            row["duplicate_exposure_source"] = "LEARNING_MIRROR"
+            skipped.append(row)
+
+        return clean, skipped
+
+    def _compound_running_pnl(
+        self,
+        account: Dict[str, Any],
+        compound_positions: List[Dict[str, Any]],
+        learning_positions: List[Dict[str, Any]],
+    ) -> tuple[float, Dict[str, Any]]:
+        """Return JSCMP-only running P&L.
+
+        If no Learning position is open, the IG account-wide P&L is clean and
+        remains the authoritative value. If Learning shares the account, use
+        isolated JSCMP mark-to-market from broker metadata.
+        """
+        if not learning_positions:
+            value = self._safe_float(
+                account.get("profit_loss"),
+                0.0,
+            )
+            return value, {
+                "mode": "IG_ACCOUNT_PNL_CLEAN",
+                "learning_positions": 0,
+                "total_pnl": value,
+            }
+
+        isolated = self.broker.estimate_positions_pnl(
+            compound_positions,
+            account_currency=str(
+                account.get("currency") or ""
+            ),
+        )
+        return self._safe_float(
+            isolated.get("total_pnl"),
+            0.0,
+        ), isolated
 
     @classmethod
     def _signed_move_bps(
@@ -1230,8 +1399,57 @@ class EliteCompoundEngine:
         # legacy/manual broker positions temporarily block execution.
         selected = self._rank_candidates(capital)
 
-        foreign = self._foreign_positions(positions)
-        if foreign:
+        external = self._external_positions(positions)
+        learning_positions = self._learning_positions(positions)
+
+        # Learning positions are Jasong-owned and are allowed to coexist with
+        # Compound. Only genuinely external/manual broker positions block.
+        selected, duplicate_skips = (
+            self._remove_learning_duplicate_exposure(
+                selected,
+                learning_positions,
+            )
+        )
+
+        if duplicate_skips:
+            with self._lock:
+                ranking = [
+                    dict(row)
+                    for row in (
+                        self._state.get(
+                            "last_candidate_ranking"
+                        )
+                        or []
+                    )
+                ]
+                by_key = {
+                    str(
+                        row.get("key")
+                        or row.get("symbol")
+                        or row.get("market")
+                        or ""
+                    ): row
+                    for row in duplicate_skips
+                }
+                for index, row in enumerate(ranking):
+                    key = str(
+                        row.get("key")
+                        or row.get("symbol")
+                        or row.get("market")
+                        or ""
+                    )
+                    if key in by_key:
+                        ranking[index] = dict(
+                            by_key[key]
+                        )
+                self._state[
+                    "last_candidate_ranking"
+                ] = ranking
+                self._state[
+                    "last_duplicate_learning_exposure"
+                ] = duplicate_skips
+
+        if external:
             blocker_names = [
                 str(
                     row.get("symbol")
@@ -1239,13 +1457,13 @@ class EliteCompoundEngine:
                     or row.get("deal_reference")
                     or "IG position"
                 )
-                for row in foreign
+                for row in external
             ]
             with self._lock:
                 self._state["status"] = "WAITING_FOR_CLEAN_BROKER"
                 self._state["last_foreign_blockers"] = [
                     dict(row)
-                    for row in foreign
+                    for row in external
                 ]
                 self._state["pending_elite_candidates"] = [
                     dict(row)
@@ -1257,7 +1475,7 @@ class EliteCompoundEngine:
                     else "BROKER_BLOCKED_NO_CONFIDENCE"
                 )
                 self._state["paused_reason"] = (
-                    f"{len(foreign)} legacy/manual IG DEMO position(s) block "
+                    f"{len(external)} external/manual IG DEMO position(s) block "
                     "Compound execution because IG account P&L is account-wide. "
                     + (
                         f"{len(selected)} confidence-qualified setup(s) are ready and will be "
@@ -1277,9 +1495,25 @@ class EliteCompoundEngine:
 
         if not selected:
             with self._lock:
-                self._state["status"] = "WAITING_FOR_REQUIRED_CONFIDENCE"
+                self._state["status"] = (
+                    "WAITING_FOR_NON_DUPLICATE_CONFIDENCE"
+                    if duplicate_skips
+                    else "WAITING_FOR_REQUIRED_CONFIDENCE"
+                )
                 self._state["paused_reason"] = (
+                    (
+                        "Confidence-qualified setup(s) exist, but each currently "
+                        "duplicates a Jasong Learning IG DEMO market exposure. "
+                        "Compound will revalidate automatically when a distinct "
+                        "market becomes available. "
+                    )
+                    if duplicate_skips
+                    else
                     "No market currently passes all required confidence and broker-safety gates. "
+                ) + (
+                    ""
+                    if duplicate_skips
+                    else
                     "Unified Live Intelligence remains connected and will wake "
                     "the Compound engine when a new directional setup arrives."
                 )
@@ -1312,6 +1546,18 @@ class EliteCompoundEngine:
                 "harvest_pct": self.harvest_pct,
                 "broker_balance_before": account_balance,
                 "broker_currency": account.get("currency"),
+                "learning_positions_at_start": [
+                    dict(row)
+                    for row in learning_positions
+                ],
+                "learning_positions_at_start_count": len(
+                    learning_positions
+                ),
+                "pnl_isolation_mode": (
+                    "ISOLATED_JSCMP_MARK_TO_MARKET"
+                    if learning_positions
+                    else "IG_ACCOUNT_PNL_CLEAN"
+                ),
                 "positions": [],
                 "selected_candidates": [dict(row) for row in selected],
                 "running_pnl": 0.0,
@@ -1955,17 +2201,21 @@ class EliteCompoundEngine:
         if not cycle:
             return self.status()
 
-        foreign = self._foreign_positions(positions)
+        external = self._external_positions(positions)
+        learning_positions = self._learning_positions(positions)
         compound = self._compound_positions(positions)
 
-        if foreign:
-            # Preserve evidence integrity. Account-wide P&L is contaminated by
-            # another broker position, so exit only our positions and do not
-            # compound or harvest this cycle.
+        if external:
+            # Only genuinely external/manual positions are contamination.
+            # Jasong Learning positions are an intentional V6.8.13 dual-track
+            # execution source and must not invalidate Compound.
             self._close_compound_positions(compound)
             return self._finalise_cycle(
-                "BROKER_CONTAMINATION",
-                self._safe_float(account.get("profit_loss"), 0.0),
+                "EXTERNAL_BROKER_CONTAMINATION",
+                self._safe_float(
+                    account.get("profit_loss"),
+                    0.0,
+                ),
                 invalid=True,
             )
 
@@ -1978,7 +2228,47 @@ class EliteCompoundEngine:
                 self._safe_float(account.get("profit_loss"), 0.0),
             )
 
-        running_pnl = self._safe_float(account.get("profit_loss"), 0.0)
+        try:
+            running_pnl, pnl_detail = self._compound_running_pnl(
+                account,
+                compound,
+                learning_positions,
+            )
+        except Exception as exc:
+            # Do not fabricate a Compound P&L. Keep the basket open, retain
+            # broker truth, and expose the valuation fault for immediate
+            # reconciliation instead of triggering a false +50%/-15% exit.
+            cycle["last_pnl_isolation_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            cycle["pnl_isolation_state"] = "ERROR"
+            cycle["learning_broker_positions"] = [
+                dict(row)
+                for row in learning_positions
+            ]
+            cycle["broker_open_positions"] = compound
+            cycle["last_broker_check_at"] = self._now()
+            with self._lock:
+                self._state["current_cycle"] = cycle
+                self._state["status"] = "ACTIVE_PNL_ISOLATION_ERROR"
+                self._state["paused_reason"] = (
+                    "Compound remains open on IG DEMO, but isolated JSCMP P&L "
+                    "could not be valued while Learning shares the account. "
+                    "No synthetic/account-wide close trigger was used."
+                )
+                self._persist()
+            return self.status()
+
+        cycle["pnl_isolation_state"] = "OK"
+        cycle["pnl_isolation_detail"] = pnl_detail
+        cycle["learning_broker_positions"] = [
+            dict(row)
+            for row in learning_positions
+        ]
+        cycle["learning_broker_positions_count"] = len(
+            learning_positions
+        )
+
         target = self._safe_float(cycle.get("target_profit"), 0.0)
         stop = self._safe_float(cycle.get("stop_loss_amount"), 0.0)
 
@@ -2351,6 +2641,11 @@ class EliteCompoundEngine:
             "version": self.VERSION,
             "name": "JASONG ELITE 80/20 COMPOUND",
             "enabled": bool(state.get("enabled")),
+            "execution_mode": "IG_DEMO_ONLY",
+            "direct_ig_demo_execution": True,
+            "paper_execution_enabled": False,
+            "dual_track_execution": True,
+            "learning_coexistence_allowed": True,
             "auto_restart": bool(state.get("auto_restart")),
             "status": state.get("status") or "STOPPED",
             "paused_reason": state.get("paused_reason"),
@@ -2366,7 +2661,10 @@ class EliteCompoundEngine:
             "current_stop_progress_pct": round(stop_progress * 100.0, 2),
             "broker_account": account,
             "compound_broker_positions": self._compound_positions(positions),
-            "foreign_broker_positions": self._foreign_positions(positions),
+            "learning_broker_positions": self._learning_positions(positions),
+            "external_broker_positions": self._external_positions(positions),
+            # Backward-compatible alias; now external/manual only.
+            "foreign_broker_positions": self._external_positions(positions),
             "legacy_execution_paused": bool(state.get("legacy_execution_paused")),
             "pending_elite_candidates": [
                 dict(row)
@@ -2381,8 +2679,20 @@ class EliteCompoundEngine:
                 ]
             ),
             "last_intelligence_signal": (
-                dict(state.get("last_intelligence_signal"))
-                if isinstance(state.get("last_intelligence_signal"), dict)
+                {
+                    key: value
+                    for key, value in dict(
+                        state.get("last_intelligence_signal")
+                    ).items()
+                    if key not in {
+                        "paper_learning",
+                        "paper_only",
+                    }
+                }
+                if isinstance(
+                    state.get("last_intelligence_signal"),
+                    dict,
+                )
                 else None
             ),
             "last_intelligence_at": state.get("last_intelligence_at"),
