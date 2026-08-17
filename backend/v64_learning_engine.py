@@ -22,7 +22,7 @@ class V64LearningTradeEngine:
     path. Broker credentials remain isolated in IGDemoMirror.
     """
 
-    VERSION = "6.8.13"
+    VERSION = "6.8.14"
     NAMESPACE = "v64_learning_engine"
 
     # V6.6 forward-learning entry thresholds.
