@@ -1,1567 +1,1020 @@
 from __future__ import annotations
 
 import json
-from collections import deque
 import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
-from urllib import error as urlerror
-from urllib import parse as urlparse
-from urllib import request as urlrequest
-import math
+from typing import Any, Callable, Dict, List, Optional
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
 
 
-class IGDemoError(RuntimeError):
-    """Safe IG DEMO integration error."""
+class V64LearningTradeEngine:
+    """V6.8 signal-lifecycle engine for broker-forward learning.
 
-
-@dataclass
-class _Session:
-    cst: str
-    x_security_token: str
-    account_id: str
-    client_id: str
-    connected_at: float
-    last_used_at: float
-
-
-class IGDemoBroker:
-    """
-    Strict IG DEMO REST broker.
-
-    Safety design:
-    - Base URL is hard-coded to IG DEMO.
-    - No production/live IG base URL is accepted.
-    - Credentials are read only from environment variables.
-    - Session tokens are kept in memory and are never returned by public status().
-    - Market resolution is cached to conserve IG REST allowances.
+    The engine still creates and times model signal records, but V6.8 treats
+    IG DEMO reconciliation as the source of truth for forward W/L evidence.
+    Counterfactual shadow settlement is no longer part of the primary learning
+    path. Broker credentials remain isolated in IGDemoMirror.
     """
 
-    BASE_URL = "https://demo-api.ig.com/gateway/deal"
+    VERSION = "6.8.0"
+    NAMESPACE = "v64_learning_engine"
 
-    def __init__(self) -> None:
-        self.api_key = os.getenv("IG_DEMO_API_KEY", "").strip()
-        self.identifier = os.getenv("IG_DEMO_IDENTIFIER", "").strip()
-        self.password = os.getenv("IG_DEMO_PASSWORD", "")
-        self.preferred_account_id = os.getenv(
-            "IG_DEMO_ACCOUNT_ID", ""
-        ).strip()
+    # V6.6 PAPER-learning entry thresholds.
+    # Experimental only: broker execution remains disabled.
+    NORMAL_MIN_CONFIDENCE = 0.30
+    AI_MIN_CONFIDENCE = 0.40
 
-        self.default_size = self._float_env(
-            "IG_DEMO_DEFAULT_SIZE",
-            0.5,
-            minimum=0.000001,
-        )
-        self.timeout_seconds = self._float_env(
-            "IG_DEMO_HTTP_TIMEOUT_SECONDS",
-            20.0,
-            minimum=3.0,
-        )
-
-        # IG documents a per-account non-trading REST allowance. Keep our
-        # own ceiling below IG's default so scans + market lookups cannot
-        # starve broker execution with HTTP 403 account-allowance errors.
-        self.nontrading_rpm = int(
-            max(
-                5,
-                min(
-                    25,
-                    float(
-                        os.getenv(
-                            "IG_DEMO_NONTRADING_RPM",
-                            "20",
-                        )
-                    ),
-                ),
-            )
-        )
-        self._nontrading_times = deque()
-        self._rate_lock = threading.RLock()
+    def __init__(
+        self,
+        *,
+        signal_func: Callable[[str, str, float], Dict[str, Any]],
+        price_func: Callable[[str], float],
+        state_store=None,
+        max_watchers: int = 6,
+        max_open_trades: int = 3,
+        watcher_refresh_seconds: int = 60,
+        starting_balance: float = 10000.0,
+        payout: float = 0.80,
+        default_stake_pct: float = 0.01,
+    ):
+        self.signal_func = signal_func
+        self.price_func = price_func
+        self.state_store = state_store
+        self.max_watchers = int(max_watchers)
+        self.max_open_trades = int(max_open_trades)
+        self.watcher_refresh_seconds = max(30, int(watcher_refresh_seconds))
+        self.default_stake_pct = float(default_stake_pct)
 
         self._lock = threading.RLock()
-        self._session: Optional[_Session] = None
-        self._market_cache: Dict[str, Dict[str, Any]] = {}
-        self._market_cache_at: Dict[str, float] = {}
-        self._market_cache_ttl = 6 * 3600.0
-        self._last_error: Optional[str] = None
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._client = None
+        self._ai_cache: Dict[str, Dict[str, Any]] = {}
+
+        self._state: Dict[str, Any] = {
+            "version": self.VERSION,
+            "enabled": True,
+            "starting_balance": float(starting_balance),
+            "paper_balance": float(starting_balance),
+            "payout": float(payout),
+            "watchers": [],
+            "open_trades": [],
+            "settled_trades": [],
+            "shadow_open": [],
+            "shadow_settled": [],
+            "journal": [],
+            "last_tick_at": None,
+            "ticks": 0,
+            "last_error": None,
+        }
+        self._restore()
 
     @staticmethod
-    def _float_env(
-        name: str,
-        default: float,
-        *,
-        minimum: float,
-    ) -> float:
+    def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
-            value = float(os.getenv(name, str(default)))
-        except Exception:
-            value = default
-        return max(minimum, value)
+            value = float(value)
+            if value != value or value in (float("inf"), float("-inf")):
+                return default
+            return value
+        except (TypeError, ValueError):
+            return default
 
-    @staticmethod
-    def _json_bytes(payload: Optional[Dict[str, Any]]) -> Optional[bytes]:
-        if payload is None:
-            return None
-        return json.dumps(
-            payload,
-            separators=(",", ":"),
-        ).encode("utf-8")
+    @classmethod
+    def _confidence01(cls, value: Any) -> float:
+        number = cls._safe_float(value, 0.0)
+        if number > 1.0:
+            number /= 100.0
+        return max(0.0, min(1.0, number))
 
-    def configured(self) -> bool:
-        return bool(
-            self.api_key
-            and self.identifier
-            and self.password
+    def _restore(self) -> None:
+        if self.state_store is None:
+            return
+        saved = self.state_store.load(self.NAMESPACE, {})
+        if isinstance(saved, dict) and saved:
+            self._state.update(saved)
+        # A process restart cannot leave a tick genuinely in progress.
+        self._state["enabled"] = True
+        self._state["version"] = self.VERSION
+
+    def _persist(self) -> None:
+        if self.state_store is None:
+            return
+        with self._lock:
+            payload = dict(self._state)
+        self.state_store.save(self.NAMESPACE, payload)
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._loop,
+                name="jasong-v64-learning-engine",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def enable(self) -> dict:
+        with self._lock:
+            self._state["enabled"] = True
+        self._persist()
+        return self.status()
+
+    def pause(self) -> dict:
+        with self._lock:
+            self._state["enabled"] = False
+        self._persist()
+        return self.status()
+
+    def submit_candidate(
+        self,
+        candidate: Dict[str, Any],
+        validated: Optional[Dict[str, Any]] = None,
+        *,
+        risk_mode: str = "Balanced",
+        starting_balance: float = 10000.0,
+        payout: float = 0.80,
+    ) -> Dict[str, Any]:
+        """Add/update a learning watcher from the Auto Manager funnel."""
+        item = dict(candidate or {})
+        validated = dict(validated or {})
+
+        symbol = str(validated.get("symbol") or item.get("symbol") or "").strip()
+        direction = str(validated.get("direction") or item.get("direction") or "").upper().strip()
+        if not symbol or direction not in {"BUY", "SELL"}:
+            return {"accepted": False, "reason": "missing symbol/direction"}
+
+        verified = bool(validated.get("verified", False))
+        deep_status = str(validated.get("status") or "NOT_VALIDATED").upper()
+        # V6.8: a deep-validation reject can still be valuable IG DEMO learning
+        # evidence. Only missing/broken validation is excluded from execution.
+        invalid_deep = deep_status in {"NOT_VALIDATED", "INVALID", "ERROR", ""}
+        experimental = not verified
+        trade_eligible = not invalid_deep
+        holding_candles = int(validated.get("holding_candles") or item.get("holding_candles") or 4)
+        holding_candles = max(1, min(holding_candles, 24))
+
+        now = time.time()
+        key = f"{symbol}:{direction}"
+
+        watcher = {
+            "watcher_id": str(uuid.uuid4()),
+            "key": key,
+            "symbol": symbol,
+            "market": validated.get("market") or item.get("market") or symbol,
+            "direction": direction,
+            "risk_mode": risk_mode,
+            "verified": verified,
+            "experimental": experimental,
+            "trade_eligible": trade_eligible,
+            "deep_status": deep_status,
+            "holding_candles": holding_candles,
+            "payout": float(payout),
+            "candidate": item,
+            "validated": validated,
+            "created_at": now,
+            "last_checked_at": None,
+            "last_quant_confidence": None,
+            "last_signal": None,
+            "last_ai": None,
+            "status": "WATCHING" if trade_eligible else "OBSERVE_ONLY",
+            "expires_at": now + 12 * 3600,
+        }
+
+        with self._lock:
+            watchers = list(self._state.get("watchers", []))
+            existing_index = next(
+                (i for i, w in enumerate(watchers) if w.get("key") == key),
+                None,
+            )
+            if existing_index is not None:
+                old = watchers[existing_index]
+                watcher["watcher_id"] = old.get("watcher_id", watcher["watcher_id"])
+                watcher["created_at"] = old.get("created_at", now)
+                watchers[existing_index] = watcher
+            else:
+                watchers.append(watcher)
+
+            # Keep best/most recent six; VERIFIED setups get priority.
+            watchers.sort(
+                key=lambda w: (
+                    1 if w.get("verified") else 0,
+                    self._safe_float(
+                        (w.get("candidate") or {}).get("adaptive_rank_score")
+                        or (w.get("candidate") or {}).get("fast_score"),
+                        0.0,
+                    ),
+                    self._safe_float(w.get("created_at"), 0.0),
+                ),
+                reverse=True,
+            )
+            self._state["watchers"] = watchers[: self.max_watchers]
+            self._state["starting_balance"] = float(starting_balance)
+            self._state["payout"] = float(payout)
+
+        self._journal("CANDIDATE_SUBMITTED", {
+            "symbol": symbol,
+            "direction": direction,
+            "verified": verified,
+            "deep_status": deep_status,
+        })
+        self._persist()
+        return {"accepted": True, "verified": verified, "symbol": symbol, "direction": direction}
+
+    def _journal(self, event: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            rows = list(self._state.get("journal", []))
+            rows.append({"event": event, "timestamp": time.time(), **dict(payload)})
+            self._state["journal"] = rows[-2000:]
+
+    def _open_count(self) -> int:
+        return len([t for t in self._state.get("open_trades", []) if t.get("status") == "OPEN"])
+
+    def _duplicate_open(self, symbol: str, direction: str) -> bool:
+        return any(
+            t.get("status") == "OPEN"
+            and t.get("symbol") == symbol
+            and t.get("direction") == direction
+            for t in self._state.get("open_trades", [])
         )
+
+    def _stake(self) -> float:
+        balance = max(self._safe_float(self._state.get("paper_balance"), 0.0), 0.0)
+        return round(max(1.0, balance * self.default_stake_pct), 2)
+
+    def _ai_assess(
+        self,
+        watcher: Dict[str, Any],
+        live: Dict[str, Any],
+        quant_conf: float,
+    ) -> Dict[str, Any]:
+        key = watcher["key"]
+        cached = self._ai_cache.get(key)
+        if cached and time.time() - cached.get("timestamp", 0) < 300:
+            return dict(cached["result"])
+
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key or OpenAI is None:
+            return {
+                "available": False,
+                "direction": None,
+                "confidence": 0.0,
+                "approve": False,
+                "reason": "OpenAI unavailable",
+            }
+
+        try:
+            if self._client is None:
+                self._client = OpenAI(api_key=api_key)
+
+            candidate = watcher.get("candidate") or {}
+            validated = watcher.get("validated") or {}
+            prompt = {
+                "task": "Independent PAPER-trade directional assessment. Do not claim certainty.",
+                "symbol": watcher.get("symbol"),
+                "historical_direction": watcher.get("direction"),
+                "quant_confidence_pct": round(quant_conf * 100.0, 2),
+                "live_signal": live.get("direction") or live.get("signal"),
+                "price": live.get("price"),
+                "rsi": live.get("rsi") or candidate.get("rsi"),
+                "fast_score": candidate.get("fast_score"),
+                "quality_tier": candidate.get("quality_tier"),
+                "deep_status": watcher.get("deep_status"),
+                "historical_win_rate": validated.get("win_rate"),
+                "historical_profit_factor": validated.get("profit_factor"),
+                "historical_drawdown": validated.get("max_drawdown"),
+                "instruction": (
+                    "Return JSON only with direction BUY/SELL/WAIT, confidence 0-100, "
+                    "approve boolean, and a short reason. Confidence is your directional "
+                    "assessment, not a guarantee."
+                ),
+            }
+            response = self._client.responses.create(
+                model=os.getenv("JASONG_LEARNING_AI_MODEL", "gpt-5-mini"),
+                input=json.dumps(prompt, default=str),
+            )
+            text = (response.output_text or "").strip()
+            if text.startswith("```"):
+                text = text.strip("`")
+                if text.lower().startswith("json"):
+                    text = text[4:].strip()
+            parsed = json.loads(text)
+            result = {
+                "available": True,
+                "direction": str(parsed.get("direction") or "WAIT").upper(),
+                "confidence": self._confidence01(parsed.get("confidence")),
+                "approve": bool(parsed.get("approve", False)),
+                "reason": str(parsed.get("reason") or "")[:500],
+            }
+        except Exception as exc:
+            result = {
+                "available": False,
+                "direction": None,
+                "confidence": 0.0,
+                "approve": False,
+                "reason": f"AI assessment failed: {exc}",
+            }
+
+        self._ai_cache[key] = {"timestamp": time.time(), "result": dict(result)}
+        return result
+
+    @classmethod
+    def _directional_model_ai_confidence(
+        cls,
+        live: Dict[str, Any],
+        wanted: str,
+    ) -> float:
+        """Return the model probability for the wanted BUY/SELL direction."""
+        raw_up = None
+        for key in (
+            "combined_up_probability",
+            "ai_up_probability",
+            "ai_up",
+            "up_probability",
+            "prob_up",
+            "probability_up",
+        ):
+            if key in live and live.get(key) is not None:
+                raw_up = live.get(key)
+                break
+
+        if raw_up is None:
+            return 0.0
+
+        up = cls._confidence01(raw_up)
+        return up if wanted == "BUY" else (1.0 - up)
+
+    def _entry_class(
+        self,
+        watcher: Dict[str, Any],
+        live: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        V6.6 PAPER-only adaptive entry policy.
+
+        A VERIFIED watcher may enter when live direction matches and either:
+        - normal quantitative confidence >= 30%, or
+        - directional model-AI confidence >= 40%.
+
+        The legacy high-confidence gate is removed from this learning path.
+        """
+        wanted = str(watcher.get("direction") or "").upper()
+        live_direction = str(
+            live.get("direction")
+            or live.get("signal")
+            or live.get("decision")
+            or "WAIT"
+        ).upper()
+
+        quant = self._confidence01(live.get("confidence"))
+        model_ai = self._directional_model_ai_confidence(live, wanted)
+
+        verified = bool(watcher.get("verified"))
+        experimental = bool(watcher.get("experimental"))
+        trade_eligible = bool(watcher.get("trade_eligible", verified or experimental))
+        direction_match = live_direction == wanted
+        normal_pass = quant >= self.NORMAL_MIN_CONFIDENCE
+        ai_pass = model_ai >= self.AI_MIN_CONFIDENCE
+
+        if not trade_eligible:
+            return {
+                "class": "S",
+                "enter": False,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": normal_pass,
+                "ai_pass": ai_pass,
+                "direction_match": direction_match,
+                "reason": "Shadow only: deep status is below WATCH/NEAR_VERIFIED quality",
+            }
+
+        if not direction_match:
+            return {
+                "class": "S",
+                "enter": False,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": normal_pass,
+                "ai_pass": ai_pass,
+                "direction_match": False,
+                "reason": (
+                    f"Live direction {live_direction} does not match "
+                    f"verified direction {wanted}"
+                ),
+            }
+
+        if normal_pass and ai_pass:
+            return {
+                "class": "ED" if experimental else "D",
+                "enter": True,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": True,
+                "ai_pass": True,
+                "direction_match": True,
+                "reason": "V6.6 BOTH path: normal >=30% and model-AI >=40%",
+            }
+
+        if normal_pass:
+            return {
+                "class": "EN" if experimental else "N",
+                "enter": True,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": True,
+                "ai_pass": False,
+                "direction_match": True,
+                "reason": "V6.6 NORMAL path: quantitative confidence >=30%",
+            }
+
+        if ai_pass:
+            return {
+                "class": "EM" if experimental else "M",
+                "enter": True,
+                "quant": quant,
+                "model_ai_confidence": model_ai,
+                "ai": None,
+                "normal_pass": False,
+                "ai_pass": True,
+                "direction_match": True,
+                "reason": "V6.6 MODEL_AI path: directional model-AI >=40%",
+            }
+
+        return {
+            "class": "S",
+            "enter": False,
+            "quant": quant,
+            "model_ai_confidence": model_ai,
+            "ai": None,
+            "normal_pass": False,
+            "ai_pass": False,
+            "direction_match": True,
+            "reason": "Below V6.6 PAPER thresholds: normal <30% and model-AI <40%",
+        }
+
+    def _open_trade(
+        self,
+        watcher: Dict[str, Any],
+        live: Dict[str, Any],
+        decision: Dict[str, Any],
+    ) -> None:
+        if self._open_count() >= self.max_open_trades:
+            return
+        symbol = watcher["symbol"]
+        direction = watcher["direction"]
+        if self._duplicate_open(symbol, direction):
+            return
+
+        price = self._safe_float(live.get("price"), 0.0)
+        if price <= 0:
+            try:
+                price = float(self.price_func(symbol))
+            except Exception:
+                return
+
+        now = time.time()
+        holding = max(1, int(watcher.get("holding_candles") or 4))
+
+        candidate_meta = (
+            dict(watcher.get("candidate") or {})
+            if isinstance(watcher.get("candidate"), dict)
+            else {}
+        )
+        validated_meta = (
+            dict(watcher.get("validated") or {})
+            if isinstance(watcher.get("validated"), dict)
+            else {}
+        )
+
+        historical_win_rate = (
+            candidate_meta.get("historical_win_rate")
+            or candidate_meta.get("win_rate")
+            or validated_meta.get("historical_win_rate")
+            or validated_meta.get("win_rate")
+        )
+        historical_profit_factor = (
+            candidate_meta.get("historical_profit_factor")
+            or candidate_meta.get("profit_factor")
+            or validated_meta.get("historical_profit_factor")
+            or validated_meta.get("profit_factor")
+        )
+        historical_trades = (
+            candidate_meta.get("historical_trades")
+            or candidate_meta.get("trades")
+            or validated_meta.get("historical_trades")
+            or validated_meta.get("trades")
+        )
+
+        trade = {
+            "trade_id": str(uuid.uuid4()),
+            "entry_class": decision["class"],
+            "elite_state": decision.get("elite_state"),
+            "trade_class": decision.get("trade_class"),
+            "elite_score": decision.get("elite_score"),
+            "failed_gates": list(decision.get("failed_gates") or []),
+            "threshold_distance": dict(decision.get("threshold_distance") or {}),
+            "ig_demo_learning_eligible": bool(decision.get("ig_demo_learning_eligible")),
+            "model_version": self.VERSION,
+            "historical_grade": "VERIFIED" if watcher.get("verified") else ("EXPERIMENTAL" if watcher.get("experimental") else "SHADOW"),
+            "symbol": symbol,
+            "market": watcher.get("market"),
+            "direction": direction,
+            "quant_confidence": decision.get("quant"),
+            "model_ai_confidence": decision.get("model_ai_confidence"),
+            "entry_normal_pass": decision.get("normal_pass"),
+            "entry_ai_pass": decision.get("ai_pass"),
+            "ai": decision.get("ai"),
+            "smart_fast_score": (
+                candidate_meta.get("smart_fast_score")
+                or candidate_meta.get("fast_score")
+                or validated_meta.get("smart_fast_score")
+                or validated_meta.get("fast_score")
+            ),
+            "quality_tier": (
+                candidate_meta.get("quality_tier")
+                or validated_meta.get("quality_tier")
+            ),
+            "deep_status": (
+                watcher.get("deep_status")
+                or validated_meta.get("status")
+            ),
+            "historical_win_rate": historical_win_rate,
+            "historical_profit_factor": historical_profit_factor,
+            "historical_trades": historical_trades,
+            "entry_rsi": live.get("rsi"),
+            "entry_ai_up": (
+                live.get("combined_up_probability")
+                if live.get("combined_up_probability") is not None
+                else live.get("ai_up_probability")
+            ),
+            "entry_live_direction": (
+                live.get("direction")
+                or live.get("signal")
+                or live.get("decision")
+            ),
+            "entry_price": price,
+            "stake": self._stake(),
+            "opened_at": now,
+            "scheduled_close_at": now + holding * 15 * 60,
+            "holding_candles": holding,
+            "status": "OPEN",
+            "result": None,
+            "pnl": None,
+            "exit_price": None,
+            "closed_at": None,
+            "reason": decision.get("reason"),
+            "current_move_bps": 0.0,
+            "mfe_bps": 0.0,
+            "mae_bps": 0.0,
+            "last_excursion_at": now,
+        }
+        with self._lock:
+            self._state["open_trades"].append(trade)
+        self._journal("LEARNING_TRADE_OPENED", trade)
+
+    def _open_shadow(
+        self,
+        watcher: Dict[str, Any],
+        live: Dict[str, Any],
+        decision: Dict[str, Any],
+    ) -> None:
+        symbol = watcher["symbol"]
+        direction = watcher["direction"]
+        if any(
+            t.get("status") == "OPEN"
+            and t.get("symbol") == symbol
+            and t.get("direction") == direction
+            for t in self._state.get("shadow_open", [])
+        ):
+            return
+        price = self._safe_float(live.get("price"), 0.0)
+        if price <= 0:
+            try:
+                price = float(self.price_func(symbol))
+            except Exception:
+                return
+        now = time.time()
+        holding = max(1, int(watcher.get("holding_candles") or 4))
+        candidate_meta = (
+            dict(watcher.get("candidate") or {})
+            if isinstance(watcher.get("candidate"), dict)
+            else {}
+        )
+        validated_meta = (
+            dict(watcher.get("validated") or {})
+            if isinstance(watcher.get("validated"), dict)
+            else {}
+        )
+        shadow = {
+            "trade_id": str(uuid.uuid4()),
+            "entry_class": "S",
+            "symbol": symbol,
+            "market": watcher.get("market"),
+            "direction": direction,
+            "quant_confidence": decision.get("quant"),
+            "model_ai_confidence": decision.get("model_ai_confidence"),
+            "entry_normal_pass": decision.get("normal_pass"),
+            "entry_ai_pass": decision.get("ai_pass"),
+            "smart_fast_score": (
+                candidate_meta.get("smart_fast_score")
+                or candidate_meta.get("fast_score")
+                or validated_meta.get("smart_fast_score")
+                or validated_meta.get("fast_score")
+            ),
+            "quality_tier": (
+                candidate_meta.get("quality_tier")
+                or validated_meta.get("quality_tier")
+            ),
+            "deep_status": (
+                watcher.get("deep_status")
+                or validated_meta.get("status")
+            ),
+            "historical_win_rate": (
+                candidate_meta.get("historical_win_rate")
+                or candidate_meta.get("win_rate")
+                or validated_meta.get("historical_win_rate")
+                or validated_meta.get("win_rate")
+            ),
+            "historical_profit_factor": (
+                candidate_meta.get("historical_profit_factor")
+                or candidate_meta.get("profit_factor")
+                or validated_meta.get("historical_profit_factor")
+                or validated_meta.get("profit_factor")
+            ),
+            "historical_trades": (
+                candidate_meta.get("historical_trades")
+                or candidate_meta.get("trades")
+                or validated_meta.get("historical_trades")
+                or validated_meta.get("trades")
+            ),
+            "entry_rsi": live.get("rsi"),
+            "entry_ai_up": (
+                live.get("combined_up_probability")
+                if live.get("combined_up_probability") is not None
+                else live.get("ai_up_probability")
+            ),
+            "entry_price": price,
+            "stake": 0.0,
+            "opened_at": now,
+            "scheduled_close_at": now + holding * 15 * 60,
+            "holding_candles": holding,
+            "status": "OPEN",
+            "result": None,
+            "pnl": 0.0,
+            "reason": decision.get("reason"),
+            "current_move_bps": 0.0,
+            "mfe_bps": 0.0,
+            "mae_bps": 0.0,
+            "last_excursion_at": now,
+        }
+        with self._lock:
+            self._state["shadow_open"].append(shadow)
+            self._state["shadow_open"] = self._state["shadow_open"][-30:]
+        self._journal("SHADOW_TRADE_OPENED", shadow)
+
+    @classmethod
+    def _signed_move_bps(
+        cls,
+        trade: Dict[str, Any],
+        price: Any,
+    ) -> Optional[float]:
+        entry = cls._safe_float(
+            trade.get("entry_price"),
+            0.0,
+        )
+        current = cls._safe_float(
+            price,
+            0.0,
+        )
+        if entry <= 0 or current <= 0:
+            return None
+
+        direction = str(
+            trade.get("direction")
+            or ""
+        ).upper()
+        if direction == "BUY":
+            return ((current - entry) / entry) * 10000.0
+        if direction == "SELL":
+            return ((entry - current) / entry) * 10000.0
+        return None
+
+    @classmethod
+    def _update_trade_excursion(
+        cls,
+        trade: Dict[str, Any],
+        price: Any,
+        observed_at: float,
+    ) -> None:
+        move = cls._signed_move_bps(
+            trade,
+            price,
+        )
+        if move is None:
+            return
+
+        trade["current_move_bps"] = round(
+            move,
+            4,
+        )
+        trade["mfe_bps"] = round(
+            max(
+                0.0,
+                cls._safe_float(
+                    trade.get("mfe_bps"),
+                    0.0,
+                ),
+                move,
+            ),
+            4,
+        )
+        trade["mae_bps"] = round(
+            min(
+                0.0,
+                cls._safe_float(
+                    trade.get("mae_bps"),
+                    0.0,
+                ),
+                move,
+            ),
+            4,
+        )
+        trade["last_excursion_at"] = observed_at
+
+    def _update_open_excursions(
+        self,
+        observed_prices: Dict[str, float],
+        observed_at: float,
+    ) -> None:
+        with self._lock:
+            for key in (
+                "open_trades",
+                "shadow_open",
+            ):
+                rows = list(
+                    self._state.get(key, [])
+                )
+                for trade in rows:
+                    symbol = str(
+                        trade.get("symbol")
+                        or ""
+                    )
+                    price = observed_prices.get(
+                        symbol
+                    )
+                    if price is not None:
+                        self._update_trade_excursion(
+                            trade,
+                            price,
+                            observed_at,
+                        )
+                self._state[key] = rows
+
+    def _settle_list(self, key_open: str, key_settled: str, affect_balance: bool) -> None:
+        now = time.time()
+        with self._lock:
+            rows = list(self._state.get(key_open, []))
+        remaining = []
+        settled_now = []
+        for trade in rows:
+            if trade.get("status") != "OPEN" or now < self._safe_float(trade.get("scheduled_close_at"), now + 1):
+                remaining.append(trade)
+                continue
+            try:
+                exit_price = float(self.price_func(trade["symbol"]))
+            except Exception:
+                remaining.append(trade)
+                continue
+            self._update_trade_excursion(
+                trade,
+                exit_price,
+                now,
+            )
+            entry = self._safe_float(trade.get("entry_price"), 0.0)
+            direction = str(trade.get("direction") or "").upper()
+            won = exit_price > entry if direction == "BUY" else exit_price < entry
+            stake = self._safe_float(trade.get("stake"), 0.0)
+            payout = self._safe_float(self._state.get("payout"), 0.80)
+            pnl = (stake * payout) if won else (-stake)
+            if not affect_balance:
+                pnl = 0.0
+            trade.update({
+                "status": "CLOSED",
+                "result": "WIN" if won else "LOSS",
+                "exit_price": exit_price,
+                "closed_at": now,
+                "pnl": round(pnl, 2),
+            })
+            settled_now.append(trade)
+            self._journal("LEARNING_TRADE_SETTLED" if affect_balance else "SHADOW_TRADE_SETTLED", trade)
+
+        with self._lock:
+            self._state[key_open] = remaining
+            settled = list(self._state.get(key_settled, [])) + settled_now
+            self._state[key_settled] = settled[-2000:]
+            if affect_balance:
+                self._state["paper_balance"] = round(
+                    self._safe_float(self._state.get("paper_balance"), 0.0)
+                    + sum(self._safe_float(t.get("pnl"), 0.0) for t in settled_now),
+                    2,
+                )
+
+    def tick(self) -> Dict[str, Any]:
+        with self._lock:
+            if not self._state.get("enabled", True):
+                return self.status()
+            watchers = list(self._state.get("watchers", []))
+
+        now = time.time()
+        fresh_watchers = []
+        observed_prices: Dict[str, float] = {}
+        for watcher in watchers:
+            if now >= self._safe_float(watcher.get("expires_at"), now + 1):
+                continue
+            try:
+                live = self.signal_func(
+                    watcher["symbol"],
+                    watcher.get("risk_mode", "Balanced"),
+                    self._safe_float(self._state.get("paper_balance"), 10000.0),
+                )
+                if "price" not in live or self._safe_float(live.get("price"), 0.0) <= 0:
+                    live["price"] = float(self.price_func(watcher["symbol"]))
+                observed_prices[str(watcher["symbol"])] = self._safe_float(
+                    live.get("price"),
+                    0.0,
+                )
+                decision = self._entry_class(watcher, live)
+                watcher["last_checked_at"] = now
+                watcher["last_quant_confidence"] = decision.get("quant")
+                watcher["last_signal"] = live.get("direction") or live.get("signal")
+                watcher["last_ai"] = decision.get("ai")
+                if decision.get("enter"):
+                    self._open_trade(watcher, live, decision)
+                else:
+                    # V6.8: no new paper/shadow execution. OBSERVE signals are
+                    # journalled only; broker-forward learning uses actual IG DEMO
+                    # trades for ELITE / LEARNING_PLUS / LEARNING states.
+                    self._journal("LEARNING_SIGNAL_OBSERVED", {
+                        "symbol": watcher.get("symbol"),
+                        "direction": watcher.get("direction"),
+                        "elite_state": decision.get("elite_state") or "OBSERVE",
+                        "elite_score": decision.get("elite_score"),
+                        "failed_gates": list(decision.get("failed_gates") or []),
+                        "reason": decision.get("reason"),
+                    })
+                fresh_watchers.append(watcher)
+            except Exception as exc:
+                watcher["last_error"] = str(exc)
+                watcher["last_checked_at"] = now
+                fresh_watchers.append(watcher)
+
+        with self._lock:
+            self._state["watchers"] = fresh_watchers[: self.max_watchers]
+
+        self._update_open_excursions(
+            observed_prices,
+            now,
+        )
+
+        self._settle_list("open_trades", "settled_trades", True)
+
+        with self._lock:
+            self._state["last_tick_at"] = now
+            self._state["ticks"] = int(self._state.get("ticks", 0)) + 1
+            self._state["last_error"] = None
+        self._persist()
+        return self.status()
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                if self._state.get("enabled", True):
+                    self.tick()
+            except Exception as exc:
+                with self._lock:
+                    self._state["last_error"] = str(exc)
+                self._persist()
+            self._stop_event.wait(self.watcher_refresh_seconds)
+
+    def _stats_for(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        closed = [r for r in rows if r.get("status") == "CLOSED" and r.get("result") in {"WIN", "LOSS"}]
+        wins = sum(1 for r in closed if r.get("result") == "WIN")
+        losses = len(closed) - wins
+        gross_profit = sum(max(self._safe_float(r.get("pnl"), 0.0), 0.0) for r in closed)
+        gross_loss = abs(sum(min(self._safe_float(r.get("pnl"), 0.0), 0.0) for r in closed))
+        return {
+            "trades": len(closed),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / len(closed), 6) if closed else 0.0,
+            "win_rate_pct": round((wins / len(closed)) * 100.0, 2) if closed else 0.0,
+            "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0),
+            "total_pnl": round(sum(self._safe_float(r.get("pnl"), 0.0) for r in closed), 2),
+        }
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
-            session = self._session
-            return {
-                "broker": "IG",
-                "environment": "DEMO",
-                "base_url": self.BASE_URL,
-                "configured": self.configured(),
-                "connected": session is not None,
-                "account_id": (
-                    session.account_id
-                    if session is not None
-                    else self.preferred_account_id or None
-                ),
-                "client_id": (
-                    session.client_id
-                    if session is not None
-                    else None
-                ),
-                "default_size": self.default_size,
-                "nontrading_rpm_guard": self.nontrading_rpm,
-                "last_error": self._last_error,
-                "live_money_execution": False,
-                "demo_execution": True,
-            }
+            state = dict(self._state)
+            actual = list(state.get("settled_trades", []))
+            shadow = list(state.get("shadow_settled", []))
+            open_trades = list(state.get("open_trades", []))
+            watchers = list(state.get("watchers", []))
 
-    def _wait_for_nontrading_slot(self) -> None:
-        """Throttle authenticated GET traffic below IG's account allowance."""
-        while True:
-            now = time.time()
-            wait_for = 0.0
+        classes = {}
+        for cls in ["D", "N", "M", "ED", "EN", "EM"]:
+            classes[cls] = self._stats_for([t for t in actual if t.get("entry_class") == cls])
 
-            with self._rate_lock:
-                while (
-                    self._nontrading_times
-                    and now - self._nontrading_times[0] >= 60.0
-                ):
-                    self._nontrading_times.popleft()
-
-                if len(self._nontrading_times) < self.nontrading_rpm:
-                    self._nontrading_times.append(now)
-                    return
-
-                wait_for = max(
-                    0.25,
-                    60.0 - (
-                        now - self._nontrading_times[0]
-                    ) + 0.15,
-                )
-
-            time.sleep(wait_for)
-
-    def _base_headers(
-        self,
-        *,
-        version: int,
-        authenticated: bool,
-    ) -> Dict[str, str]:
-        headers = {
-            "X-IG-API-KEY": self.api_key,
-            "Content-Type": "application/json",
-            "Accept": "application/json; charset=UTF-8",
-            "Version": str(version),
-            "User-Agent": "Jasong-AI-Trader/6.7.3-GLOBAL-MULTI-MARKET",
+        # Shadow P&L is deliberately zero, so calculate only outcome frequency.
+        shadow_wins = sum(1 for t in shadow if t.get("result") == "WIN")
+        shadow_stats = {
+            "trades": len(shadow),
+            "wins": shadow_wins,
+            "losses": len(shadow) - shadow_wins,
+            "win_rate": round(shadow_wins / len(shadow), 6) if shadow else 0.0,
+            "win_rate_pct": round((shadow_wins / len(shadow)) * 100.0, 2) if shadow else 0.0,
         }
 
-        if authenticated:
-            session = self._session
-            if session is None:
-                raise IGDemoError("IG DEMO session is not connected")
-            headers["CST"] = session.cst
-            headers["X-SECURITY-TOKEN"] = session.x_security_token
-
-        return headers
-
-    def _raw_request(
-        self,
-        method: str,
-        path: str,
-        *,
-        version: int = 1,
-        payload: Optional[Dict[str, Any]] = None,
-        query: Optional[Dict[str, Any]] = None,
-        authenticated: bool = True,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ) -> tuple[Dict[str, Any], Any]:
-        if not self.configured():
-            raise IGDemoError(
-                "IG DEMO is not configured. Add IG_DEMO_API_KEY, "
-                "IG_DEMO_IDENTIFIER and IG_DEMO_PASSWORD."
-            )
-
-        if not path.startswith("/"):
-            path = "/" + path
-
-        url = self.BASE_URL + path
-        if query:
-            clean_query = {
-                key: value
-                for key, value in query.items()
-                if value is not None
-            }
-            url += "?" + urlparse.urlencode(clean_query)
-
-        headers = self._base_headers(
-            version=version,
-            authenticated=authenticated,
-        )
-        if extra_headers:
-            headers.update(extra_headers)
-
-        clean_method = method.upper()
-
-        if authenticated and clean_method == "GET":
-            self._wait_for_nontrading_slot()
-
-        req = urlrequest.Request(
-            url=url,
-            data=self._json_bytes(payload),
-            headers=headers,
-            method=clean_method,
-        )
-
-        try:
-            with urlrequest.urlopen(
-                req,
-                timeout=self.timeout_seconds,
-            ) as response:
-                raw = response.read().decode("utf-8", errors="replace")
-                data: Dict[str, Any]
-                if raw.strip():
-                    try:
-                        parsed = json.loads(raw)
-                        data = (
-                            parsed
-                            if isinstance(parsed, dict)
-                            else {"data": parsed}
-                        )
-                    except Exception:
-                        data = {"raw": raw}
-                else:
-                    data = {}
-
-                return data, response.headers
-
-        except urlerror.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            detail = body
-            try:
-                parsed = json.loads(body)
-                if isinstance(parsed, dict):
-                    detail = (
-                        parsed.get("errorCode")
-                        or parsed.get("error")
-                        or parsed.get("message")
-                        or body
-                    )
-            except Exception:
-                pass
-
-            raise IGDemoError(
-                f"IG DEMO HTTP {exc.code}: {detail}"
-            ) from exc
-
-        except urlerror.URLError as exc:
-            raise IGDemoError(
-                f"IG DEMO network error: {exc.reason}"
-            ) from exc
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        version: int = 1,
-        payload: Optional[Dict[str, Any]] = None,
-        query: Optional[Dict[str, Any]] = None,
-        authenticated: bool = True,
-        extra_headers: Optional[Dict[str, str]] = None,
-        retry_auth: bool = True,
-    ) -> Dict[str, Any]:
-        if authenticated and self._session is None:
-            self.connect()
-
-        try:
-            data, _ = self._raw_request(
-                method,
-                path,
-                version=version,
-                payload=payload,
-                query=query,
-                authenticated=authenticated,
-                extra_headers=extra_headers,
-            )
-            if authenticated and self._session is not None:
-                self._session.last_used_at = time.time()
-            self._last_error = None
-            return data
-
-        except IGDemoError as exc:
-            message = str(exc)
-            self._last_error = message
-
-            auth_problem = (
-                "HTTP 401" in message
-                or "client-token" in message
-                or "account-token" in message
-                or "oauth-token" in message
-            )
-            if (
-                authenticated
-                and retry_auth
-                and auth_problem
-            ):
-                with self._lock:
-                    self._session = None
-                self.connect(force=True)
-                return self._request(
-                    method,
-                    path,
-                    version=version,
-                    payload=payload,
-                    query=query,
-                    authenticated=True,
-                    extra_headers=extra_headers,
-                    retry_auth=False,
-                )
-            raise
-
-    def connect(self, *, force: bool = False) -> Dict[str, Any]:
-        with self._lock:
-            if self._session is not None and not force:
-                return self.status()
-
-            if not self.configured():
-                raise IGDemoError(
-                    "IG DEMO credentials are missing from environment."
-                )
-
-            data, headers = self._raw_request(
-                "POST",
-                "/session",
-                version=2,
-                payload={
-                    "identifier": self.identifier,
-                    "password": self.password,
-                    "encryptedPassword": False,
-                },
-                authenticated=False,
-            )
-
-            cst = str(headers.get("CST") or "").strip()
-            xst = str(
-                headers.get("X-SECURITY-TOKEN") or ""
-            ).strip()
-
-            current_account_id = str(
-                data.get("currentAccountId")
-                or data.get("accountId")
-                or ""
-            ).strip()
-
-            if not cst or not xst or not current_account_id:
-                raise IGDemoError(
-                    "IG DEMO login succeeded without the required "
-                    "session/account tokens."
-                )
-
-            self._session = _Session(
-                cst=cst,
-                x_security_token=xst,
-                account_id=current_account_id,
-                client_id=str(data.get("clientId") or ""),
-                connected_at=time.time(),
-                last_used_at=time.time(),
-            )
-
-            rerouting = str(
-                data.get("reroutingEnvironment") or "DEMO"
-            ).upper()
-            if rerouting not in {"DEMO", ""}:
-                self._session = None
-                raise IGDemoError(
-                    f"Refusing non-DEMO IG environment: {rerouting}"
-                )
-
-            if (
-                self.preferred_account_id
-                and self.preferred_account_id != current_account_id
-            ):
-                switched, switched_headers = self._raw_request(
-                    "PUT",
-                    "/session",
-                    version=1,
-                    payload={
-                        "accountId": self.preferred_account_id,
-                        "defaultAccount": False,
-                    },
-                    authenticated=True,
-                )
-
-                new_xst = str(
-                    switched_headers.get("X-SECURITY-TOKEN") or ""
-                ).strip()
-                if new_xst:
-                    self._session.x_security_token = new_xst
-
-                self._session.account_id = (
-                    self.preferred_account_id
-                )
-
-                if switched.get("dealingEnabled") is False:
-                    raise IGDemoError(
-                        "Selected IG DEMO account is not dealing-enabled."
-                    )
-
-            self._last_error = None
-            return {
-                **self.status(),
-                "dealing_enabled": data.get("dealingEnabled"),
-                "account_currency": data.get("currencyIsoCode"),
-            }
-
-    def logout(self) -> Dict[str, Any]:
-        with self._lock:
-            if self._session is None:
-                return self.status()
-            try:
-                self._request(
-                    "DELETE",
-                    "/session",
-                    version=1,
-                    retry_auth=False,
-                )
-            finally:
-                self._session = None
-        return self.status()
-
-    def accounts(self) -> Dict[str, Any]:
-        return self._request(
-            "GET",
-            "/accounts",
-            version=1,
-        )
-
-    def positions(self) -> Dict[str, Any]:
-        return self._request(
-            "GET",
-            "/positions",
-            version=2,
-        )
-
-    @staticmethod
-    def _normalise_symbol(symbol: str) -> tuple[str, str, str]:
-        clean = (
-            str(symbol or "")
-            .upper()
-            .strip()
-            .replace("=X", "")
-            .replace(" ", "")
-        )
-        clean = clean.replace("/", "")
-        if len(clean) != 6 or not clean.isalpha():
-            raise IGDemoError(
-                f"Unsupported FX symbol format for IG DEMO: {symbol}"
-            )
-        base = clean[:3]
-        quote = clean[3:]
-        return clean, base, quote
-
-    @staticmethod
-    def _market_name(row: Dict[str, Any]) -> str:
-        return str(
-            row.get("instrumentName")
-            or row.get("name")
-            or ""
-        ).upper()
-
-    @staticmethod
-    def _market_type(row: Dict[str, Any]) -> str:
-        return str(
-            row.get("instrumentType")
-            or row.get("type")
-            or ""
-        ).upper()
-
-    def resolve_market(
-        self,
-        symbol: str,
-        *,
-        require_tradeable: bool = True,
-    ) -> Dict[str, Any]:
-        clean, base, quote = self._normalise_symbol(symbol)
-        cache_key = f"{clean}:{int(require_tradeable)}"
-        now = time.time()
-
-        cached = self._market_cache.get(cache_key)
-        cached_at = self._market_cache_at.get(cache_key, 0.0)
-        if cached and now - cached_at < self._market_cache_ttl:
-            return dict(cached)
-
-        # Start with the exact human FX pair. IG market search is fuzzy, and
-        # querying three variants for every scan caused unnecessary REST bursts.
-        # Only fall back to compact/spaced forms when the exact query returns
-        # nothing usable.
-        search_terms = [
-            f"{base}/{quote}",
-            clean,
-            f"{base} {quote}",
+        buckets = {}
+        bucket_defs = [
+            ("0-29", 0.00, 0.30),
+            ("30-34", 0.30, 0.35),
+            ("35-39", 0.35, 0.40),
+            ("40-49", 0.40, 0.50),
+            ("50-59", 0.50, 0.60),
+            ("60+", 0.60, 1.01),
         ]
-
-        rows = []
-        seen_epics = set()
-        for term_index, term in enumerate(search_terms):
-            response = self._request(
-                "GET",
-                "/markets",
-                version=1,
-                query={"searchTerm": term},
-            )
-            for row in response.get("markets", []) or []:
-                if not isinstance(row, dict):
-                    continue
-                epic = str(row.get("epic") or "")
-                if epic and epic not in seen_epics:
-                    rows.append(dict(row))
-                    seen_epics.add(epic)
-
-            # The exact slash query normally returns the correct FX family.
-            # Avoid two more account-allowance-consuming calls when it does.
-            if rows and term_index == 0:
-                break
-
-        if not rows:
-            raise IGDemoError(
-                f"IG DEMO has no market matching {base}/{quote}"
-            )
-
-        def _letters(value: Any) -> str:
-            return "".join(
-                ch for ch in str(value or "").upper()
-                if ch.isalpha()
-            )
-
-        def score(row: Dict[str, Any]) -> tuple:
-            name = self._market_name(row)
-            market_type = self._market_type(row)
-            status = str(row.get("marketStatus") or "").upper()
-            epic = str(row.get("epic") or "").upper()
-            name_letters = _letters(name)
-            epic_letters = _letters(epic)
-            exact_pair = (
-                name_letters.startswith(clean)
-                or clean in epic_letters
-            )
-            is_currency = (
-                "CURRENC" in market_type
-                or "FOREX" in market_type
-                or "FX" in market_type
-            )
-            is_tradeable = status == "TRADEABLE"
-            is_dfb = str(row.get("expiry") or "").upper() in {"-", "DFB"}
-            return (
-                int(exact_pair),
-                int(is_tradeable),
-                int(is_currency),
-                int(is_dfb),
-            )
-
-        rows.sort(key=score, reverse=True)
-
-        for candidate in rows:
-            epic = str(candidate.get("epic") or "").strip()
-            if not epic:
-                continue
-
-            details = self.market_details(epic)
-            instrument = details.get("instrument") or {}
-            snapshot = details.get("snapshot") or {}
-
-            status = str(
-                snapshot.get("marketStatus")
-                or candidate.get("marketStatus")
-                or ""
-            ).upper()
-
-            if (
-                require_tradeable
-                and status != "TRADEABLE"
-            ):
-                continue
-
-            instrument_type = str(
-                instrument.get("type")
-                or candidate.get("instrumentType")
-                or ""
-            ).upper()
-            if instrument_type and "CURRENC" not in instrument_type:
-                continue
-
-            # CRITICAL SAFETY CHECK:
-            # IG /markets search is fuzzy. Never execute a returned market
-            # unless its actual instrument metadata matches the requested FX pair.
-            instrument_name = str(
-                instrument.get("name")
-                or candidate.get("instrumentName")
-                or candidate.get("name")
-                or ""
-            )
-            market_id = str(instrument.get("marketId") or "")
-            chart_code = str(instrument.get("chartCode") or "")
-
-            name_letters = _letters(instrument_name)
-            market_id_letters = _letters(market_id)
-            chart_code_letters = _letters(chart_code)
-            epic_letters = _letters(epic)
-
-            exact_instrument_match = (
-                name_letters.startswith(clean)
-                or market_id_letters == clean
-                or chart_code_letters == clean
-                or clean in epic_letters
-            )
-            if not exact_instrument_match:
-                continue
-
-            resolved = {
-                "symbol": f"{base}/{quote}",
-                "epic": epic,
-                "expiry": (
-                    instrument.get("expiry")
-                    or candidate.get("expiry")
-                    or "-"
-                ),
-                "name": instrument_name,
-                "instrument_type": instrument_type,
-                "market_status": status,
-                "ig_market_id": market_id or None,
-                "ig_chart_code": chart_code or None,
-                "exact_pair_match": True,
-                "details": details,
-            }
-            self._market_cache[cache_key] = resolved
-            self._market_cache_at[cache_key] = now
-            return dict(resolved)
-
-        raise IGDemoError(
-            f"IG DEMO has no exact tradeable market for {base}/{quote}; "
-            "fuzzy market matches were rejected"
-        )
-
-    @staticmethod
-    def extract_snapshot_quote(details: Dict[str, Any]) -> Dict[str, Optional[float]]:
-        """Extract bid/offer from IG v3 or v4 market snapshots."""
-        snapshot = (details or {}).get("snapshot") or {}
-
-        def _num(value: Any) -> Optional[float]:
-            try:
-                if value is None or value == "":
-                    return None
-                number = float(value)
-                return number if number == number else None
-            except Exception:
-                return None
-
-        bid = _num(snapshot.get("bid"))
-        offer = _num(
-            snapshot.get("offer")
-            if snapshot.get("offer") is not None
-            else snapshot.get("ask")
-        )
-
-        if bid is None or offer is None:
-            ladder = snapshot.get("priceLadder") or []
-            if isinstance(ladder, list) and ladder:
-                first = ladder[0] if isinstance(ladder[0], dict) else {}
-                if bid is None:
-                    bid = _num(first.get("bid"))
-                if offer is None:
-                    offer = _num(
-                        first.get("ask")
-                        if first.get("ask") is not None
-                        else first.get("offer")
-                    )
-
-        return {"bid": bid, "offer": offer}
-
-    def market_details(
-        self,
-        epic: str,
-        *,
-        require_quote: bool = False,
-    ) -> Dict[str, Any]:
-        path = f"/markets/{urlparse.quote(epic, safe='')}"
-        details = self._request("GET", path, version=4)
-
-        if require_quote:
-            quote = self.extract_snapshot_quote(details)
-            if quote.get("bid") is None or quote.get("offer") is None:
-                try:
-                    v3 = self._request("GET", path, version=3)
-                    q3 = self.extract_snapshot_quote(v3)
-                    if q3.get("bid") is not None and q3.get("offer") is not None:
-                        merged = dict(details)
-                        merged["_quote_fallback_v3"] = True
-                        merged["_quote_snapshot"] = {
-                            "bid": q3["bid"],
-                            "offer": q3["offer"],
-                        }
-                        snap = dict(merged.get("snapshot") or {})
-                        v3snap = v3.get("snapshot") or {}
-                        if not snap.get("marketStatus") and v3snap.get("marketStatus"):
-                            snap["marketStatus"] = v3snap.get("marketStatus")
-                        merged["snapshot"] = snap
-                        return merged
-                except Exception:
-                    pass
-
-        return details
-
-
-    def search_markets(
-        self,
-        search_term: str,
-    ) -> Dict[str, Any]:
-        """Search IG DEMO markets using IG's own market search endpoint."""
-        term = str(search_term or "").strip()
-        if not term:
-            raise IGDemoError("IG DEMO market search term is empty")
-        return self._request(
-            "GET",
-            "/markets",
-            version=1,
-            query={"searchTerm": term},
-        )
-
-    @staticmethod
-    def _letters_words(value: Any) -> tuple[str, set[str]]:
-        text = str(value or "").upper()
-        letters = "".join(ch for ch in text if ch.isalnum())
-        words = {
-            "".join(ch for ch in word if ch.isalnum())
-            for word in text.replace("/", " ").replace("-", " ").split()
-        }
-        words.discard("")
-        return letters, words
-
-    @staticmethod
-    def _instrument_type_family(value: Any) -> str:
-        """Normalise IG instrument type variants into broad safe families."""
-        raw = str(value or "").upper().strip()
-        if "CURRENC" in raw or "FOREX" in raw or raw == "FX":
-            return "FX"
-        if "SHARE" in raw or "STOCK" in raw or "EQUITY" in raw:
-            return "SHARE"
-        if "INDICE" in raw or raw == "INDEX":
-            return "INDEX"
-        if "COMMOD" in raw:
-            return "COMMODITY"
-        if "CRYPTO" in raw or "BITCOIN" in raw or "ETHER" in raw:
-            return "CRYPTO"
-        if "ETF" in raw or "FUND" in raw:
-            return "ETF"
-        return raw
-
-    @classmethod
-    def _instrument_type_allowed(
-        cls,
-        actual: Any,
-        expected_types: Optional[list[str]],
-    ) -> bool:
-        if not expected_types:
-            return True
-        actual_family = cls._instrument_type_family(actual)
-        expected_families = {
-            cls._instrument_type_family(x)
-            for x in (expected_types or [])
-            if str(x or "").strip()
-        }
-        return actual_family in expected_families
-
-    def resolve_global_market(
-        self,
-        *,
-        search_terms: list[str],
-        expected_types: Optional[list[str]] = None,
-        name_tokens: Optional[list[str]] = None,
-        require_tradeable: bool = True,
-        cache_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Resolve a non-FX IG market safely from one or more search terms.
-
-        Unlike resolve_market(), this method is not limited to six-letter FX
-        pairs.  It still refuses obviously unrelated fuzzy search hits by
-        scoring the actual instrument name/type returned by /markets/{epic}.
-        """
-        terms = [str(x or "").strip() for x in (search_terms or []) if str(x or "").strip()]
-        if not terms:
-            raise IGDemoError("No IG DEMO global market search terms supplied")
-
-        allowed_types = {str(x or "").upper().strip() for x in (expected_types or []) if str(x or "").strip()}
-        tokens = [str(x or "").upper().strip() for x in (name_tokens or []) if str(x or "").strip()]
-        ck = str(cache_key or "|".join(terms)).upper().strip()
-        cache_id = f"GLOBAL:{ck}:{int(require_tradeable)}"
-        now = time.time()
-        cached = self._market_cache.get(cache_id)
-        cached_at = self._market_cache_at.get(cache_id, 0.0)
-        if cached and now - cached_at < self._market_cache_ttl:
-            return dict(cached)
-
-        rows: list[Dict[str, Any]] = []
-        seen: set[str] = set()
-        for term in terms[:3]:
-            response = self.search_markets(term)
-            for raw in response.get("markets", []) or []:
-                if not isinstance(raw, dict):
-                    continue
-                epic = str(raw.get("epic") or "").strip()
-                if not epic or epic in seen:
-                    continue
-                seen.add(epic)
-                rows.append(dict(raw))
-            if rows:
-                # Search is account-rate-limited.  Prefer one good query and
-                # only consume fallbacks when the first query found nothing.
-                break
-
-        if not rows:
-            raise IGDemoError(f"IG DEMO has no market matching {terms[0]}")
-
-        def row_score(row: Dict[str, Any]) -> tuple:
-            name = str(row.get("instrumentName") or row.get("name") or "").upper()
-            market_type = str(row.get("instrumentType") or row.get("type") or "").upper()
-            status = str(row.get("marketStatus") or "").upper()
-            expiry = str(row.get("expiry") or "").upper()
-            name_letters, name_words = self._letters_words(name)
-            token_hits = 0
-            for token in tokens:
-                token_letters = "".join(ch for ch in token if ch.isalnum())
-                if token_letters and (token_letters in name_letters or token_letters in name_words):
-                    token_hits += 1
-            type_ok = self._instrument_type_allowed(
-                market_type,
-                list(allowed_types),
-            )
-            banned = any(x in market_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE"))
-            cash_like = expiry in {"", "-", "DFB"} or "CASH" in name
-            return (
-                token_hits,
-                int(type_ok),
-                int(status == "TRADEABLE"),
-                int(cash_like),
-                -int(banned),
-            )
-
-        rows.sort(key=row_score, reverse=True)
-
-        for candidate in rows[:12]:
-            epic = str(candidate.get("epic") or "").strip()
-            if not epic:
-                continue
-            try:
-                details = self.market_details(epic)
-            except Exception:
-                continue
-            instrument = details.get("instrument") or {}
-            snapshot = details.get("snapshot") or {}
-            status = str(snapshot.get("marketStatus") or candidate.get("marketStatus") or "").upper()
-            instrument_type = str(instrument.get("type") or candidate.get("instrumentType") or "").upper()
-            if not self._instrument_type_allowed(
-                instrument_type,
-                list(allowed_types),
-            ):
-                continue
-            if any(x in instrument_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
-                continue
-            if require_tradeable and status != "TRADEABLE":
-                continue
-
-            instrument_name = str(instrument.get("name") or candidate.get("instrumentName") or candidate.get("name") or "")
-            name_letters, _ = self._letters_words(instrument_name)
-            # At least one explicit token must match when tokens were supplied.
-            if tokens:
-                matched = False
-                for token in tokens:
-                    token_letters = "".join(ch for ch in token if ch.isalnum())
-                    if token_letters and token_letters in name_letters:
-                        matched = True
-                        break
-                if not matched:
-                    continue
-
-            expiry = instrument.get("expiry") or candidate.get("expiry") or "-"
-            resolved = {
-                "symbol": ck,
-                "epic": epic,
-                "expiry": expiry,
-                "name": instrument_name,
-                "instrument_type": instrument_type,
-                "instrument_family": self._instrument_type_family(instrument_type),
-                "market_status": status,
-                "details": details,
-                "min_deal_size": self._min_deal_size(details),
-                "streaming_prices_available": instrument.get("streamingPricesAvailable"),
-                "unit": instrument.get("unit"),
-                "value_of_one_pip": instrument.get("valueOfOnePip"),
-            }
-            self._market_cache[cache_id] = resolved
-            self._market_cache_at[cache_id] = now
-            return dict(resolved)
-
-        raise IGDemoError(
-            f"IG DEMO search results for {terms[0]} did not contain a safe matching instrument"
-        )
-
-    def historical_prices_epic(
-        self,
-        epic: str,
-        *,
-        resolution: str = "MINUTE_15",
-        num_points: int = 160,
-    ) -> Dict[str, Any]:
-        clean_epic = str(epic or "").strip()
-        if not clean_epic:
-            raise IGDemoError("IG DEMO historical price EPIC is empty")
-        points = max(1, min(int(num_points), 500))
-        response = self._request(
-            "GET",
-            f"/prices/{urlparse.quote(clean_epic, safe='')}/{urlparse.quote(str(resolution), safe='')}/{points}",
-            version=2,
-        )
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "epic": clean_epic,
-            "resolution": str(resolution),
-            "requested_points": points,
-            "prices": response.get("prices") or [],
-            "metadata": response.get("metadata") or {},
-            "live_money_execution": False,
-        }
-
-    @staticmethod
-    def _deal_size_increment(details: Dict[str, Any]) -> float:
-        """Return IG's deal-size step where available.
-
-        IG does not expose the same increment field consistently for every
-        instrument. Prefer explicit step fields and fall back to minDealSize,
-        which is the safest valid step for DEMO execution when no separate
-        increment is published.
-        """
-        rules = details.get("dealingRules") or {}
-        instrument = details.get("instrument") or {}
-
-        candidates = [
-            rules.get("sizeIncrement"),
-            rules.get("dealSizeIncrement"),
-            instrument.get("sizeIncrement"),
-            instrument.get("dealSizeIncrement"),
-        ]
-
-        for raw in candidates:
-            if isinstance(raw, dict):
-                raw = raw.get("value")
-            try:
-                value = float(raw or 0.0)
-            except Exception:
-                value = 0.0
-            if value > 0:
-                return value
-
-        return IGDemoBroker._min_deal_size(details)
-
-    @staticmethod
-    def _normalise_deal_size(
-        requested_size: float,
-        *,
-        minimum_size: float,
-        increment: float,
-    ) -> float:
-        requested = max(0.0, float(requested_size or 0.0))
-        minimum = max(0.0, float(minimum_size or 0.0))
-        step = max(0.0, float(increment or 0.0))
-
-        value = max(requested, minimum)
-
-        if step > 0:
-            # Round upward to a valid broker step.
-            value = math.ceil((value - 1e-12) / step) * step
-
-        return float(f"{value:.10f}")
-
-    def open_epic_position(
-        self,
-        *,
-        epic: str,
-        direction: str,
-        size: Optional[float] = None,
-        deal_reference: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Open an IG DEMO position on an already-resolved EPIC."""
-        direction = str(direction or "").upper().strip()
-        if direction not in {"BUY", "SELL"}:
-            raise IGDemoError("Direction must be BUY or SELL")
-        clean_epic = str(epic or "").strip()
-        if not clean_epic:
-            raise IGDemoError("IG DEMO EPIC is empty")
-
-        details = self.market_details(clean_epic)
-        instrument = details.get("instrument") or {}
-        snapshot = details.get("snapshot") or {}
-        market_status = str(snapshot.get("marketStatus") or "").upper()
-        if market_status != "TRADEABLE":
-            raise IGDemoError(f"IG DEMO market is not tradeable: {market_status or 'UNKNOWN'}")
-
-        instrument_type = str(instrument.get("type") or "").upper()
-        if any(x in instrument_type for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
-            raise IGDemoError(f"Unsupported IG DEMO instrument type for autonomous execution: {instrument_type}")
-
-        requested_size = self.default_size if size is None else float(size)
-        min_size = self._min_deal_size(details)
-        size_increment = self._deal_size_increment(details)
-        final_size = self._normalise_deal_size(
-            requested_size,
-            minimum_size=min_size,
-            increment=size_increment,
-        )
-        payload: Dict[str, Any] = {
-            "currencyCode": self._default_currency(instrument),
-            "dealReference": (deal_reference or f"JSCMP_{uuid.uuid4().hex[:20]}")[:30],
-            "direction": direction,
-            "epic": clean_epic,
-            "expiry": str(instrument.get("expiry") or "-"),
-            "forceOpen": True,
-            "guaranteedStop": False,
-            "orderType": "MARKET",
-            "size": round(final_size, 12),
-        }
-        acknowledgement = self._request("POST", "/positions/otc", version=2, payload=payload)
-        ref = str(acknowledgement.get("dealReference") or payload["dealReference"])
-        confirmation = self.confirm(ref)
-        if str(confirmation.get("dealStatus") or "").upper() == "REJECTED":
-            raise IGDemoError(
-                "IG DEMO rejected order: " + str(confirmation.get("reason") or confirmation)
-            )
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "symbol": str(instrument.get("name") or clean_epic),
-            "epic": clean_epic,
-            "instrument_type": instrument_type,
-            "market_status": market_status,
-            "direction": direction,
-            "requestedSize": requested_size,
-            "minimumSize": min_size,
-            "sizeIncrement": size_increment,
-            "normalisedSize": final_size,
-            "size": final_size,
-            "dealReference": ref,
-            "dealId": confirmation.get("dealId"),
-            "level": confirmation.get("level"),
-            "dealStatus": confirmation.get("dealStatus"),
-            "reason": confirmation.get("reason"),
-            "live_money_execution": False,
-        }
-
-    def historical_prices(
-        self,
-        symbol: str,
-        *,
-        resolution: str = "MINUTE_15",
-        num_points: int = 160,
-    ) -> Dict[str, Any]:
-        """Return IG DEMO historical candles for an exact FX pair.
-
-        Uses IG's DEMO-only /prices endpoint. Market resolution still goes
-        through the exact-pair safety check before any price request is made.
-        """
-        market = self.resolve_market(
-            symbol,
-            require_tradeable=False,
-        )
-
-        points = max(
-            1,
-            min(
-                int(num_points),
-                500,
-            ),
-        )
-
-        epic = str(
-            market.get("epic")
-            or ""
-        ).strip()
-
-        if not epic:
-            raise IGDemoError(
-                f"IG DEMO market has no EPIC for {symbol}"
-            )
-
-        response = self._request(
-            "GET",
-            (
-                f"/prices/"
-                f"{urlparse.quote(epic, safe='')}/"
-                f"{urlparse.quote(str(resolution), safe='')}/"
-                f"{points}"
-            ),
-            version=2,
-        )
-
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "symbol": market.get("symbol"),
-            "epic": epic,
-            "resolution": str(resolution),
-            "requested_points": points,
-            "prices": response.get("prices") or [],
-            "metadata": response.get("metadata") or {},
-            "live_money_execution": False,
-        }
-
-    @staticmethod
-    def _default_currency(instrument: Dict[str, Any]) -> str:
-        currencies = instrument.get("currencies") or []
-        for item in currencies:
-            if isinstance(item, dict) and item.get("isDefault"):
-                code = str(item.get("code") or "").upper()
-                if len(code) == 3:
-                    return code
-        for item in currencies:
-            if isinstance(item, dict):
-                code = str(item.get("code") or "").upper()
-                if len(code) == 3:
-                    return code
-        raise IGDemoError(
-            "IG DEMO market has no valid order currency"
-        )
-
-    @staticmethod
-    def _min_deal_size(details: Dict[str, Any]) -> float:
-        rules = details.get("dealingRules") or {}
-        min_size = rules.get("minDealSize") or {}
-        try:
-            return max(0.0, float(min_size.get("value") or 0.0))
-        except Exception:
-            return 0.0
-
-    def confirm(
-        self,
-        deal_reference: str,
-        *,
-        timeout_seconds: float = 12.0,
-    ) -> Dict[str, Any]:
-        deadline = time.time() + max(1.0, timeout_seconds)
-        last: Dict[str, Any] = {}
-
-        while time.time() < deadline:
-            try:
-                last = self._request(
-                    "GET",
-                    f"/confirms/{urlparse.quote(deal_reference, safe='')}",
-                    version=1,
-                )
-            except IGDemoError as exc:
-                # Confirm may briefly be unavailable after acknowledgement.
-                if "404" not in str(exc):
-                    raise
-                time.sleep(0.5)
-                continue
-
-            if last:
-                return last
-            time.sleep(0.5)
-
-        return {
-            "dealReference": deal_reference,
-            "dealStatus": "PENDING_CONFIRMATION",
-        }
-
-    def open_market_position(
-        self,
-        *,
-        symbol: str,
-        direction: str,
-        size: Optional[float] = None,
-        stop_distance: Optional[float] = None,
-        limit_distance: Optional[float] = None,
-        deal_reference: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        direction = str(direction or "").upper().strip()
-        if direction not in {"BUY", "SELL"}:
-            raise IGDemoError("Direction must be BUY or SELL")
-
-        market = self.resolve_market(
-            symbol,
-            require_tradeable=True,
-        )
-        details = market["details"]
-        instrument = details.get("instrument") or {}
-
-        requested_size = (
-            self.default_size
-            if size is None
-            else float(size)
-        )
-        min_size = self._min_deal_size(details)
-        final_size = max(requested_size, min_size)
-
-        payload: Dict[str, Any] = {
-            "currencyCode": self._default_currency(instrument),
-            "dealReference": (
-                deal_reference
-                or f"JASONG_{uuid.uuid4().hex[:20]}"
-            )[:30],
-            "direction": direction,
-            "epic": market["epic"],
-            "expiry": str(market["expiry"] or "-"),
-            "forceOpen": True,
-            "guaranteedStop": False,
-            "orderType": "MARKET",
-            "size": round(final_size, 12),
-        }
-
-        if stop_distance is not None:
-            payload["stopDistance"] = float(stop_distance)
-        if limit_distance is not None:
-            payload["limitDistance"] = float(limit_distance)
-
-        acknowledgement = self._request(
-            "POST",
-            "/positions/otc",
-            version=2,
-            payload=payload,
-        )
-        ref = str(
-            acknowledgement.get("dealReference")
-            or payload["dealReference"]
-        )
-
-        confirmation = self.confirm(ref)
-        deal_status = str(
-            confirmation.get("dealStatus")
-            or ""
-        ).upper()
-
-        if deal_status == "REJECTED":
-            raise IGDemoError(
-                "IG DEMO rejected order: "
-                f"{confirmation.get('reason') or confirmation}"
-            )
-
-        return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "symbol": market["symbol"],
-            "epic": market["epic"],
-            "direction": direction,
-            "size": payload["size"],
-            "currencyCode": payload["currencyCode"],
-            "dealReference": ref,
-            "dealId": confirmation.get("dealId"),
-            "dealStatus": (
-                deal_status or "PENDING_CONFIRMATION"
-            ),
-            "status": confirmation.get("status"),
-            "level": confirmation.get("level"),
-            "reason": confirmation.get("reason"),
-            "live_money_execution": False,
-            "demo_execution": True,
-        }
-
-    def _find_open_position(
-        self,
-        deal_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        response = self.positions()
-        for item in response.get("positions", []) or []:
-            if not isinstance(item, dict):
-                continue
-            position = item.get("position") or {}
-            if str(position.get("dealId") or "") == deal_id:
-                return item
-        return None
-
-    @staticmethod
-    def _open_position_size(
-        position: Dict[str, Any],
-    ) -> float:
-        """Return the current REST open size across IG position API versions.
-
-        IG /positions v2 uses `position.size`; v1 used `position.dealSize`.
-        The broker reads /positions with version=2, so `size` must be the
-        primary field. Keeping the fallback preserves compatibility with old
-        payloads and persisted test fixtures.
-        """
-        raw = (
-            position.get("size")
-            if position.get("size") is not None
-            else position.get("dealSize")
-        )
-        try:
-            value = float(raw or 0.0)
-        except Exception:
-            value = 0.0
-        return value if value > 0 else 0.0
-
-    @staticmethod
-    def _market_status_from_position_item(
-        item: Dict[str, Any],
-    ) -> tuple[str, str]:
-        """Return (market_status, epic) from an IG /positions row."""
-        market = item.get("market") or {}
-        position = item.get("position") or {}
-        if not isinstance(market, dict):
-            market = {}
-        if not isinstance(position, dict):
-            position = {}
-
-        status = str(
-            market.get("marketStatus")
-            or ""
-        ).upper().strip()
-        epic = str(
-            market.get("epic")
-            or position.get("epic")
-            or ""
-        ).strip()
-        return status, epic
-
-    @staticmethod
-    def _close_allowed_market_status(
-        market_status: str,
-    ) -> bool:
-        """Only submit a market close when IG says closings are possible."""
-        return str(
-            market_status
-            or ""
-        ).upper().strip() in {
-            "TRADEABLE",
-            "CLOSINGS_ONLY",
-        }
-
-    def close_position(
-        self,
-        deal_id: str,
-    ) -> Dict[str, Any]:
-        """Close exactly the broker-reported remaining IG DEMO position size.
-
-        Safety / integrity behaviour:
-        - fetches authoritative /positions immediately before closing;
-        - uses v2 `position.size` (with v1 `dealSize` fallback);
-        - submits one close request for that exact remaining size;
-        - treats an explicit IG rejection as an error;
-        - re-reads /positions to verify whether the deal disappeared;
-        - never reports a verified close merely because the DELETE request
-          was accepted.
-
-        If IG has accepted the close but the position is still visible during
-        the short verification window, the caller receives CLOSE_PENDING and
-        should reconcile on its next normal broker-sync tick instead of
-        blindly submitting duplicate close requests in a tight loop.
-        """
-        deal_id = str(deal_id or "").strip()
-        if not deal_id:
-            raise IGDemoError("IG DEMO close_position requires deal_id")
-
-        item = self._find_open_position(deal_id)
-        if item is None:
-            return {
-                "broker": "IG",
-                "environment": "DEMO",
-                "dealId": deal_id,
-                "status": "ALREADY_CLOSED_OR_NOT_FOUND",
-                "dealStatus": "ACCEPTED",
-                "requestedCloseSize": 0.0,
-                "remainingSize": 0.0,
-                "closeVerified": True,
-                "live_money_execution": False,
-                "demo_execution": True,
+        all_outcomes = actual + shadow
+        for name, low, high in bucket_defs:
+            rows = [t for t in all_outcomes if low <= self._confidence01(t.get("quant_confidence")) < high and t.get("result") in {"WIN", "LOSS"}]
+            wins = sum(1 for t in rows if t.get("result") == "WIN")
+            buckets[name] = {
+                "trades": len(rows),
+                "wins": wins,
+                "losses": len(rows) - wins,
+                "win_rate_pct": round((wins / len(rows)) * 100.0, 2) if rows else 0.0,
             }
 
-        market_status, epic = (
-            self._market_status_from_position_item(
-                item
-            )
-        )
-
-        # V6.7.2a: a due close is not an execution failure when the underlying
-        # weekday market is unavailable. Avoid sending DELETE instructions
-        # that IG will reject with MARKET_CLOSED_WITH_EDITS. The normal broker
-        # reconciliation loop will re-read /positions; once marketStatus becomes
-        # TRADEABLE or CLOSINGS_ONLY, the close is submitted automatically.
-        if (
-            market_status
-            and not self._close_allowed_market_status(
-                market_status
-            )
-        ):
-            return {
-                "broker": "IG",
-                "environment": "DEMO",
-                "dealId": deal_id,
-                "epic": epic or None,
-                "marketStatus": market_status,
-                "status": "CLOSE_DEFERRED_MARKET_CLOSED",
-                "dealStatus": "DEFERRED",
-                "requestedCloseSize": 0.0,
-                "remainingSize": self._open_position_size(
-                    item.get("position") or {}
-                ),
-                "closeVerified": False,
-                "closeDeferred": True,
-                "deferredReason": (
-                    "IG market is not currently open for position closing"
-                ),
-                "live_money_execution": False,
-                "demo_execution": True,
-            }
-
-        position = item.get("position") or {}
-        original_direction = str(
-            position.get("direction") or ""
-        ).upper()
-        if original_direction not in {"BUY", "SELL"}:
-            raise IGDemoError(
-                f"Invalid IG DEMO direction for deal {deal_id}: "
-                f"{original_direction or '-'}"
-            )
-
-        close_direction = (
-            "SELL"
-            if original_direction == "BUY"
-            else "BUY"
-        )
-        size = self._open_position_size(position)
-        if size <= 0:
-            # Include both supported field names in the diagnostic without
-            # exposing credentials/tokens.
-            raise IGDemoError(
-                "Invalid IG DEMO open size for deal "
-                f"{deal_id}; v2 size={position.get('size')!r}, "
-                f"v1 dealSize={position.get('dealSize')!r}"
-            )
-
-        acknowledgement = self._request(
-            "POST",
-            "/positions/otc",
-            version=1,
-            payload={
-                "dealId": deal_id,
-                "direction": close_direction,
-                "orderType": "MARKET",
-                "size": size,
-            },
-            extra_headers={"_method": "DELETE"},
-        )
-
-        ref = str(
-            acknowledgement.get("dealReference")
-            or ""
-        )
-
-        confirmation: Dict[str, Any] = {}
-        confirmation_error: Optional[str] = None
-        if ref:
-            try:
-                confirmation = self.confirm(ref)
-            except Exception as exc:
-                # A close acknowledgement can still be valid even when the
-                # confirm endpoint is temporarily unavailable/rate-limited.
-                # Broker reconciliation below remains the source of truth.
-                confirmation_error = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-        deal_status = str(
-            confirmation.get("dealStatus")
-            or ""
-        ).upper()
-        if deal_status == "REJECTED":
-            raise IGDemoError(
-                "IG DEMO rejected close: "
-                f"{confirmation.get('reason') or confirmation}"
-            )
-
-        close_verified = False
-        remaining_size: Optional[float] = None
-        verification_checks = 0
-
-        # Short read-after-write verification only. If IG is eventually
-        # consistent, the normal 15-second broker reconciliation will finish
-        # the job without generating duplicate close instructions.
-        for delay in (0.20, 0.45, 0.80):
-            time.sleep(delay)
-            verification_checks += 1
-            current = self._find_open_position(deal_id)
-            if current is None:
-                remaining_size = 0.0
-                close_verified = True
-                break
-            current_position = current.get("position") or {}
-            remaining_size = self._open_position_size(
-                current_position
-            )
-
-        if remaining_size is None:
-            remaining_size = size
-
-        status = (
-            "CLOSED_VERIFIED"
-            if close_verified
-            else "CLOSE_PENDING"
-        )
-
         return {
-            "broker": "IG",
-            "environment": "DEMO",
-            "dealId": deal_id,
-            "dealReference": ref or None,
-            "dealStatus": (
-                confirmation.get("dealStatus")
-                or (
-                    "ACCEPTED"
-                    if ref
-                    else None
-                )
-            ),
-            "status": status,
-            "confirmationStatus": confirmation.get("status"),
-            "level": confirmation.get("level"),
-            "reason": confirmation.get("reason"),
-            "requestedCloseSize": size,
-            "openSizeBefore": size,
-            "remainingSize": remaining_size,
-            "closeVerified": close_verified,
-            "verificationChecks": verification_checks,
-            "confirmationError": confirmation_error,
-            "positionSizeSource": (
-                "size"
-                if position.get("size") is not None
-                else "dealSize"
-            ),
-            "live_money_execution": False,
-            "demo_execution": True,
+            "version": self.VERSION,
+            "enabled": bool(state.get("enabled", True)),
+            "paper_only": True,
+            "live_execution": False,
+            "max_watchers": self.max_watchers,
+            "active_watchers": len(watchers),
+            "watcher_refresh_seconds": self.watcher_refresh_seconds,
+            "max_open_trades": self.max_open_trades,
+            "open_trades": len(open_trades),
+            "paper_balance": state.get("paper_balance"),
+            "starting_balance": state.get("starting_balance"),
+            "ticks": state.get("ticks"),
+            "last_tick_at": state.get("last_tick_at"),
+            "last_error": state.get("last_error"),
+            "actual": self._stats_for(actual),
+            "by_entry_class": classes,
+            "shadow": shadow_stats,
+            "confidence_buckets": buckets,
         }
+
+    def trades(self, limit: int = 200) -> Dict[str, Any]:
+        """Return actual PAPER learning trades for the mobile Trade Lab."""
+        with self._lock:
+            opened = [dict(x) for x in self._state.get("open_trades", [])]
+            settled = [dict(x) for x in self._state.get("settled_trades", [])]
+        rows = settled + opened
+        rows.sort(key=lambda x: float(x.get("opened_at") or 0.0), reverse=True)
+        return {
+            "version": self.VERSION,
+            "trades": rows[:max(1, min(int(limit), 2000))],
+            "open": len([x for x in opened if x.get("status") == "OPEN"]),
+            "settled": len([x for x in settled if x.get("status") == "CLOSED"]),
+            "live_execution": False,
+        }
+
+    def journal(self, limit: int = 200) -> Dict[str, Any]:
+        with self._lock:
+            rows = list(self._state.get("journal", []))
+        return {
+            "version": self.VERSION,
+            "entries": rows[-max(1, min(int(limit), 2000)):],
+            "count": len(rows),
+            "live_execution": False,
+        }
+
+    def watchers(self) -> Dict[str, Any]:
+        with self._lock:
+            rows = list(self._state.get("watchers", []))
+        return {"version": self.VERSION, "watchers": rows, "count": len(rows), "live_execution": False}
