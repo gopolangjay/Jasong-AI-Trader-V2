@@ -242,32 +242,149 @@ class IGDemoMirror:
         return mirrors
 
     def _ensure_phase_state(self) -> None:
-        """Migrate old Phase-1 mirror data and ensure rolling phase metadata."""
+        """Ensure rolling phase metadata and migrate legacy broker evidence.
+
+        V6.8.5 migration rule:
+        - If at least `phase_target` broker-settled WIN/LOSS mirror records
+          already exist, the oldest target outcomes become archived Phase 1.
+        - Recovered JASONG_* trades are legitimate broker evidence and are
+          included in that historical Phase 1.
+        - Any later/new records are moved to Phase 2 so the first phase is not
+          silently restarted from zero after deployment.
+        """
         with self._lock:
-            current = int(self._state.get("current_phase_id") or 1)
             phases = self._state.setdefault("phases", {})
-            if "1" not in phases:
-                phases["1"] = {
-                    "phase_id": 1,
-                    "status": "ACTIVE",
-                    "target": self.phase_target,
-                    "started_at": self._state.get("last_sync_at") or time.time(),
-                    "completed_at": None,
-                }
-            for mirror in self._mirrors().values():
-                if not isinstance(mirror, dict):
-                    continue
-                if mirror.get("phase_id") is None and not mirror.get("recovered_from_ig"):
-                    mirror["phase_id"] = 1
-            self._state["current_phase_id"] = max(1, current)
+            mirrors = [
+                row
+                for row in self._mirrors().values()
+                if isinstance(row, dict)
+            ]
+
+            migration_done = bool(
+                self._state.get("v685_phase_migration_done")
+            )
+
+            if not migration_done:
+                settled = [
+                    row for row in mirrors
+                    if row.get("ig_deal_id")
+                    and str(row.get("broker_result") or "").upper()
+                    in {"WIN", "LOSS"}
+                ]
+                settled.sort(
+                    key=lambda r: float(
+                        r.get("closed_at")
+                        or r.get("created_at")
+                        or 0.0
+                    )
+                )
+
+                if len(settled) >= self.phase_target:
+                    phase1_ids = {
+                        str(row.get("trade_id") or "")
+                        for row in settled[: self.phase_target]
+                    }
+
+                    for row in mirrors:
+                        trade_id = str(row.get("trade_id") or "")
+                        if trade_id in phase1_ids:
+                            row["phase_id"] = 1
+                        else:
+                            # All records after the historical 10-trade
+                            # baseline belong to the next learning phase.
+                            row["phase_id"] = 2
+
+                    phase1_rows = [
+                        row for row in mirrors
+                        if int(row.get("phase_id") or 0) == 1
+                    ]
+                    phase1_perf = self._stats_for_rows(phase1_rows)
+
+                    phases["1"] = {
+                        "phase_id": 1,
+                        "status": "COMPLETE",
+                        "target": self.phase_target,
+                        "started_at": min(
+                            [
+                                float(r.get("created_at") or time.time())
+                                for r in phase1_rows
+                            ]
+                            or [time.time()]
+                        ),
+                        "completed_at": max(
+                            [
+                                float(
+                                    r.get("closed_at")
+                                    or r.get("created_at")
+                                    or time.time()
+                                )
+                                for r in phase1_rows
+                            ]
+                            or [time.time()]
+                        ),
+                        "performance": phase1_perf,
+                        "migration": "V6.8.5_BROKER_SETTLED_BASELINE",
+                    }
+                    phases.setdefault(
+                        "2",
+                        {
+                            "phase_id": 2,
+                            "status": "ACTIVE",
+                            "target": self.phase_target,
+                            "started_at": time.time(),
+                            "completed_at": None,
+                        },
+                    )
+                    self._state["current_phase_id"] = 2
+                else:
+                    phases.setdefault(
+                        "1",
+                        {
+                            "phase_id": 1,
+                            "status": "ACTIVE",
+                            "target": self.phase_target,
+                            "started_at": (
+                                self._state.get("last_sync_at")
+                                or time.time()
+                            ),
+                            "completed_at": None,
+                        },
+                    )
+                    for row in mirrors:
+                        if row.get("phase_id") is None:
+                            row["phase_id"] = 1
+                    self._state["current_phase_id"] = int(
+                        self._state.get("current_phase_id") or 1
+                    )
+
+                self._state["v685_phase_migration_done"] = True
+
+            else:
+                current = int(
+                    self._state.get("current_phase_id") or 1
+                )
+                phases.setdefault(
+                    str(current),
+                    {
+                        "phase_id": current,
+                        "status": "ACTIVE",
+                        "target": self.phase_target,
+                        "started_at": time.time(),
+                        "completed_at": None,
+                    },
+                )
+
             self._state["phases"] = phases
+
         self._maybe_roll_phase()
         self._persist()
 
     def _phase_rows(self, phase_id: int) -> list[Dict[str, Any]]:
         rows = []
         for item in self._mirrors().values():
-            if not isinstance(item, dict) or item.get("recovered_from_ig"):
+            if not isinstance(item, dict):
+                continue
+            if item.get("phase_id") is None:
                 continue
             item_phase = int(item.get("phase_id") or 1)
             if item_phase == int(phase_id):
@@ -297,7 +414,7 @@ class IGDemoMirror:
         rows = self._phase_rows(pid)
         overall = self._stats_for_rows(rows)
         by_class: Dict[str, Any] = {}
-        for cls in ("ELITE", "BOUNDARY", "LEARNING"):
+        for cls in ("ELITE", "BOUNDARY", "LEARNING", "CONFIDENCE"):
             bucket = [r for r in rows if str(r.get("trade_class") or r.get("entry_class") or "").upper() == cls]
             by_class[cls] = self._stats_for_rows(bucket)
         overall["by_class"] = by_class
@@ -1192,7 +1309,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.3-IG-DEMO-ROLLING-PHASES",
+                "version": "6.8.5-IG-DEMO-ROLLING-PHASES",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
