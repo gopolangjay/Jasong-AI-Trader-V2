@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
+import math
 
 
 class IGDemoError(RuntimeError):
@@ -958,6 +959,56 @@ class IGDemoBroker:
             "live_money_execution": False,
         }
 
+    @staticmethod
+    def _deal_size_increment(details: Dict[str, Any]) -> float:
+        """Return IG's deal-size step where available.
+
+        IG does not expose the same increment field consistently for every
+        instrument. Prefer explicit step fields and fall back to minDealSize,
+        which is the safest valid step for DEMO execution when no separate
+        increment is published.
+        """
+        rules = details.get("dealingRules") or {}
+        instrument = details.get("instrument") or {}
+
+        candidates = [
+            rules.get("sizeIncrement"),
+            rules.get("dealSizeIncrement"),
+            instrument.get("sizeIncrement"),
+            instrument.get("dealSizeIncrement"),
+        ]
+
+        for raw in candidates:
+            if isinstance(raw, dict):
+                raw = raw.get("value")
+            try:
+                value = float(raw or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0:
+                return value
+
+        return IGDemoBroker._min_deal_size(details)
+
+    @staticmethod
+    def _normalise_deal_size(
+        requested_size: float,
+        *,
+        minimum_size: float,
+        increment: float,
+    ) -> float:
+        requested = max(0.0, float(requested_size or 0.0))
+        minimum = max(0.0, float(minimum_size or 0.0))
+        step = max(0.0, float(increment or 0.0))
+
+        value = max(requested, minimum)
+
+        if step > 0:
+            # Round upward to a valid broker step.
+            value = math.ceil((value - 1e-12) / step) * step
+
+        return float(f"{value:.10f}")
+
     def open_epic_position(
         self,
         *,
@@ -987,7 +1038,12 @@ class IGDemoBroker:
 
         requested_size = self.default_size if size is None else float(size)
         min_size = self._min_deal_size(details)
-        final_size = max(requested_size, min_size)
+        size_increment = self._deal_size_increment(details)
+        final_size = self._normalise_deal_size(
+            requested_size,
+            minimum_size=min_size,
+            increment=size_increment,
+        )
         payload: Dict[str, Any] = {
             "currencyCode": self._default_currency(instrument),
             "dealReference": (deal_reference or f"JSCMP_{uuid.uuid4().hex[:20]}")[:30],
@@ -1016,6 +1072,8 @@ class IGDemoBroker:
             "direction": direction,
             "requestedSize": requested_size,
             "minimumSize": min_size,
+            "sizeIncrement": size_increment,
+            "normalisedSize": final_size,
             "size": final_size,
             "dealReference": ref,
             "dealId": confirmation.get("dealId"),
