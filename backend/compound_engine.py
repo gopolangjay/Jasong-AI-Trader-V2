@@ -13,7 +13,7 @@ from ig_demo_broker import IGDemoBroker, IGDemoError
 
 
 class EliteCompoundEngine:
-    """Jasong V6.7.2a Elite 80/20 Compound Engine — evidence-integrity release.
+    """Jasong V6.7.3 Elite 80/20 Compound Engine — global multi-market release.
 
     Design goals:
       * preserve the existing Jasong AI / PAPER / SHADOW learning engines;
@@ -22,7 +22,7 @@ class EliteCompoundEngine:
       * keep compound state in its own persistent file;
       * use a configurable starting capital, +50% basket target, -15% basket stop,
         20% profit harvest and 80% profit compounding;
-      * select up to five elite, diversified FX markets;
+      * select up to five elite, diversified markets across FX, indices, commodities, crypto, shares, ETFs and rates;
       * never touch manual IG positions or legacy JASONG_* positions;
       * never target IG live-money endpoints.
 
@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.7.2a"
+    VERSION = "6.7.3"
     DEAL_PREFIX = "JSCMP_"
     CLOSE_ALLOWED_MARKET_STATUSES = {"TRADEABLE", "CLOSINGS_ONLY"}
 
@@ -85,6 +85,20 @@ class EliteCompoundEngine:
         )
         self.max_spread_bps = self._float_env(
             "COMPOUND_MAX_SPREAD_BPS", 8.0, 0.1, 100.0
+        )
+        # V6.7.3 uses asset-class-aware spread ceilings.  These are raw
+        # spread-in-basis-points gates, not forecasts of total trading cost.
+        self.asset_spread_bps = {
+            "FX": self._float_env("COMPOUND_FX_MAX_SPREAD_BPS", 8.0, 0.1, 100.0),
+            "INDEX": self._float_env("COMPOUND_INDEX_MAX_SPREAD_BPS", 18.0, 0.1, 200.0),
+            "COMMODITY": self._float_env("COMPOUND_COMMODITY_MAX_SPREAD_BPS", 22.0, 0.1, 300.0),
+            "CRYPTO": self._float_env("COMPOUND_CRYPTO_MAX_SPREAD_BPS", 80.0, 0.1, 500.0),
+            "SHARE": self._float_env("COMPOUND_SHARE_MAX_SPREAD_BPS", 35.0, 0.1, 300.0),
+            "ETF": self._float_env("COMPOUND_ETF_MAX_SPREAD_BPS", 35.0, 0.1, 300.0),
+            "RATE": self._float_env("COMPOUND_RATE_MAX_SPREAD_BPS", 25.0, 0.1, 300.0),
+        }
+        self.max_theme_exposure = self._int_env(
+            "COMPOUND_MAX_THEME_EXPOSURE", 2, 1, 5
         )
         self.high_correlation_abs = self._float_env(
             "COMPOUND_HIGH_CORRELATION_ABS", 0.80, 0.0, 1.0
@@ -546,15 +560,23 @@ class EliteCompoundEngine:
             "NEAR_VERIFIED": 92.0,
             "WATCH": 82.0,
             "AI_LEARNING_SHADOW_PROMOTION": 86.0,
+            "GLOBAL_VERIFIED": 100.0,
+            "GLOBAL_NEAR_VERIFIED": 92.0,
         }.get(d, 0.0)
         return 0.60 * q_score + 0.40 * d_score
 
     @staticmethod
     def _normalise_pair(value: Any) -> str:
+        """Normalise true FX pairs without mangling non-FX market keys."""
         text = str(value or "").upper().strip()
-        letters = "".join(ch for ch in text if ch.isalpha())
-        if len(letters) >= 6:
-            letters = letters[:6]
+        compact = text.replace("=X", "").replace(" ", "")
+        if "/" in compact:
+            parts = compact.split("/", 1)
+            if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3 and parts[0].isalpha() and parts[1].isalpha():
+                return f"{parts[0]}/{parts[1]}"
+        letters = "".join(ch for ch in compact if ch.isalpha())
+        # Only six-letter alphabetic values are treated as compact FX pairs.
+        if len(compact) == 6 and len(letters) == 6:
             return f"{letters[:3]}/{letters[3:]}"
         return text
 
@@ -604,15 +626,47 @@ class EliteCompoundEngine:
                     continue
         return 0.0
 
-    def _spread_metrics(self, symbol: str) -> Dict[str, Any]:
-        market = self.broker.resolve_market(symbol, require_tradeable=True)
-        details = market.get("details") or {}
+    def _spread_metrics(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        symbol = str(candidate.get("symbol") or candidate.get("market") or "")
+        epic = str(candidate.get("ig_epic") or "").strip()
+        asset_class = str(candidate.get("asset_class") or "FX").upper().strip()
+
+        if epic:
+            details = self.broker.market_details(epic)
+            instrument = details.get("instrument") or {}
+            snapshot = details.get("snapshot") or {}
+            status = str(snapshot.get("marketStatus") or candidate.get("ig_market_status") or "").upper()
+            if status != "TRADEABLE":
+                return {
+                    "ok": False,
+                    "reason": f"IG DEMO market status {status or 'UNKNOWN'}",
+                    "spread_bps": None,
+                    "spread_score": 0.0,
+                    "market": {
+                        "epic": epic,
+                        "name": instrument.get("name") or candidate.get("market"),
+                        "instrument_type": instrument.get("type"),
+                        "market_status": status,
+                        "details": details,
+                    },
+                }
+            market = {
+                "symbol": symbol,
+                "epic": epic,
+                "name": instrument.get("name") or candidate.get("market"),
+                "instrument_type": instrument.get("type"),
+                "market_status": status,
+                "details": details,
+            }
+        else:
+            market = self.broker.resolve_market(symbol, require_tradeable=True)
+            details = market.get("details") or {}
+            snapshot = details.get("snapshot") or {}
+
         snapshot = details.get("snapshot") or {}
         bid = self._safe_float(snapshot.get("bid"), 0.0)
         offer = self._safe_float(
-            snapshot.get("offer")
-            if snapshot.get("offer") is not None
-            else snapshot.get("ask"),
+            snapshot.get("offer") if snapshot.get("offer") is not None else snapshot.get("ask"),
             0.0,
         )
         if bid <= 0 or offer <= 0 or offer < bid:
@@ -625,11 +679,13 @@ class EliteCompoundEngine:
             }
         mid = (bid + offer) / 2.0
         spread_bps = ((offer - bid) / mid) * 10000.0 if mid > 0 else 999.0
-        spread_score = max(0.0, 100.0 * (1.0 - spread_bps / self.max_spread_bps))
+        limit = self.asset_spread_bps.get(asset_class, self.max_spread_bps)
+        spread_score = max(0.0, 100.0 * (1.0 - spread_bps / max(limit, 0.0001)))
         return {
-            "ok": spread_bps <= self.max_spread_bps,
-            "reason": None if spread_bps <= self.max_spread_bps else "Spread above elite limit",
+            "ok": spread_bps <= limit,
+            "reason": None if spread_bps <= limit else f"{asset_class} spread {spread_bps:.1f} bps > {limit:.1f} bps",
             "spread_bps": spread_bps,
+            "spread_limit_bps": limit,
             "spread_score": spread_score,
             "market": market,
         }
@@ -664,7 +720,10 @@ class EliteCompoundEngine:
                 reasons.append(f"Fast score {fast:.1f} < {self.fast_score_min:.0f}")
             if quality not in {"A+", "A"}:
                 reasons.append(f"Quality {quality or '-'} is not A/A+")
-            if deep not in {"VERIFIED", "NEAR_VERIFIED", "WATCH", "AI_LEARNING_SHADOW_PROMOTION"}:
+            if deep not in {
+                "VERIFIED", "NEAR_VERIFIED", "WATCH", "AI_LEARNING_SHADOW_PROMOTION",
+                "GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED",
+            }:
                 reasons.append(f"Deep status {deep or '-'} not elite-eligible")
             if not direction_match:
                 reasons.append("Live direction does not agree")
@@ -688,7 +747,7 @@ class EliteCompoundEngine:
                 continue
 
             try:
-                spread = self._spread_metrics(symbol)
+                spread = self._spread_metrics(row)
             except Exception as exc:
                 row["rejection_reasons"] = [f"IG DEMO preflight: {type(exc).__name__}: {exc}"]
                 screened.append(row)
@@ -696,6 +755,7 @@ class EliteCompoundEngine:
 
             row["spread_bps"] = spread.get("spread_bps")
             row["spread_score"] = spread.get("spread_score")
+            row["spread_limit_bps"] = spread.get("spread_limit_bps")
             row["ig_epic"] = (spread.get("market") or {}).get("epic")
             if not spread.get("ok"):
                 row["rejection_reasons"] = [str(spread.get("reason") or "Spread gate failed")]
@@ -750,8 +810,31 @@ class EliteCompoundEngine:
                 row["rejection_reasons"] = ["Currency exposure limit"]
                 continue
 
+            # Multi-asset thematic concentration guard.  A US Tech index and
+            # several US tech shares are not treated as independent exposure.
+            theme_counts: Dict[str, int] = {}
+            for existing in selected:
+                for tag in existing.get("exposure_tags") or []:
+                    key = str(tag or "").upper().strip()
+                    if key:
+                        theme_counts[key] = theme_counts.get(key, 0) + 1
+            theme_block = None
+            for tag in row.get("exposure_tags") or []:
+                key = str(tag or "").upper().strip()
+                if key and theme_counts.get(key, 0) >= self.max_theme_exposure:
+                    theme_block = key
+                    break
+            if theme_block:
+                row["eligible"] = False
+                row["rejection_reasons"] = [f"Theme exposure limit: {theme_block}"]
+                continue
+
             correlations = [
-                abs(self._correlation(matrix, symbol, str(existing.get("symbol") or "")))
+                abs(self._correlation(
+                    matrix,
+                    str(row.get("analysis_symbol") or symbol),
+                    str(existing.get("analysis_symbol") or existing.get("symbol") or ""),
+                ))
                 for existing in selected
             ]
             max_corr = max(correlations) if correlations else 0.0
@@ -974,16 +1057,27 @@ class EliteCompoundEngine:
             requested_size = self._deal_size(allocation)
             ref = self._new_deal_reference(cycle_number, index)
             try:
-                result = self.broker.open_market_position(
-                    symbol=str(candidate.get("symbol") or candidate.get("market") or ""),
-                    direction=str(candidate.get("direction") or "").upper(),
-                    size=requested_size,
-                    deal_reference=ref,
-                )
+                if candidate.get("ig_epic"):
+                    result = self.broker.open_epic_position(
+                        epic=str(candidate.get("ig_epic") or ""),
+                        direction=str(candidate.get("direction") or "").upper(),
+                        size=requested_size,
+                        deal_reference=ref,
+                    )
+                else:
+                    result = self.broker.open_market_position(
+                        symbol=str(candidate.get("symbol") or candidate.get("market") or ""),
+                        direction=str(candidate.get("direction") or "").upper(),
+                        size=requested_size,
+                        deal_reference=ref,
+                    )
                 row = {
                     "slot": index,
                     "symbol": candidate.get("symbol"),
                     "market": candidate.get("market"),
+                    "asset_class": candidate.get("asset_class") or "FX",
+                    "analysis_symbol": candidate.get("analysis_symbol"),
+                    "exposure_tags": list(candidate.get("exposure_tags") or []),
                     "direction": candidate.get("direction"),
                     "elite_score": candidate.get("elite_score"),
                     "model_ai_confidence": candidate.get("model_ai_confidence"),
@@ -1895,6 +1989,8 @@ class EliteCompoundEngine:
             "max_spread_bps": self.max_spread_bps,
             "high_correlation_abs": self.high_correlation_abs,
             "max_currency_exposure": self.max_currency_exposure,
+            "max_theme_exposure": self.max_theme_exposure,
+            "asset_spread_bps": dict(self.asset_spread_bps),
             "forced_filler_trades": False,
             "allocation_weights": [25, 22, 20, 18, 15],
             "reference_capital": self.reference_capital,
