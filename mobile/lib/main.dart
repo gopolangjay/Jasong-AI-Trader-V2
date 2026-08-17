@@ -2081,10 +2081,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             response['ig_demo_performance'];
 
         if (rawIgPerformance is Map) {
-          igDemoPerformance =
+          final enriched =
               Map<String, dynamic>.from(
             rawIgPerformance,
           );
+
+          // V6.8.3: auto-dashboard used to overwrite the richer overnight
+          // phase snapshot with lifetime-only broker totals. Preserve the
+          // rolling phase fields so Phase 2/3/... cannot visually fall back
+          // to Phase 1 on the next 20-second poll.
+          if (rawModelEvidence is Map) {
+            enriched['current_phase_id'] ??=
+                rawModelEvidence['current_phase_id'];
+            enriched['current_phase'] ??=
+                rawModelEvidence['current_phase'];
+            enriched['phase_history'] ??=
+                rawModelEvidence['phase_history'];
+            enriched['lifetime'] ??=
+                rawModelEvidence['lifetime'];
+          }
+
+          final rawIgStatus = response['ig_demo'];
+          if (rawIgStatus is Map) {
+            enriched['current_phase_id'] ??=
+                rawIgStatus['current_phase_id'];
+            enriched['current_phase'] ??=
+                rawIgStatus['current_phase_performance'];
+            enriched['phase_history'] ??=
+                rawIgStatus['phase_history'];
+            enriched['lifetime'] ??=
+                rawIgStatus['lifetime_performance'];
+            enriched['entry_blocker'] ??=
+                rawIgStatus['entry_blocker'];
+            enriched['execution_required'] ??=
+                rawIgStatus['execution_required'];
+          }
+
+          igDemoPerformance = enriched;
         }
 
         final rawLearning =
@@ -5273,7 +5306,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
               const SizedBox(width: 10),
               statTile(
-                'Open IG',
+                'Active IG now',
                 '$igOpen',
                 Icons.swap_horiz_rounded,
               ),
@@ -5346,7 +5379,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             child: Text(
               igGraded == 0
                   ? 'Phase $igCurrentPhaseId is collecting broker-verified evidence. Open positions still contribute to the broker running P&L above.'
-                  : '$igGraded settled IG DEMO trade(s) currently have a WIN/LOSS outcome in Phase $igCurrentPhaseId.',
+                  : '$igGraded settled IG DEMO trade(s) have a WIN/LOSS outcome in Phase $igCurrentPhaseId. Active IG now shows only positions open at this moment.',
               style: const TextStyle(
                 color: Colors.white54,
                 fontSize: 11,
@@ -7285,7 +7318,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.8.1 • Rolling IG DEMO Forward Learning', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.8.3 • Confidence-First Rolling IG DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -8437,7 +8470,7 @@ class _CompoundDashboardScreenState
             if (positions.isEmpty)
               _card(
                 child: const Text(
-                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
+                  'No Compound positions are open. Live Intelligence is evaluated continuously. When AI, Quant and Fast reach the required thresholds and IG broker-safety checks pass, the setup can trade in IG DEMO even if it is not Elite.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -8510,7 +8543,7 @@ class _CompoundDashboardScreenState
               ),
             const SizedBox(height: 20),
             const Text(
-              'Elite market ranking',
+              'Confidence-first market ranking',
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w900,
@@ -8518,7 +8551,7 @@ class _CompoundDashboardScreenState
             ),
             const SizedBox(height: 3),
             const Text(
-              '40% AI is the eligibility floor — final selection is by Elite Score and diversification.',
+              'IG DEMO trade rule: AI ≥40% • Quant ≥30% • Fast ≥90. Elite/Quality/Deep remain evidence labels; broker safety and diversification still apply.',
               style: TextStyle(
                 color: Colors.white54,
                 fontSize: 10,
@@ -8612,6 +8645,22 @@ class _CompoundDashboardScreenState
                               fontSize: 10,
                             ),
                           ),
+                          if (row['trade_class'] != null ||
+                              row['execution_basis'] != null) ...[
+                            const SizedBox(height: 5),
+                            Text(
+                              '${row['trade_class'] ?? '-'}'
+                              '${row['execution_basis'] != null ? ' • ${row['execution_basis']}' : ''}',
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Color(0xFF67F0C1),
+                                fontSize: 10,
+                                fontWeight:
+                                    FontWeight.w800,
+                              ),
+                            ),
+                          ],
                           if (reasons.isNotEmpty) ...[
                             const SizedBox(height: 5),
                             Text(
