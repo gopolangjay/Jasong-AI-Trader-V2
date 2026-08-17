@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -4018,7 +4017,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             : <String, dynamic>{};
     final brokerCapacityOpen =
         int.tryParse(
-          '${compoundCapacity['total_open'] ?? igOpen}',
+          '${compoundCapacity['total_open'] ?? 0}',
         ) ??
         0;
     final brokerCapacityMax =
@@ -4108,11 +4107,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           '${summary['target_active_watchers'] ?? 6}',
         ) ??
         6;
-    final openTrades = int.tryParse(
-          '${summary['open_trades'] ?? paperTrades.where((t) => t['status'] == 'OPEN').length}',
-        ) ??
-        0;
-
     final calibration =
         dashboard['calibration'] is Map
             ? Map<String, dynamic>.from(
@@ -5839,12 +5833,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       final engineEnabled =
           learning['enabled'] == true;
-
-      final liveExecution =
-          learning['live_execution'] == true ||
-              aiLearningStatus?[
-                      'broker_execution_enabled'] ==
-                  true;
 
       final activeWatchers =
           learning['active_watchers'] ?? 0;
@@ -7800,9 +7788,6 @@ class _CompoundDashboardScreenState
     return '${(_number(value) * 100).toStringAsFixed(0)}%';
   }
 
-  String _percentRaw(dynamic value) {
-    return '${_number(value).toStringAsFixed(1)}%';
-  }
 
   String _statusLabel(dynamic value) {
     return (value?.toString() ?? 'STOPPED')
@@ -7924,11 +7909,6 @@ class _CompoundDashboardScreenState
     final current = data['current_cycle'] is Map
         ? Map<String, dynamic>.from(
             data['current_cycle'] as Map,
-          )
-        : <String, dynamic>{};
-    final performance = data['performance'] is Map
-        ? Map<String, dynamic>.from(
-            data['performance'] as Map,
           )
         : <String, dynamic>{};
     final account = data['broker_account'] is Map
