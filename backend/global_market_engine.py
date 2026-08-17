@@ -71,7 +71,7 @@ GLOBAL_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 class GlobalMarketEngine:
-    VERSION = "6.7.3"
+    VERSION = "6.8.4"
 
     def __init__(
         self,
@@ -100,6 +100,13 @@ class GlobalMarketEngine:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.execution_fast_score_min = max(
+            0.0,
+            min(
+                100.0,
+                float(os.getenv("COMPOUND_GLOBAL_FAST_SCORE_MIN", "60")),
+            ),
+        )
         self._state = self._load_state()
 
     def _default_state(self) -> Dict[str, Any]:
@@ -217,8 +224,10 @@ class GlobalMarketEngine:
         # after the public-data model has found a plausibly useful setup.
         promising = (
             direction in {"BUY", "SELL"}
-            and self._safe_float(row.get("model_ai_confidence")) >= 0.35
-            and self._safe_float(row.get("smart_fast_score")) >= 75.0
+            and self._safe_float(row.get("model_ai_confidence")) >= 0.40
+            and self._safe_float(row.get("quant_confidence")) >= 0.30
+            and self._safe_float(row.get("smart_fast_score"))
+                >= self.execution_fast_score_min
         )
         if promising:
             try:
@@ -326,9 +335,8 @@ class GlobalMarketEngine:
                 str(row.get("direction") or "").upper() in {"BUY", "SELL"}
                 and self._safe_float(row.get("model_ai_confidence")) >= 0.40
                 and self._safe_float(row.get("quant_confidence")) >= 0.30
-                and self._safe_float(row.get("smart_fast_score")) >= 90.0
-                and str(row.get("quality_tier") or "").upper() in {"A", "A+"}
-                and str(row.get("deep_status") or "").upper() in {"GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED"}
+                and self._safe_float(row.get("smart_fast_score"))
+                    >= self.execution_fast_score_min
                 and bool(row.get("ig_tradeable"))
             ):
                 elite_ready += 1
@@ -344,6 +352,8 @@ class GlobalMarketEngine:
                 "evaluated_by_asset_class": counts,
                 "tradeable_by_asset_class": tradeable,
                 "elite_ready": elite_ready,
+                "confidence_ready": elite_ready,
+                "global_fast_score_min": self.execution_fast_score_min,
                 "scan_interval_seconds": self.scan_interval_seconds,
                 "batch_size": self.batch_size,
                 "runs": int(self._state.get("runs") or 0),
