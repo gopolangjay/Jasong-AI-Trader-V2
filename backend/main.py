@@ -7029,7 +7029,7 @@ def global_markets_candidates(limit: int = 100):
     rows = GLOBAL_MARKET_ENGINE.candidates()
     limit = max(1, min(int(limit), 500))
     return {
-        "version": "6.8.17",
+        "version": "6.8.18",
         "count": len(rows),
         "candidates": rows[:limit],
         "live_money_execution": False,
@@ -7051,7 +7051,7 @@ def global_markets_opportunity_board(
         )
     )
     return {
-        "version": "6.8.17",
+        "version": "6.8.18",
         "count": len(rows),
         "eligibility_refresh_seconds":
             GLOBAL_MARKET_ENGINE.
@@ -7097,7 +7097,15 @@ COMPOUND_ENGINE.start_thread()
 IG_DEMO_MIRROR.set_compound_source(
     lambda: COMPOUND_ENGINE.status()
 )
+COMPOUND_ENGINE.set_forward_evidence_source(
+    lambda: IG_DEMO_MIRROR.execution_guard_snapshot()
+)
 
+
+
+@app.get("/forward-evidence/regime")
+def forward_evidence_regime():
+    return IG_DEMO_MIRROR.execution_guard_snapshot()
 
 
 @app.get("/execution-policy")
@@ -7125,6 +7133,35 @@ def execution_policy():
                 "5",
             )
         ),
+        "compound_required_execution_quality":
+            "PRIME",
+        "prime_quality_tiers": ["A", "A+"],
+        "prime_min_historical_wr_pct": float(
+            os.getenv(
+                "PRIME_MIN_HISTORICAL_WR",
+                "0.55",
+            )
+        ) * 100.0,
+        "prime_min_historical_pf": float(
+            os.getenv(
+                "PRIME_MIN_HISTORICAL_PF",
+                "1.20",
+            )
+        ),
+        "prime_min_historical_trades": int(
+            os.getenv(
+                "PRIME_MIN_HISTORICAL_TRADES",
+                "20",
+            )
+        ),
+        "prime_global_fast_min": float(
+            os.getenv(
+                "COMPOUND_GLOBAL_FAST_SCORE_MIN",
+                "70",
+            )
+        ),
+        "forward_regime_endpoint":
+            "/forward-evidence/regime",
         "compound_candidate_pool_size": int(
             os.getenv(
                 "COMPOUND_CANDIDATE_POOL_SIZE",
