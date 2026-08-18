@@ -7029,7 +7029,7 @@ def global_markets_candidates(limit: int = 100):
     rows = GLOBAL_MARKET_ENGINE.candidates()
     limit = max(1, min(int(limit), 500))
     return {
-        "version": "6.8.18",
+        "version": "6.8.19",
         "count": len(rows),
         "candidates": rows[:limit],
         "live_money_execution": False,
@@ -7051,7 +7051,7 @@ def global_markets_opportunity_board(
         )
     )
     return {
-        "version": "6.8.18",
+        "version": "6.8.19",
         "count": len(rows),
         "eligibility_refresh_seconds":
             GLOBAL_MARKET_ENGINE.
@@ -7135,6 +7135,11 @@ def execution_policy():
         ),
         "compound_required_execution_quality":
             "PRIME",
+        "adaptive_strategy_intelligence": True,
+        "strategy_ai_min_confidence_pct": float(os.getenv("COMPOUND_AI_MIN_CONFIDENCE", "0.40")) * 100.0,
+        "strategy_quant_normal_min_pct": float(os.getenv("COMPOUND_QUANT_MIN_CONFIDENCE", "0.30")) * 100.0,
+        "strategy_quant_soft_floor_pct": float(os.getenv("STRATEGY_QUANT_SOFT_FLOOR", "0.28")) * 100.0,
+        "strategy_soft_quant_confidence_min_pct": float(os.getenv("STRATEGY_SOFT_QUANT_CONFIDENCE_MIN", "0.78")) * 100.0,
         "prime_quality_tiers": ["A", "A+"],
         "prime_min_historical_wr_pct": float(
             os.getenv(
@@ -7233,6 +7238,32 @@ def compound_history(
 @app.get("/compound/candidates")
 def compound_candidates():
     return COMPOUND_ENGINE.candidates()
+
+
+@app.get("/compound/strategy-intelligence")
+def compound_strategy_intelligence():
+    status = COMPOUND_ENGINE.status()
+    rows = COMPOUND_ENGINE.candidates()
+    return {
+        "version": "6.8.19",
+        "status": status.get("status"),
+        "forward_regime": (status.get("prime_execution") or {}).get("forward_guard"),
+        "candidates": [
+            {
+                key: row.get(key)
+                for key in (
+                    "symbol", "market", "direction", "market_regime",
+                    "selected_strategy", "strategy_direction",
+                    "strategy_confidence", "strategy_expected_value",
+                    "model_ai_confidence", "quant_confidence", "quant_gate",
+                    "smart_fast_score", "quality_tier", "historical_win_rate",
+                    "historical_profit_factor", "prime_qualified",
+                    "execution_eligible", "rejection_reasons"
+                )
+            }
+            for row in rows
+        ],
+    }
 
 
 @app.get("/compound/positions")
