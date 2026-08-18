@@ -407,6 +407,37 @@ class EliteCompoundEngine:
         return max(minimum, min(maximum, value))
 
     @staticmethod
+    def _bool_env(
+        name: str,
+        default: bool = False,
+    ) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+
+        value = str(raw).strip().lower()
+        if value in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+            "enabled",
+        }:
+            return True
+        if value in {
+            "0",
+            "false",
+            "no",
+            "n",
+            "off",
+            "disabled",
+        }:
+            return False
+
+        return bool(default)
+
+    @staticmethod
     def _int_env(name: str, default: int, minimum: int, maximum: int) -> int:
         try:
             value = int(os.getenv(name, str(default)))
