@@ -20,8 +20,8 @@ class EliteCompoundEngine:
       * reuse their current validated watcher intelligence as the candidate feed;
       * execute a separate IG DEMO strategy using JSCMP_* deal references;
       * keep compound state in its own persistent file;
-      * use a configurable starting capital, +50% basket target, -15% basket stop,
-        20% profit harvest and 80% profit compounding;
+      * compare 1.2x / 1.3x / 1.5x basket targets using genuine IG DEMO cycles,
+        while retaining the fixed -15% basket stop and 20% profit-harvest model;
       * select up to five elite, diversified markets across FX, indices, commodities, crypto, shares, ETFs and rates;
       * never touch manual IG positions or legacy JASONG_* positions;
       * never target IG live-money endpoints.
@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.14"
+    VERSION = "6.8.17"
     DEAL_PREFIX = "JSCMP_"
     LEARNING_PREFIXES = (
         "JASONG_",
@@ -77,11 +77,94 @@ class EliteCompoundEngine:
         self.harvest_pct = self._float_env(
             "COMPOUND_PROFIT_HARVEST_PCT", 0.20, 0.0, 1.0
         )
+        # V6.8.16 target optimiser.
+        #
+        # 1.2x = +20% basket target
+        # 1.3x = +30% basket target
+        # 1.5x = +50% basket target
+        #
+        # With the existing 20%-of-profit harvest:
+        #   1.2x -> +16% active, +4% reserve on a winning cycle
+        #   1.3x -> +24% active, +6% reserve on a winning cycle
+        #   1.5x -> +40% active, +10% reserve on a winning cycle
+        #
+        # This exactly preserves the existing 1.5x economics while allowing
+        # 1.2x and 1.3x to be judged on probability + duration + recovery +
+        # reserve rather than headline return alone.
+        self.target_mode = str(
+            os.getenv("COMPOUND_TARGET_MODE", "ADAPTIVE")
+        ).upper().strip()
+        if self.target_mode not in {"ADAPTIVE", "FIXED"}:
+            self.target_mode = "ADAPTIVE"
+
+        self.target_multiples = self._parse_target_multiples(
+            os.getenv(
+                "COMPOUND_TARGET_MULTIPLIERS",
+                "1.2,1.3,1.5",
+            )
+        )
+        self.default_target_multiple = self._nearest_target_multiple(
+            self._float_env(
+                "COMPOUND_TARGET_DEFAULT_MULTIPLE",
+                1.30,
+                1.01,
+                6.0,
+            )
+        )
+        self.target_min_samples_per_target = self._int_env(
+            "COMPOUND_TARGET_MIN_SAMPLES_PER_TARGET",
+            4,
+            1,
+            100,
+        )
+        self.target_evidence_window = self._int_env(
+            "COMPOUND_TARGET_EVIDENCE_WINDOW",
+            60,
+            6,
+            1000,
+        )
+
+        self.target_weight_probability = self._float_env(
+            "COMPOUND_TARGET_WEIGHT_PROBABILITY",
+            0.40,
+            0.0,
+            1.0,
+        )
+        self.target_weight_duration = self._float_env(
+            "COMPOUND_TARGET_WEIGHT_DURATION",
+            0.25,
+            0.0,
+            1.0,
+        )
+        self.target_weight_recovery = self._float_env(
+            "COMPOUND_TARGET_WEIGHT_RECOVERY",
+            0.20,
+            0.0,
+            1.0,
+        )
+        self.target_weight_reserve = self._float_env(
+            "COMPOUND_TARGET_WEIGHT_RESERVE",
+            0.15,
+            0.0,
+            1.0,
+        )
         self.max_positions = self._int_env(
             "COMPOUND_MAX_POSITIONS", 5, 1, 10
         )
         self.global_broker_max_positions = self._int_env(
             "IG_DEMO_MAX_OPEN_POSITIONS", 15, 1, 50
+        )
+        self.required_basket_positions = self._int_env(
+            "COMPOUND_REQUIRED_BASKET_POSITIONS",
+            5,
+            5,
+            5,
+        )
+        self.candidate_pool_size = self._int_env(
+            "COMPOUND_CANDIDATE_POOL_SIZE",
+            12,
+            5,
+            30,
         )
         self.ai_min_confidence = self._float_env(
             "COMPOUND_AI_MIN_CONFIDENCE", 0.40, 0.0, 1.0
@@ -137,7 +220,10 @@ class EliteCompoundEngine:
             "COMPOUND_POLL_SECONDS", 15, 5, 300
         )
         self.selection_refresh_seconds = self._int_env(
-            "COMPOUND_SELECTION_REFRESH_SECONDS", 120, 30, 3600
+            "COMPOUND_SELECTION_REFRESH_SECONDS",
+            15,
+            5,
+            300,
         )
         self.restart_cooldown_seconds = self._int_env(
             "COMPOUND_RESTART_COOLDOWN_SECONDS", 60, 10, 3600
@@ -216,6 +302,41 @@ class EliteCompoundEngine:
     # ------------------------------------------------------------------
     # Configuration / persistence
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_target_multiples(raw: str) -> List[float]:
+        values: List[float] = []
+        for token in str(raw or "").split(","):
+            try:
+                value = round(float(token.strip()), 4)
+            except Exception:
+                continue
+            if value <= 1.0:
+                continue
+            if value not in values:
+                values.append(value)
+
+        if not values:
+            values = [1.2, 1.3, 1.5]
+
+        # The strategy comparison is intentionally constrained to sensible
+        # positive basket multipliers and sorted for stable reporting.
+        return sorted(values)
+
+    def _nearest_target_multiple(
+        self,
+        value: float,
+    ) -> float:
+        candidates = (
+            self.target_multiples
+            if hasattr(self, "target_multiples")
+            and self.target_multiples
+            else [1.2, 1.3, 1.5]
+        )
+        return min(
+            candidates,
+            key=lambda item: abs(float(item) - float(value)),
+        )
 
     @staticmethod
     def _float_env(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -1011,7 +1132,11 @@ class EliteCompoundEngine:
             "market": market,
         }
 
-    def _rank_candidates(self, capital: float) -> List[Dict[str, Any]]:
+    def _rank_candidates(
+        self,
+        capital: float,
+        selection_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Rank all signals for IG DEMO confidence-first execution.
 
         V6.8.2 learning rule:
@@ -1028,6 +1153,13 @@ class EliteCompoundEngine:
         """
         source_rows = self.candidate_source(capital) or []
         screened: List[Dict[str, Any]] = []
+        selection_limit = max(
+            self.required_basket_positions,
+            int(
+                selection_limit
+                or self.max_positions
+            ),
+        )
 
         allowed_deep = {
             "VERIFIED", "NEAR_VERIFIED", "WATCH",
@@ -1257,7 +1389,7 @@ class EliteCompoundEngine:
         selected: List[Dict[str, Any]] = []
         exposures: Dict[str, int] = {}
         for row in eligible:
-            if len(selected) >= self.max_positions:
+            if len(selected) >= selection_limit:
                 break
             symbol = str(row.get("symbol") or "")
             if any(str(x.get("symbol")) == symbol for x in selected):
@@ -1367,8 +1499,18 @@ class EliteCompoundEngine:
             {
                 "evaluated": len(snapshot),
                 "selected": len(selected),
-                "learning_eligible": sum(1 for r in snapshot if r.get("learning_eligible")),
-                "selected_symbols": [row.get("symbol") for row in selected],
+                "selection_limit": selection_limit,
+                "required_basket_positions":
+                    self.required_basket_positions,
+                "learning_eligible": sum(
+                    1
+                    for r in snapshot
+                    if r.get("learning_eligible")
+                ),
+                "selected_symbols": [
+                    row.get("symbol")
+                    for row in selected
+                ],
             },
         )
         return selected
@@ -1388,6 +1530,821 @@ class EliteCompoundEngine:
     def _deal_size(self, allocation_amount: float) -> float:
         raw = self.reference_deal_size * (allocation_amount / self.reference_capital)
         return max(0.000001, min(self.max_deal_size, raw))
+
+    @staticmethod
+    def _median(values: List[float]) -> Optional[float]:
+        clean = sorted(
+            float(value)
+            for value in values
+            if value is not None
+            and math.isfinite(float(value))
+            and float(value) >= 0
+        )
+        if not clean:
+            return None
+        middle = len(clean) // 2
+        if len(clean) % 2:
+            return clean[middle]
+        return (clean[middle - 1] + clean[middle]) / 2.0
+
+    def _target_profit_pct(
+        self,
+        multiple: float,
+    ) -> float:
+        return max(0.0, float(multiple) - 1.0)
+
+    def _active_win_multiplier(
+        self,
+        multiple: float,
+    ) -> float:
+        profit_pct = self._target_profit_pct(multiple)
+        return 1.0 + (
+            profit_pct * (1.0 - self.harvest_pct)
+        )
+
+    def _reserve_fraction_per_win(
+        self,
+        multiple: float,
+    ) -> float:
+        return (
+            self._target_profit_pct(multiple)
+            * self.harvest_pct
+        )
+
+    def _recovery_wins_after_losses(
+        self,
+        multiple: float,
+        loss_count: int,
+    ) -> Optional[int]:
+        loss_count = max(1, int(loss_count))
+        loss_multiplier = 1.0 - self.stop_loss_pct
+        win_multiplier = self._active_win_multiplier(
+            multiple
+        )
+        if (
+            loss_multiplier <= 0
+            or loss_multiplier >= 1
+            or win_multiplier <= 1
+        ):
+            return None
+
+        remaining = loss_multiplier ** loss_count
+        if remaining <= 0:
+            return None
+
+        required_growth = 1.0 / remaining
+        return int(
+            math.ceil(
+                math.log(required_growth)
+                / math.log(win_multiplier)
+            )
+        )
+
+    def _target_break_even_win_probability(
+        self,
+        multiple: float,
+    ) -> Optional[float]:
+        """Log-growth break-even probability for active capital.
+
+        Reserve is tracked separately and is not reused by Compound, therefore
+        the active-capital break-even correctly uses the post-harvest win
+        multiplier against the -15% loss multiplier.
+        """
+        win_multiplier = self._active_win_multiplier(
+            multiple
+        )
+        loss_multiplier = 1.0 - self.stop_loss_pct
+        if win_multiplier <= 1 or not (0 < loss_multiplier < 1):
+            return None
+
+        denominator = (
+            math.log(win_multiplier)
+            - math.log(loss_multiplier)
+        )
+        if denominator <= 0:
+            return None
+
+        value = (
+            -math.log(loss_multiplier)
+            / denominator
+        )
+        return max(0.0, min(1.0, value))
+
+    def _cycle_target_multiple(
+        self,
+        cycle: Dict[str, Any],
+    ) -> Optional[float]:
+        explicit = cycle.get("target_multiple")
+        if explicit is not None:
+            try:
+                return self._nearest_target_multiple(
+                    float(explicit)
+                )
+            except Exception:
+                pass
+
+        # Genuine legacy Compound cycles used target_pct directly. Map them
+        # only when the target matches one of the configured alternatives.
+        target_pct = cycle.get("target_pct")
+        if target_pct is None:
+            return None
+        try:
+            inferred = 1.0 + float(target_pct)
+        except Exception:
+            return None
+
+        nearest = self._nearest_target_multiple(
+            inferred
+        )
+        if abs(nearest - inferred) <= 0.015:
+            return nearest
+        return None
+
+    def target_analysis(self) -> Dict[str, Any]:
+        """Compare 1.2x / 1.3x / 1.5x on the four requested variables.
+
+        Evidence is genuine completed Compound IG DEMO cycles. Each target's
+        probability and duration are learned from cycles that actually used
+        that target. Counterfactual MFE is NOT treated as a win because it
+        cannot prove ordering versus the stop.
+        """
+        with self._lock:
+            cycles = [
+                dict(row)
+                for row in (
+                    self._state.get("cycles")
+                    or []
+                )
+                if isinstance(row, dict)
+            ]
+
+        completed = [
+            row
+            for row in cycles
+            if str(
+                row.get("status") or ""
+            ).upper()
+            == "COMPLETED"
+            and str(
+                row.get("result") or ""
+            ).upper()
+            in {"WIN", "LOSS"}
+        ]
+        completed.sort(
+            key=lambda row: self._safe_float(
+                row.get("completed_at"),
+                0.0,
+            ),
+            reverse=True,
+        )
+        completed = completed[
+            :self.target_evidence_window
+        ]
+
+        grouped: Dict[float, List[Dict[str, Any]]] = {
+            float(multiple): []
+            for multiple in self.target_multiples
+        }
+
+        for cycle in completed:
+            multiple = self._cycle_target_multiple(
+                cycle
+            )
+            if multiple is None:
+                continue
+            grouped.setdefault(
+                float(multiple),
+                [],
+            ).append(cycle)
+
+        rows: List[Dict[str, Any]] = []
+
+        for multiple in self.target_multiples:
+            bucket = grouped.get(
+                float(multiple),
+                [],
+            )
+            wins = [
+                row
+                for row in bucket
+                if str(
+                    row.get("result") or ""
+                ).upper()
+                == "WIN"
+            ]
+            losses = [
+                row
+                for row in bucket
+                if str(
+                    row.get("result") or ""
+                ).upper()
+                == "LOSS"
+            ]
+            settled = len(wins) + len(losses)
+
+            # Beta(1,1) smoothing prevents a tiny 1/1 sample from being treated
+            # as a 100% probability.
+            smoothed_probability = (
+                (len(wins) + 1.0)
+                / (settled + 2.0)
+            )
+
+            durations = []
+            win_durations = []
+            loss_durations = []
+            for cycle in bucket:
+                started = self._safe_float(
+                    cycle.get("started_at"),
+                    0.0,
+                )
+                completed_at = self._safe_float(
+                    cycle.get("completed_at"),
+                    0.0,
+                )
+                if (
+                    started <= 0
+                    or completed_at <= started
+                ):
+                    continue
+                hours = (
+                    completed_at - started
+                ) / 3600.0
+                durations.append(hours)
+                if str(
+                    cycle.get("result") or ""
+                ).upper() == "WIN":
+                    win_durations.append(hours)
+                else:
+                    loss_durations.append(hours)
+
+            median_duration = self._median(
+                durations
+            )
+            median_win_duration = self._median(
+                win_durations
+            )
+            median_loss_duration = self._median(
+                loss_durations
+            )
+
+            active_win_multiplier = (
+                self._active_win_multiplier(
+                    multiple
+                )
+            )
+            reserve_fraction = (
+                self._reserve_fraction_per_win(
+                    multiple
+                )
+            )
+            break_even = (
+                self._target_break_even_win_probability(
+                    multiple
+                )
+            )
+
+            recovery = {
+                str(streak): (
+                    self._recovery_wins_after_losses(
+                        multiple,
+                        streak,
+                    )
+                )
+                for streak in range(1, 6)
+            }
+            recovery_values = [
+                value
+                for value in recovery.values()
+                if value is not None
+            ]
+            average_recovery = (
+                sum(recovery_values)
+                / len(recovery_values)
+                if recovery_values
+                else None
+            )
+
+            expected_reserve_fraction_per_cycle = (
+                smoothed_probability
+                * reserve_fraction
+            )
+            reserve_rate_per_hour = (
+                expected_reserve_fraction_per_cycle
+                / median_duration
+                if (
+                    median_duration is not None
+                    and median_duration > 0
+                )
+                else None
+            )
+
+            expected_active_multiplier = (
+                smoothed_probability
+                * active_win_multiplier
+                + (1.0 - smoothed_probability)
+                * (1.0 - self.stop_loss_pct)
+            )
+
+            expected_log_growth = (
+                smoothed_probability
+                * math.log(active_win_multiplier)
+                + (1.0 - smoothed_probability)
+                * math.log(
+                    1.0 - self.stop_loss_pct
+                )
+            )
+
+            rows.append({
+                "target_multiple":
+                    round(float(multiple), 4),
+                "profit_target_pct":
+                    round(
+                        self._target_profit_pct(
+                            multiple
+                        ) * 100.0,
+                        2,
+                    ),
+                "samples": settled,
+                "wins": len(wins),
+                "losses": len(losses),
+                "observed_win_rate_pct": (
+                    round(
+                        len(wins)
+                        / settled
+                        * 100.0,
+                        2,
+                    )
+                    if settled
+                    else None
+                ),
+                "smoothed_win_probability_pct":
+                    round(
+                        smoothed_probability
+                        * 100.0,
+                        2,
+                    ),
+                "median_cycle_hours": (
+                    round(
+                        median_duration,
+                        3,
+                    )
+                    if median_duration is not None
+                    else None
+                ),
+                "median_win_hours": (
+                    round(
+                        median_win_duration,
+                        3,
+                    )
+                    if median_win_duration is not None
+                    else None
+                ),
+                "median_loss_hours": (
+                    round(
+                        median_loss_duration,
+                        3,
+                    )
+                    if median_loss_duration is not None
+                    else None
+                ),
+                "active_win_multiplier":
+                    round(
+                        active_win_multiplier,
+                        6,
+                    ),
+                "active_growth_on_win_pct":
+                    round(
+                        (
+                            active_win_multiplier
+                            - 1.0
+                        )
+                        * 100.0,
+                        2,
+                    ),
+                "reserve_fraction_on_win":
+                    round(
+                        reserve_fraction,
+                        6,
+                    ),
+                "reserve_on_win_pct_of_start":
+                    round(
+                        reserve_fraction
+                        * 100.0,
+                        2,
+                    ),
+                "expected_reserve_pct_of_start_per_cycle":
+                    round(
+                        expected_reserve_fraction_per_cycle
+                        * 100.0,
+                        3,
+                    ),
+                "expected_reserve_pct_of_start_per_hour":
+                    (
+                        round(
+                            reserve_rate_per_hour
+                            * 100.0,
+                            4,
+                        )
+                        if reserve_rate_per_hour
+                        is not None
+                        else None
+                    ),
+                "loss_multiplier":
+                    round(
+                        1.0
+                        - self.stop_loss_pct,
+                        6,
+                    ),
+                "recovery_wins_after_losses":
+                    recovery,
+                "average_recovery_wins_1_to_5_losses":
+                    (
+                        round(
+                            average_recovery,
+                            3,
+                        )
+                        if average_recovery is not None
+                        else None
+                    ),
+                "break_even_win_probability_pct":
+                    (
+                        round(
+                            break_even
+                            * 100.0,
+                            2,
+                        )
+                        if break_even is not None
+                        else None
+                    ),
+                "expected_active_multiplier_per_cycle":
+                    round(
+                        expected_active_multiplier,
+                        6,
+                    ),
+                "expected_log_growth_per_cycle":
+                    round(
+                        expected_log_growth,
+                        6,
+                    ),
+                "eligible_for_adaptive_selection":
+                    settled
+                    >= self.target_min_samples_per_target,
+            })
+
+        # Score only when every target has enough genuine selected-target
+        # cycles. Until then we deliberately explore the least-sampled target.
+        enough_all = all(
+            int(row.get("samples") or 0)
+            >= self.target_min_samples_per_target
+            for row in rows
+        )
+
+        durations = [
+            float(row["median_cycle_hours"])
+            for row in rows
+            if row.get("median_cycle_hours")
+            is not None
+            and float(
+                row["median_cycle_hours"]
+            ) > 0
+        ]
+        fastest = (
+            min(durations)
+            if durations
+            else None
+        )
+
+        recoveries = [
+            float(
+                row[
+                    "average_recovery_wins_1_to_5_losses"
+                ]
+            )
+            for row in rows
+            if row.get(
+                "average_recovery_wins_1_to_5_losses"
+            )
+            is not None
+            and float(
+                row[
+                    "average_recovery_wins_1_to_5_losses"
+                ]
+            )
+            > 0
+        ]
+        best_recovery = (
+            min(recoveries)
+            if recoveries
+            else None
+        )
+
+        reserve_rates = [
+            float(
+                row[
+                    "expected_reserve_pct_of_start_per_hour"
+                ]
+            )
+            for row in rows
+            if row.get(
+                "expected_reserve_pct_of_start_per_hour"
+            )
+            is not None
+            and float(
+                row[
+                    "expected_reserve_pct_of_start_per_hour"
+                ]
+            )
+            >= 0
+        ]
+        best_reserve_rate = (
+            max(reserve_rates)
+            if reserve_rates
+            else None
+        )
+
+        weight_total = (
+            self.target_weight_probability
+            + self.target_weight_duration
+            + self.target_weight_recovery
+            + self.target_weight_reserve
+        )
+        if weight_total <= 0:
+            weight_total = 1.0
+
+        for row in rows:
+            probability_score = (
+                float(
+                    row[
+                        "smoothed_win_probability_pct"
+                    ]
+                )
+                / 100.0
+            )
+
+            duration = row.get(
+                "median_cycle_hours"
+            )
+            duration_score = (
+                min(
+                    1.0,
+                    fastest / float(duration),
+                )
+                if (
+                    fastest is not None
+                    and duration is not None
+                    and float(duration) > 0
+                )
+                else 0.0
+            )
+
+            recovery_value = row.get(
+                "average_recovery_wins_1_to_5_losses"
+            )
+            recovery_score = (
+                min(
+                    1.0,
+                    best_recovery
+                    / float(recovery_value),
+                )
+                if (
+                    best_recovery is not None
+                    and recovery_value is not None
+                    and float(recovery_value) > 0
+                )
+                else 0.0
+            )
+
+            reserve_rate = row.get(
+                "expected_reserve_pct_of_start_per_hour"
+            )
+            reserve_score = (
+                min(
+                    1.0,
+                    float(reserve_rate)
+                    / best_reserve_rate,
+                )
+                if (
+                    best_reserve_rate is not None
+                    and best_reserve_rate > 0
+                    and reserve_rate is not None
+                )
+                else 0.0
+            )
+
+            composite = (
+                probability_score
+                * self.target_weight_probability
+                + duration_score
+                * self.target_weight_duration
+                + recovery_score
+                * self.target_weight_recovery
+                + reserve_score
+                * self.target_weight_reserve
+            ) / weight_total
+
+            row["score_components"] = {
+                "win_probability":
+                    round(
+                        probability_score
+                        * 100.0,
+                        2,
+                    ),
+                "cycle_duration":
+                    round(
+                        duration_score
+                        * 100.0,
+                        2,
+                    ),
+                "loss_recovery":
+                    round(
+                        recovery_score
+                        * 100.0,
+                        2,
+                    ),
+                "harvested_reserve":
+                    round(
+                        reserve_score
+                        * 100.0,
+                        2,
+                    ),
+            }
+            row["composite_score"] = (
+                round(
+                    composite * 100.0,
+                    2,
+                )
+            )
+
+        if self.target_mode == "FIXED":
+            selected = self.default_target_multiple
+            selection_state = "FIXED"
+            selection_reason = (
+                "COMPOUND_TARGET_MODE=FIXED; using configured "
+                f"{selected:.2f}x target."
+            )
+        elif enough_all:
+            best = max(
+                rows,
+                key=lambda row: (
+                    float(
+                        row.get(
+                            "composite_score"
+                        )
+                        or 0.0
+                    ),
+                    # Tie preference goes to the middle target because it
+                    # preserves faster recovery without requiring 1.5x.
+                    -abs(
+                        float(
+                            row[
+                                "target_multiple"
+                            ]
+                        )
+                        - 1.3
+                    ),
+                ),
+            )
+            selected = float(
+                best["target_multiple"]
+            )
+            selection_state = "ADAPTIVE"
+            selection_reason = (
+                "All target candidates have the minimum genuine IG DEMO "
+                "sample; selected the highest four-variable composite score."
+            )
+        else:
+            # Genuine exploration is required to learn probability and duration
+            # for each target. Prefer 1.3x on ties, then the other least-sampled
+            # target. Current open cycles are never changed mid-cycle.
+            preference = {
+                self.default_target_multiple: 0,
+                1.3: 1,
+                1.2: 2,
+                1.5: 3,
+            }
+            least = min(
+                int(row.get("samples") or 0)
+                for row in rows
+            )
+            candidates = [
+                row
+                for row in rows
+                if int(
+                    row.get("samples") or 0
+                ) == least
+            ]
+            chosen = min(
+                candidates,
+                key=lambda row: preference.get(
+                    float(
+                        row[
+                            "target_multiple"
+                        ]
+                    ),
+                    99,
+                ),
+            )
+            selected = float(
+                chosen["target_multiple"]
+            )
+            selection_state = "EXPLORATION"
+            selection_reason = (
+                "Not all target candidates have enough genuine selected-target "
+                "cycles. The next cycle uses the least-sampled target so the "
+                "system can learn real win probability and duration rather "
+                "than infer them from counterfactual MFE."
+            )
+
+        return {
+            "version": self.VERSION,
+            "mode": self.target_mode,
+            "selection_state":
+                selection_state,
+            "selected_target_multiple":
+                round(selected, 4),
+            "selected_profit_target_pct":
+                round(
+                    (
+                        selected
+                        - 1.0
+                    )
+                    * 100.0,
+                    2,
+                ),
+            "selection_reason":
+                selection_reason,
+            "current_cycle_unchanged":
+                True,
+            "candidates":
+                rows,
+            "weights": {
+                "win_probability":
+                    self.target_weight_probability,
+                "cycle_duration":
+                    self.target_weight_duration,
+                "loss_recovery":
+                    self.target_weight_recovery,
+                "harvested_reserve":
+                    self.target_weight_reserve,
+            },
+            "minimum_samples_per_target":
+                self.target_min_samples_per_target,
+            "evidence_window":
+                self.target_evidence_window,
+            "all_targets_minimum_evidence":
+                enough_all,
+            "stop_loss_pct":
+                round(
+                    self.stop_loss_pct
+                    * 100.0,
+                    2,
+                ),
+            "harvest_model":
+                "20_PERCENT_OF_POSITIVE_PROFIT_BY_DEFAULT",
+            "harvest_pct_of_profit":
+                round(
+                    self.harvest_pct
+                    * 100.0,
+                    2,
+                ),
+            "reserve_reused":
+                False,
+            "probability_source":
+                "GENUINE_COMPLETED_IG_DEMO_COMPOUND_CYCLES",
+            "duration_source":
+                "ACTUAL_SELECTED_TARGET_CYCLE_DURATION",
+            "counterfactual_mfe_used_as_win":
+                False,
+        }
+
+    def _select_target_plan(
+        self,
+    ) -> Dict[str, Any]:
+        analysis = self.target_analysis()
+        multiple = float(
+            analysis.get(
+                "selected_target_multiple"
+            )
+            or self.default_target_multiple
+        )
+        return {
+            "target_multiple":
+                multiple,
+            "profit_target_pct":
+                self._target_profit_pct(
+                    multiple
+                ),
+            "selection_state":
+                analysis.get(
+                    "selection_state"
+                ),
+            "selection_reason":
+                analysis.get(
+                    "selection_reason"
+                ),
+            "analysis_snapshot":
+                analysis,
+        }
 
     def _new_deal_reference(self, cycle_number: int, slot: int) -> str:
         token = uuid.uuid4().hex[:12].upper()
@@ -1430,7 +2387,10 @@ class EliteCompoundEngine:
         # This is the missing link from V6.7.1: Live Intelligence and the
         # Compound screen now share the same decision trail even when existing
         # legacy/manual broker positions temporarily block execution.
-        selected = self._rank_candidates(capital)
+        selected = self._rank_candidates(
+            capital,
+            selection_limit=self.candidate_pool_size,
+        )
 
         external = self._external_positions(positions)
         learning_positions = self._learning_positions(positions)
@@ -1447,25 +2407,25 @@ class EliteCompoundEngine:
         capacity = self._compound_open_capacity(
             positions
         )
-        if selected:
-            selected = selected[
-                :capacity["compound_slots_available"]
-            ]
 
         if (
-            not selected
-            and capacity["compound_slots_available"] <= 0
+            capacity["compound_slots_available"]
+            < self.required_basket_positions
         ):
             with self._lock:
                 self._state["status"] = (
                     "WAITING_FOR_BROKER_CAPACITY"
                 )
                 self._state["paused_reason"] = (
-                    "No Compound IG DEMO slot is currently available. "
+                    "Compound requires five free IG DEMO basket slots "
+                    "before a new cycle can begin. "
                     f"Compound {capacity['compound_open']}/"
                     f"{capacity['compound_max']}; "
                     f"all broker positions {capacity['total_open']}/"
-                    f"{capacity['global_max']}."
+                    f"{capacity['global_max']}; "
+                    f"available Compound slots "
+                    f"{capacity['compound_slots_available']}/"
+                    f"{self.required_basket_positions}."
                 )
                 self._state[
                     "broker_capacity"
@@ -1510,6 +2470,91 @@ class EliteCompoundEngine:
                 self._state[
                     "last_duplicate_learning_exposure"
                 ] = duplicate_skips
+
+        if (
+            len(selected)
+            < self.required_basket_positions
+        ):
+            with self._lock:
+                self._state["status"] = (
+                    "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                )
+                self._state["paused_reason"] = (
+                    "Compound is continuously reassessing markets every "
+                    f"{self.poll_seconds}s and will only start the next "
+                    "target cycle when five eligible, diversified IG DEMO "
+                    "markets are simultaneously available. "
+                    f"Current qualified queue: {len(selected)}/"
+                    f"{self.required_basket_positions}."
+                )
+                self._state[
+                    "pending_elite_candidates"
+                ] = [
+                    dict(row)
+                    for row in selected
+                ]
+                self._state[
+                    "intelligence_bridge_state"
+                ] = "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                self._state[
+                    "basket_assembly"
+                ] = {
+                    "required":
+                        self.required_basket_positions,
+                    "eligible_now":
+                        len(selected),
+                    "candidate_pool_size":
+                        self.candidate_pool_size,
+                    "last_checked_at":
+                        self._now(),
+                    "refresh_seconds":
+                        self.poll_seconds,
+                    "top_candidates": [
+                        {
+                            "symbol":
+                                row.get("symbol"),
+                            "market":
+                                row.get("market"),
+                            "direction":
+                                row.get("direction"),
+                            "trade_class":
+                                row.get("trade_class"),
+                            "ai_pct": round(
+                                self._safe_float(
+                                    row.get(
+                                        "model_ai_confidence"
+                                    ),
+                                    0.0,
+                                )
+                                * 100.0,
+                                2,
+                            ),
+                            "quant_pct": round(
+                                self._safe_float(
+                                    row.get(
+                                        "quant_confidence"
+                                    ),
+                                    0.0,
+                                )
+                                * 100.0,
+                                2,
+                            ),
+                            "fast_score":
+                                row.get(
+                                    "smart_fast_score"
+                                ),
+                            "opportunity_score":
+                                row.get(
+                                    "opportunity_score"
+                                ),
+                        }
+                        for row in selected[
+                            :self.required_basket_positions
+                        ]
+                    ],
+                }
+                self._persist()
+            return self.status()
 
         if external:
             blocker_names = [
@@ -1589,7 +2634,43 @@ class EliteCompoundEngine:
                 dict(row)
                 for row in selected
             ]
-            self._state["intelligence_bridge_state"] = "CONFIDENCE_READY"
+            self._state["basket_assembly"] = {
+                "required":
+                    self.required_basket_positions,
+                "eligible_now":
+                    len(selected),
+                "candidate_pool_size":
+                    self.candidate_pool_size,
+                "primary_symbols": [
+                    row.get("symbol")
+                    for row in selected[
+                        :self.required_basket_positions
+                    ]
+                ],
+                "alternate_symbols": [
+                    row.get("symbol")
+                    for row in selected[
+                        self.required_basket_positions:
+                    ]
+                ],
+                "last_checked_at":
+                    self._now(),
+                "refresh_seconds":
+                    self.poll_seconds,
+            }
+            self._state["intelligence_bridge_state"] = (
+                "FIVE_MARKETS_READY"
+            )
+
+        target_plan = self._select_target_plan()
+        selected_target_multiple = self._safe_float(
+            target_plan.get("target_multiple"),
+            self.default_target_multiple,
+        )
+        selected_target_pct = self._safe_float(
+            target_plan.get("profit_target_pct"),
+            self.profit_target_pct,
+        )
 
         with self._lock:
             cycle_number = int(self._state.get("cycle_number") or 0) + 1
@@ -1601,8 +2682,31 @@ class EliteCompoundEngine:
                 "started_at": self._now(),
                 "completed_at": None,
                 "starting_capital": round(capital, 8),
-                "target_pct": self.profit_target_pct,
-                "target_profit": round(capital * self.profit_target_pct, 8),
+                "target_multiple": round(
+                    selected_target_multiple,
+                    4,
+                ),
+                "target_pct": round(
+                    selected_target_pct,
+                    8,
+                ),
+                "target_profit": round(
+                    capital
+                    * selected_target_pct,
+                    8,
+                ),
+                "target_selection_state":
+                    target_plan.get(
+                        "selection_state"
+                    ),
+                "target_selection_reason":
+                    target_plan.get(
+                        "selection_reason"
+                    ),
+                "target_analysis_at_open":
+                    target_plan.get(
+                        "analysis_snapshot"
+                    ),
                 "stop_pct": self.stop_loss_pct,
                 "stop_loss_amount": round(capital * self.stop_loss_pct, 8),
                 "harvest_pct": self.harvest_pct,
@@ -1622,7 +2726,18 @@ class EliteCompoundEngine:
                 ),
                 "broker_capacity_at_start": capacity,
                 "positions": [],
-                "selected_candidates": [dict(row) for row in selected],
+                "required_basket_positions":
+                    self.required_basket_positions,
+                "candidate_queue": [
+                    dict(row)
+                    for row in selected
+                ],
+                "selected_candidates": [
+                    dict(row)
+                    for row in selected[
+                        :self.required_basket_positions
+                    ]
+                ],
                 "running_pnl": 0.0,
                 "peak_pnl": 0.0,
                 "trough_pnl": 0.0,
@@ -1642,67 +2757,252 @@ class EliteCompoundEngine:
             self._state["paused_reason"] = None
             self._persist()
 
-        weights = self._weights(len(selected))
+        weights = self._weights(
+            self.required_basket_positions
+        )
         opened: List[Dict[str, Any]] = []
+        opened_candidates: List[Dict[str, Any]] = []
         errors: List[str] = []
+        attempted_symbols: List[str] = []
 
-        for index, (candidate, weight) in enumerate(zip(selected, weights), start=1):
+        for candidate in selected:
+            if (
+                len(opened)
+                >= self.required_basket_positions
+            ):
+                break
+
+            slot = len(opened) + 1
+            weight = weights[slot - 1]
             allocation = capital * weight
-            requested_size = self._deal_size(allocation)
-            ref = self._new_deal_reference(cycle_number, index)
+            requested_size = self._deal_size(
+                allocation
+            )
+            ref = self._new_deal_reference(
+                cycle_number,
+                slot,
+            )
+            attempted_symbols.append(
+                str(
+                    candidate.get("symbol")
+                    or candidate.get("market")
+                    or ""
+                )
+            )
+
             try:
                 if candidate.get("ig_epic"):
-                    result = self.broker.open_epic_position(
-                        epic=str(candidate.get("ig_epic") or ""),
-                        direction=str(candidate.get("direction") or "").upper(),
-                        size=requested_size,
-                        deal_reference=ref,
+                    result = (
+                        self.broker.open_epic_position(
+                            epic=str(
+                                candidate.get(
+                                    "ig_epic"
+                                )
+                                or ""
+                            ),
+                            direction=str(
+                                candidate.get(
+                                    "direction"
+                                )
+                                or ""
+                            ).upper(),
+                            size=requested_size,
+                            deal_reference=ref,
+                        )
                     )
                 else:
-                    result = self.broker.open_market_position(
-                        symbol=str(candidate.get("symbol") or candidate.get("market") or ""),
-                        direction=str(candidate.get("direction") or "").upper(),
-                        size=requested_size,
-                        deal_reference=ref,
+                    result = (
+                        self.broker.open_market_position(
+                            symbol=str(
+                                candidate.get(
+                                    "symbol"
+                                )
+                                or candidate.get(
+                                    "market"
+                                )
+                                or ""
+                            ),
+                            direction=str(
+                                candidate.get(
+                                    "direction"
+                                )
+                                or ""
+                            ).upper(),
+                            size=requested_size,
+                            deal_reference=ref,
+                        )
                     )
+
+                # A Compound slot exists only after IG supplies a real accepted
+                # deal ID. Anything else is treated as a failed candidate and
+                # the next ranked alternate is tried.
+                deal_id = str(
+                    result.get("dealId")
+                    or ""
+                ).strip()
+                deal_status = str(
+                    result.get("dealStatus")
+                    or result.get("status")
+                    or ""
+                ).upper()
+
+                if (
+                    not deal_id
+                    or deal_status
+                    not in {
+                        "ACCEPTED",
+                        "OPEN",
+                    }
+                ):
+                    raise RuntimeError(
+                        "IG did not return an accepted deal ID"
+                    )
+
                 row = {
-                    "slot": index,
-                    "symbol": candidate.get("symbol"),
-                    "market": candidate.get("market"),
-                    "asset_class": candidate.get("asset_class") or "FX",
-                    "analysis_symbol": candidate.get("analysis_symbol"),
-                    "exposure_tags": list(candidate.get("exposure_tags") or []),
-                    "direction": candidate.get("direction"),
-                    "elite_score": candidate.get("elite_score"),
-                    "elite_state": candidate.get("elite_state"),
-                    "trade_class": candidate.get("trade_class"),
-                    "execution_basis": candidate.get("execution_basis"),
-                    "confidence_qualified": candidate.get("confidence_qualified"),
-                    "model_ai_confidence": candidate.get("model_ai_confidence"),
-                    "quant_confidence": candidate.get("quant_confidence"),
-                    "smart_fast_score": candidate.get("smart_fast_score"),
-                    "quality_tier": candidate.get("quality_tier"),
-                    "deep_status": candidate.get("deep_status"),
-                    "spread_bps": candidate.get("spread_bps"),
-                    "intelligence_source": candidate.get("intelligence_source"),
-                    "intelligence_age_seconds": candidate.get("intelligence_age_seconds"),
-                    "source_rank": candidate.get("source_rank"),
-                    "live_price_at_selection": candidate.get("live_price"),
-                    "entry_rsi": candidate.get("rsi"),
-                    "signal_reason": candidate.get("signal_reason") or candidate.get("reason"),
-                    "historical_win_rate": candidate.get("historical_win_rate"),
-                    "historical_profit_factor": candidate.get("historical_profit_factor"),
-                    "historical_trades": candidate.get("historical_trades"),
-                    "max_abs_correlation": candidate.get("max_abs_correlation"),
-                    "diversification_score": candidate.get("diversification_score"),
-                    "weight_pct": round(weight * 100.0, 4),
-                    "allocation_amount": round(allocation, 8),
-                    "requested_size": requested_size,
-                    "ig_size": result.get("size"),
-                    "ig_deal_id": result.get("dealId"),
-                    "ig_deal_reference": result.get("dealReference") or ref,
-                    "ig_epic": result.get("epic"),
-                    "entry_level": result.get("level"),
+                    "slot": slot,
+                    "symbol":
+                        candidate.get("symbol"),
+                    "market":
+                        candidate.get("market"),
+                    "asset_class":
+                        candidate.get(
+                            "asset_class"
+                        )
+                        or "FX",
+                    "analysis_symbol":
+                        candidate.get(
+                            "analysis_symbol"
+                        ),
+                    "exposure_tags": list(
+                        candidate.get(
+                            "exposure_tags"
+                        )
+                        or []
+                    ),
+                    "direction":
+                        candidate.get("direction"),
+                    "elite_score":
+                        candidate.get(
+                            "elite_score"
+                        ),
+                    "elite_state":
+                        candidate.get(
+                            "elite_state"
+                        ),
+                    "trade_class":
+                        candidate.get(
+                            "trade_class"
+                        ),
+                    "execution_basis":
+                        candidate.get(
+                            "execution_basis"
+                        ),
+                    "confidence_qualified":
+                        candidate.get(
+                            "confidence_qualified"
+                        ),
+                    "model_ai_confidence":
+                        candidate.get(
+                            "model_ai_confidence"
+                        ),
+                    "quant_confidence":
+                        candidate.get(
+                            "quant_confidence"
+                        ),
+                    "smart_fast_score":
+                        candidate.get(
+                            "smart_fast_score"
+                        ),
+                    "quality_tier":
+                        candidate.get(
+                            "quality_tier"
+                        ),
+                    "deep_status":
+                        candidate.get(
+                            "deep_status"
+                        ),
+                    "spread_bps":
+                        candidate.get(
+                            "spread_bps"
+                        ),
+                    "opportunity_score":
+                        candidate.get(
+                            "opportunity_score"
+                        ),
+                    "opportunity_age_seconds":
+                        candidate.get(
+                            "opportunity_age_seconds"
+                        ),
+                    "intelligence_source":
+                        candidate.get(
+                            "intelligence_source"
+                        ),
+                    "intelligence_age_seconds":
+                        candidate.get(
+                            "intelligence_age_seconds"
+                        ),
+                    "source_rank":
+                        candidate.get(
+                            "source_rank"
+                        ),
+                    "live_price_at_selection":
+                        candidate.get(
+                            "live_price"
+                        ),
+                    "entry_rsi":
+                        candidate.get("rsi"),
+                    "signal_reason":
+                        candidate.get(
+                            "signal_reason"
+                        )
+                        or candidate.get(
+                            "reason"
+                        ),
+                    "historical_win_rate":
+                        candidate.get(
+                            "historical_win_rate"
+                        ),
+                    "historical_profit_factor":
+                        candidate.get(
+                            "historical_profit_factor"
+                        ),
+                    "historical_trades":
+                        candidate.get(
+                            "historical_trades"
+                        ),
+                    "max_abs_correlation":
+                        candidate.get(
+                            "max_abs_correlation"
+                        ),
+                    "diversification_score":
+                        candidate.get(
+                            "diversification_score"
+                        ),
+                    "weight_pct":
+                        round(
+                            weight * 100.0,
+                            4,
+                        ),
+                    "allocation_amount":
+                        round(
+                            allocation,
+                            8,
+                        ),
+                    "requested_size":
+                        requested_size,
+                    "ig_size":
+                        result.get("size"),
+                    "ig_deal_id":
+                        deal_id,
+                    "ig_deal_reference":
+                        result.get(
+                            "dealReference"
+                        )
+                        or ref,
+                    "ig_epic":
+                        result.get("epic"),
+                    "entry_level":
+                        result.get("level"),
                     "broker_status": "OPEN",
                     "opened_at": self._now(),
                     "open_result": result,
@@ -1713,41 +3013,176 @@ class EliteCompoundEngine:
                     "close_verified": False,
                     "last_close_error": None,
                 }
-                opened.append(row)
-                with self._lock:
-                    current = self._state.get("current_cycle") or {}
-                    current_positions = list(current.get("positions") or [])
-                    current_positions.append(row)
-                    current["positions"] = current_positions
-                    self._state["current_cycle"] = current
-                    self._persist()
-            except Exception as exc:
-                message = f"{candidate.get('symbol')}: {type(exc).__name__}: {exc}"
-                errors.append(message)
-                self._journal("COMPOUND_OPEN_ERROR", {"message": message})
 
-        if not opened:
+                opened.append(row)
+                opened_candidates.append(
+                    dict(candidate)
+                )
+
+                with self._lock:
+                    current = dict(
+                        self._state.get(
+                            "current_cycle"
+                        )
+                        or {}
+                    )
+                    current[
+                        "positions"
+                    ] = [
+                        dict(item)
+                        for item in opened
+                    ]
+                    current[
+                        "selected_candidates"
+                    ] = [
+                        dict(item)
+                        for item in opened_candidates
+                    ]
+                    current[
+                        "opening_progress"
+                    ] = {
+                        "accepted":
+                            len(opened),
+                        "required":
+                            self.required_basket_positions,
+                        "attempted_symbols":
+                            list(
+                                attempted_symbols
+                            ),
+                        "errors":
+                            list(errors),
+                    }
+                    self._state[
+                        "current_cycle"
+                    ] = current
+                    self._persist()
+
+            except Exception as exc:
+                message = (
+                    f"{candidate.get('symbol')}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                errors.append(message)
+                self._journal(
+                    "COMPOUND_OPEN_ERROR",
+                    {
+                        "message": message,
+                        "slot": slot,
+                        "attempted_symbol":
+                            candidate.get("symbol"),
+                        "fallback_available":
+                            len(selected)
+                            > len(
+                                attempted_symbols
+                            ),
+                    },
+                )
+
+        if (
+            len(opened)
+            < self.required_basket_positions
+        ):
+            rollback_results: List[
+                Dict[str, Any]
+            ] = []
+
+            if opened:
+                try:
+                    rollback_results = (
+                        self._close_compound_positions(
+                            opened
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(
+                        "rollback: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
             with self._lock:
-                cycle = dict(self._state.get("current_cycle") or {})
-                cycle["status"] = "OPEN_FAILED"
+                cycle = dict(
+                    self._state.get(
+                        "current_cycle"
+                    )
+                    or {}
+                )
+                cycle["status"] = (
+                    "OPEN_INCOMPLETE_ROLLBACK"
+                )
                 cycle["completed_at"] = self._now()
-                cycle["open_errors"] = errors
-                cycles = list(self._state.get("cycles") or [])
+                cycle["open_errors"] = list(errors)
+                cycle["opening_progress"] = {
+                    "accepted":
+                        len(opened),
+                    "required":
+                        self.required_basket_positions,
+                    "attempted_symbols":
+                        list(attempted_symbols),
+                    "rollback_results":
+                        rollback_results,
+                }
+
+                cycles = list(
+                    self._state.get("cycles")
+                    or []
+                )
                 cycles.append(cycle)
-                self._state["cycles"] = cycles[-1000:]
-                self._state["current_cycle"] = None
-                self._state["status"] = "WAITING_FOR_REQUIRED_CONFIDENCE"
-                self._state["last_error"] = "; ".join(errors) if errors else "No compound position opened"
-                self._state["next_cycle_at"] = self._now() + self.restart_cooldown_seconds
-                self._state["intelligence_bridge_state"] = "OPEN_FAILED"
+                self._state["cycles"] = (
+                    cycles[-1000:]
+                )
+                self._state["current_cycle"] = (
+                    None
+                )
+                self._state["status"] = (
+                    "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                )
+                self._state["paused_reason"] = (
+                    "IG accepted fewer than five "
+                    "Compound positions after trying "
+                    "the ranked alternates. Any partial "
+                    "basket was rolled back; the engine "
+                    "will reassess again on the next "
+                    f"{self.poll_seconds}-second cycle."
+                )
+                self._state[
+                    "last_error"
+                ] = (
+                    "; ".join(errors)
+                    if errors
+                    else (
+                        "Could not assemble five "
+                        "accepted IG DEMO positions"
+                    )
+                )
+                self._state[
+                    "next_cycle_at"
+                ] = (
+                    self._now()
+                    + self.poll_seconds
+                )
+                self._state[
+                    "intelligence_bridge_state"
+                ] = "FIVE_MARKET_ASSEMBLY_FAILED"
                 self._persist()
+
             return self.status()
 
         with self._lock:
             cycle = dict(self._state.get("current_cycle") or {})
             cycle["status"] = "ACTIVE"
             cycle["positions"] = opened
+            cycle["selected_candidates"] = [
+                dict(row)
+                for row in opened_candidates
+            ]
             cycle["open_errors"] = errors
+            cycle["basket_opened_full"] = (
+                len(opened)
+                == self.required_basket_positions
+            )
+            cycle["basket_opened_count"] = len(
+                opened
+            )
             self._state["current_cycle"] = cycle
             self._state["status"] = "ACTIVE"
             self._state["paused_reason"] = None
@@ -1760,7 +3195,15 @@ class EliteCompoundEngine:
                 "cycle_number": cycle_number,
                 "capital": capital,
                 "positions": len(opened),
-                "symbols": [row.get("symbol") for row in opened],
+                "required_positions":
+                    self.required_basket_positions,
+                "basket_opened_full":
+                    len(opened)
+                    == self.required_basket_positions,
+                "symbols": [
+                    row.get("symbol")
+                    for row in opened
+                ],
                 "execution_basis": "REQUIRED_CONFIDENCE",
                 "elite_required": False,
             },
@@ -2110,6 +3553,10 @@ class EliteCompoundEngine:
 
         capital = self._safe_float(cycle.get("starting_capital"), 0.0)
         reserve_before = self._safe_float(self._state.get("reserve_balance"), 0.0)
+        cycle_harvest_pct = self._safe_float(
+            cycle.get("harvest_pct"),
+            self.harvest_pct,
+        )
 
         if invalid:
             harvested = 0.0
@@ -2118,7 +3565,7 @@ class EliteCompoundEngine:
             result_label = "INVALID"
         else:
             positive_profit = max(0.0, realised)
-            harvested = positive_profit * self.harvest_pct
+            harvested = positive_profit * cycle_harvest_pct
             compounded_profit = positive_profit - harvested
             if realised >= 0:
                 next_capital = capital + compounded_profit
@@ -2627,11 +4074,42 @@ class EliteCompoundEngine:
         return {
             "name": "JASONG ELITE 80/20 COMPOUND",
             "version": self.VERSION,
-            "profit_target_pct": self.profit_target_pct,
+            "legacy_fallback_profit_target_pct":
+                self.profit_target_pct,
+            "adaptive_target_mode":
+                self.target_mode,
+            "target_multiples":
+                list(self.target_multiples),
+            "default_target_multiple":
+                self.default_target_multiple,
+            "target_min_samples_per_target":
+                self.target_min_samples_per_target,
+            "target_evidence_window":
+                self.target_evidence_window,
+            "target_optimizer_weights": {
+                "win_probability":
+                    self.target_weight_probability,
+                "cycle_duration":
+                    self.target_weight_duration,
+                "loss_recovery":
+                    self.target_weight_recovery,
+                "harvested_reserve":
+                    self.target_weight_reserve,
+            },
             "stop_loss_pct": self.stop_loss_pct,
             "profit_harvest_pct": self.harvest_pct,
             "profit_compound_pct": 1.0 - self.harvest_pct,
             "max_positions": self.max_positions,
+            "required_basket_positions":
+                self.required_basket_positions,
+            "candidate_pool_size":
+                self.candidate_pool_size,
+            "eligibility_refresh_seconds":
+                self.poll_seconds,
+            "new_cycle_requires_full_five":
+                True,
+            "partial_basket_becomes_active":
+                False,
             "model_ai_min_confidence": self.ai_min_confidence,
             "quant_min_confidence": self.quant_min_confidence,
             "fast_score_min": self.fast_score_min,
@@ -2672,9 +4150,9 @@ class EliteCompoundEngine:
             "auto_restart": True,
             "broker_execution": "IG_DEMO_ONLY",
             "legacy_tracking_preserved": True,
-            "legacy_ig_new_entries_must_be_paused_while_compound_runs": True,
+            "learning_can_coexist_with_compound": True,
             "unified_intelligence_bridge": True,
-            "broker_clean_required": True,
+            "external_manual_positions_block_compound": True,
             "signals_evaluated_while_broker_blocked": True,
             "evidence_integrity_tracking": True,
             "position_mfe_mae_tracking": True,
@@ -2721,6 +4199,19 @@ class EliteCompoundEngine:
                 self.global_broker_max_positions,
             "compound_max_positions":
                 self.max_positions,
+            "required_basket_positions":
+                self.required_basket_positions,
+            "candidate_pool_size":
+                self.candidate_pool_size,
+            "eligibility_refresh_seconds":
+                self.poll_seconds,
+            "basket_assembly":
+                dict(
+                    state.get(
+                        "basket_assembly"
+                    )
+                    or {}
+                ),
             "broker_capacity":
                 self._compound_open_capacity(positions),
             "auto_restart": bool(state.get("auto_restart")),
@@ -2736,6 +4227,7 @@ class EliteCompoundEngine:
             "current_cycle": current,
             "current_target_progress_pct": round(target_progress * 100.0, 2),
             "current_stop_progress_pct": round(stop_progress * 100.0, 2),
+            "target_optimizer": self.target_analysis(),
             "broker_account": account,
             "compound_broker_positions": self._compound_positions(positions),
             "learning_broker_positions": self._learning_positions(positions),
