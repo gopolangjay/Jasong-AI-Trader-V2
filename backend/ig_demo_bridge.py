@@ -110,6 +110,62 @@ class IGDemoMirror:
             minimum=15,
             maximum=300,
         )
+        # V6.8.18 PRIME execution / regime protection.
+        self.prime_quality_tiers = {"A", "A+"}
+        self.prime_min_historical_wr = self._float_env(
+            "PRIME_MIN_HISTORICAL_WR",
+            0.55,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.prime_min_historical_pf = self._float_env(
+            "PRIME_MIN_HISTORICAL_PF",
+            1.20,
+            minimum=0.0,
+            maximum=20.0,
+        )
+        self.prime_min_historical_trades = self._int_env(
+            "PRIME_MIN_HISTORICAL_TRADES",
+            20,
+            minimum=1,
+            maximum=100000,
+        )
+        self.prime_fx_fast_min = self._float_env(
+            "PRIME_FX_FAST_MIN",
+            90.0,
+            minimum=0.0,
+            maximum=100.0,
+        )
+        self.regime_window = self._int_env(
+            "PRIME_REGIME_WINDOW",
+            20,
+            minimum=5,
+            maximum=200,
+        )
+        self.quarantine_min_trades = self._int_env(
+            "PRIME_QUARANTINE_MIN_TRADES",
+            8,
+            minimum=3,
+            maximum=100,
+        )
+        self.quarantine_wr = self._float_env(
+            "PRIME_QUARANTINE_WR",
+            0.40,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.hard_quarantine_min_trades = self._int_env(
+            "PRIME_HARD_QUARANTINE_MIN_TRADES",
+            12,
+            minimum=4,
+            maximum=200,
+        )
+        self.hard_quarantine_wr = self._float_env(
+            "PRIME_HARD_QUARANTINE_WR",
+            0.45,
+            minimum=0.0,
+            maximum=1.0,
+        )
 
         default_state = (
             "/var/data/jasong_ig_demo_mirror.json"
@@ -157,6 +213,20 @@ class IGDemoMirror:
         }
 
     @staticmethod
+    def _float_env(
+        name: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        try:
+            value = float(os.getenv(name, str(default)))
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
     def _int_env(
         name: str,
         default: int,
@@ -169,6 +239,17 @@ class IGDemoMirror:
         except Exception:
             value = default
         return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _safe_float(
+        value: Any,
+        default: float = 0.0,
+    ) -> float:
+        try:
+            out = float(value)
+            return out if math.isfinite(out) else default
+        except Exception:
+            return default
 
     def _load(self) -> None:
         try:
@@ -539,6 +620,303 @@ class IGDemoMirror:
             {},
         )
         return mirrors
+
+    @staticmethod
+    def _clean_market_key(value: Any) -> str:
+        return re.sub(
+            r"[^A-Z0-9]+",
+            "",
+            str(value or "").upper(),
+        )
+
+    def _settled_broker_rows(
+        self,
+    ) -> list[Dict[str, Any]]:
+        with self._lock:
+            rows = [
+                dict(row)
+                for row in self._mirrors().values()
+                if isinstance(row, dict)
+                and row.get("ig_deal_id")
+                and str(
+                    row.get("broker_result") or ""
+                ).upper()
+                in {"WIN", "LOSS"}
+            ]
+        rows.sort(
+            key=lambda row: float(
+                row.get("closed_at")
+                or row.get("created_at")
+                or 0.0
+            ),
+            reverse=True,
+        )
+        return rows
+
+    @staticmethod
+    def _wl_stats(
+        rows: list[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        settled = [
+            row
+            for row in rows
+            if str(
+                row.get("broker_result") or ""
+            ).upper()
+            in {"WIN", "LOSS"}
+        ]
+        wins = sum(
+            1
+            for row in settled
+            if str(
+                row.get("broker_result") or ""
+            ).upper()
+            == "WIN"
+        )
+        losses = len(settled) - wins
+        return {
+            "trades": len(settled),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": (
+                wins / len(settled)
+                if settled
+                else None
+            ),
+            "win_rate_pct": (
+                round(
+                    wins / len(settled) * 100.0,
+                    2,
+                )
+                if settled
+                else None
+            ),
+        }
+
+    def execution_guard_snapshot(
+        self,
+    ) -> Dict[str, Any]:
+        """Lightweight broker-forward regime snapshot.
+
+        This method intentionally does NOT call Compound status, so Compound may
+        safely use it as an execution gate without creating status recursion.
+        """
+        rows = self._settled_broker_rows()
+        recent = rows[: self.regime_window]
+        recent_stats = self._wl_stats(recent)
+        recent_wr = recent_stats.get("win_rate")
+
+        if recent_wr is None:
+            mode = "CAUTION"
+        elif recent_wr >= 0.55:
+            mode = "NORMAL"
+        elif recent_wr >= 0.45:
+            mode = "CAUTION"
+        elif recent_wr >= 0.35:
+            mode = "DEFENSIVE"
+        else:
+            mode = "PRIME_ONLY"
+
+        by_market: Dict[str, Dict[str, Any]] = {}
+        by_class: Dict[str, Dict[str, Any]] = {}
+
+        market_keys = {
+            self._clean_market_key(
+                row.get("symbol")
+                or row.get("market")
+            )
+            for row in rows
+        }
+        for key in market_keys:
+            if not key:
+                continue
+            bucket = [
+                row
+                for row in rows
+                if self._clean_market_key(
+                    row.get("symbol")
+                    or row.get("market")
+                )
+                == key
+            ]
+            stats = self._wl_stats(bucket)
+            wr = stats.get("win_rate")
+            stats["quarantined"] = bool(
+                stats["trades"] >= self.quarantine_min_trades
+                and wr is not None
+                and wr < self.quarantine_wr
+            )
+            stats["hard_quarantined"] = bool(
+                stats["trades"] >= self.hard_quarantine_min_trades
+                and wr is not None
+                and wr < self.hard_quarantine_wr
+            )
+            by_market[key] = stats
+
+        classes = {
+            str(
+                row.get("trade_class")
+                or row.get("entry_class")
+                or "UNKNOWN"
+            ).upper()
+            for row in rows
+        }
+        for cls in classes:
+            bucket = [
+                row
+                for row in rows
+                if str(
+                    row.get("trade_class")
+                    or row.get("entry_class")
+                    or "UNKNOWN"
+                ).upper()
+                == cls
+            ]
+            stats = self._wl_stats(bucket)
+            wr = stats.get("win_rate")
+            stats["quarantined"] = bool(
+                stats["trades"] >= self.quarantine_min_trades
+                and wr is not None
+                and wr < self.quarantine_wr
+            )
+            stats["hard_quarantined"] = bool(
+                stats["trades"] >= self.hard_quarantine_min_trades
+                and wr is not None
+                and wr < self.hard_quarantine_wr
+            )
+            by_class[cls] = stats
+
+        return {
+            "version": "6.8.18",
+            "mode": mode,
+            "window": self.regime_window,
+            "recent": recent_stats,
+            "by_market": by_market,
+            "by_class": by_class,
+            "quarantine_min_trades":
+                self.quarantine_min_trades,
+            "quarantine_wr_pct":
+                round(self.quarantine_wr * 100.0, 2),
+            "hard_quarantine_min_trades":
+                self.hard_quarantine_min_trades,
+            "hard_quarantine_wr_pct":
+                round(
+                    self.hard_quarantine_wr * 100.0,
+                    2,
+                ),
+            "execution_policy":
+                "PRIME_ONLY_WHEN_RECENT_FORWARD_WR_IS_WEAK",
+        }
+
+    def _prime_trade_gate(
+        self,
+        trade: Dict[str, Any],
+    ) -> tuple[bool, list[str], Dict[str, Any]]:
+        """Return whether a Learning signal is strong enough for IG DEMO."""
+        reasons: list[str] = []
+        quality = str(
+            trade.get("quality_tier") or ""
+        ).upper().strip()
+        deep = str(
+            trade.get("deep_status") or ""
+        ).upper().strip()
+        historical_wr = self._safe_float(
+            trade.get("historical_win_rate"),
+            0.0,
+        )
+        historical_pf = self._safe_float(
+            trade.get("historical_profit_factor"),
+            0.0,
+        )
+        historical_trades = int(
+            self._safe_float(
+                trade.get("historical_trades"),
+                0.0,
+            )
+        )
+        fast = self._safe_float(
+            trade.get("smart_fast_score"),
+            0.0,
+        )
+        trade_class = str(
+            trade.get("trade_class")
+            or trade.get("entry_class")
+            or ""
+        ).upper()
+
+        if quality not in self.prime_quality_tiers:
+            reasons.append(
+                f"Quality {quality or '-'} is below PRIME A/A+"
+            )
+        if deep not in {
+            "VERIFIED",
+            "NEAR_VERIFIED",
+            "GLOBAL_VERIFIED",
+            "GLOBAL_NEAR_VERIFIED",
+        }:
+            reasons.append(
+                f"Deep status {deep or '-'} is not PRIME"
+            )
+        if historical_wr < self.prime_min_historical_wr:
+            reasons.append(
+                "Historical WR "
+                f"{historical_wr*100:.1f}% < "
+                f"{self.prime_min_historical_wr*100:.0f}%"
+            )
+        if historical_pf < self.prime_min_historical_pf:
+            reasons.append(
+                f"Historical PF {historical_pf:.2f} < "
+                f"{self.prime_min_historical_pf:.2f}"
+            )
+        if historical_trades < self.prime_min_historical_trades:
+            reasons.append(
+                f"Historical sample {historical_trades} < "
+                f"{self.prime_min_historical_trades}"
+            )
+        if fast < self.prime_fx_fast_min:
+            reasons.append(
+                f"Fast {fast:.1f} < {self.prime_fx_fast_min:.0f}"
+            )
+        if trade_class != "ELITE":
+            reasons.append(
+                f"Class {trade_class or '-'} is learning-only, not PRIME"
+            )
+
+        guard = self.execution_guard_snapshot()
+        market_key = self._clean_market_key(
+            trade.get("symbol")
+            or trade.get("market")
+        )
+        market_stats = (
+            guard.get("by_market", {}).get(
+                market_key,
+                {},
+            )
+        )
+        class_stats = (
+            guard.get("by_class", {}).get(
+                trade_class,
+                {},
+            )
+        )
+        if market_stats.get("hard_quarantined"):
+            reasons.append(
+                "Market is HARD_QUARANTINED by real IG forward evidence"
+            )
+        elif market_stats.get("quarantined"):
+            reasons.append(
+                "Market is QUARANTINED by real IG forward evidence"
+            )
+        if class_stats.get("hard_quarantined"):
+            reasons.append(
+                "Trade class is HARD_QUARANTINED by real IG forward evidence"
+            )
+
+        return (
+            len(reasons) == 0,
+            list(dict.fromkeys(reasons)),
+            guard,
+        )
 
     def _ensure_phase_state(self) -> None:
         """Ensure rolling phase metadata and migrate legacy broker evidence.
@@ -1237,7 +1615,7 @@ class IGDemoMirror:
 
         return {
             "version":
-                "6.8.15-FORWARD-EVIDENCE-DIAGNOSTICS",
+                "6.8.18-PRIME-EXECUTION-REGIME-GUARD",
             "environment": "IG_DEMO",
             "execution_evidence_only": True,
             "internal_paper_evidence_included": False,
@@ -2187,7 +2565,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.15-FORWARD-EVIDENCE-DIAGNOSTICS",
+                "version": "6.8.18-PRIME-EXECUTION-REGIME-GUARD",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -2233,6 +2611,31 @@ class IGDemoMirror:
                 "execution_mode": "IG_DEMO_ONLY",
                 "paper_execution_enabled": False,
                 "dual_track_execution": True,
+                "prime_execution_enabled": True,
+                "prime_execution_policy": {
+                    "quality_tiers": ["A", "A+"],
+                    "min_historical_wr_pct":
+                        round(
+                            self.prime_min_historical_wr
+                            * 100.0,
+                            2,
+                        ),
+                    "min_historical_pf":
+                        self.prime_min_historical_pf,
+                    "min_historical_trades":
+                        self.prime_min_historical_trades,
+                    "fx_fast_min":
+                        self.prime_fx_fast_min,
+                },
+                "regime_guard":
+                    self.execution_guard_snapshot(),
+                "prime_execution_skips":
+                    list(
+                        self._state.get(
+                            "prime_execution_skips"
+                        )
+                        or []
+                    )[-20:],
                 "jasong_owned_reference_prefixes": [
                     "JSCMP_",
                     "JASONG_",
@@ -3070,9 +3473,43 @@ class IGDemoMirror:
                         continue
                     if not bool(trade.get("ig_demo_learning_eligible", True)):
                         continue
-                    if str(trade.get("trade_class") or "").upper() not in {
-                        "ELITE", "BOUNDARY", "LEARNING"
-                    }:
+                    # V6.8.18:
+                    # Learning continues to observe all useful signals, but
+                    # broker execution is PRIME-only. Quality B / Boundary /
+                    # marginal confidence signals no longer consume IG DEMO
+                    # entries or main W/L evidence.
+                    prime_ok, prime_reasons, regime_guard = (
+                        self._prime_trade_gate(trade)
+                    )
+                    if not prime_ok:
+                        with self._lock:
+                            skips = list(
+                                self._state.get(
+                                    "prime_execution_skips"
+                                )
+                                or []
+                            )
+                            skips.append({
+                                "at": time.time(),
+                                "trade_id":
+                                    trade.get("trade_id"),
+                                "symbol":
+                                    trade.get("symbol")
+                                    or trade.get("market"),
+                                "trade_class":
+                                    trade.get("trade_class")
+                                    or trade.get("entry_class"),
+                                "quality_tier":
+                                    trade.get("quality_tier"),
+                                "reasons":
+                                    prime_reasons,
+                                "regime":
+                                    regime_guard.get("mode"),
+                            })
+                            self._state[
+                                "prime_execution_skips"
+                            ] = skips[-200:]
+                            self._persist()
                         continue
 
                     existing = (
