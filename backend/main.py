@@ -66,6 +66,7 @@ from ig_demo_bridge import IGDemoMirror
 from compound_engine import EliteCompoundEngine
 from integrity_engine import EvidenceExecutionIntegrityEngine
 from global_market_engine import GlobalMarketEngine, GLOBAL_MARKET_SEEDS
+from specialist_market_integration import install_specialist_market_system
 
 from database import (
     SessionLocal,
@@ -7101,6 +7102,85 @@ COMPOUND_ENGINE.set_forward_evidence_source(
     lambda: IG_DEMO_MIRROR.execution_guard_snapshot()
 )
 
+
+# ============================================================
+# V6.9 SPECIALIST MARKET CATEGORY INTEGRATION
+# ============================================================
+# Additive integration over the existing V6.8.19 Compound engine.
+# The current Compound execution, forward evidence, adaptive target,
+# reconciliation and IG DEMO protections remain in place.
+
+def _v690_specialist_frame(seed: dict):
+    loader = globals().get("_v673_global_market_data")
+    if callable(loader):
+        raw = loader(seed)
+    else:
+        public_symbol = (
+            seed.get("analysis_symbol")
+            or seed.get("symbol")
+            or seed.get("key")
+        )
+        data_loader = globals().get("get_data")
+        if not callable(data_loader):
+            raise RuntimeError(
+                "No compatible Jasong market-data loader found"
+            )
+        try:
+            raw = data_loader(
+                public_symbol,
+                period="1mo",
+                interval="15m",
+            )
+        except TypeError:
+            raw = data_loader(public_symbol)
+
+    indicators = add_indicators(raw)
+    model = train_model(indicators)
+    enriched = enrich(indicators, model)
+
+    if enriched is None or enriched.empty:
+        raise ValueError(
+            f"No Jasong Rule+ML enrichment for {seed.get('key')}"
+        )
+
+    # Preserve raw OHLCV if an enrichment implementation drops any field.
+    for column in ("Open", "High", "Low", "Close", "Volume"):
+        if column in raw.columns and column not in enriched.columns:
+            enriched[column] = raw[column].reindex(
+                enriched.index
+            )
+
+    return enriched
+
+
+# Stop the superseded generic global scanner before the specialist category
+# engine takes ownership of the backward-compatible GLOBAL_MARKET_ENGINE name.
+try:
+    GLOBAL_MARKET_ENGINE.stop_thread()
+except Exception:
+    pass
+
+
+V690_SPECIALIST_SYSTEM = install_specialist_market_system(
+    app=app,
+    broker=IG_DEMO_BROKER,
+    compound_engine=COMPOUND_ENGINE,
+    frame_func=_v690_specialist_frame,
+    ownership_components=[
+        globals().get("IG_DEMO_MIRROR")
+    ],
+)
+
+CATEGORY_STRATEGY_ENGINE = (
+    V690_SPECIALIST_SYSTEM["intelligence"]
+)
+CATEGORY_PORTFOLIO_ENGINE = (
+    V690_SPECIALIST_SYSTEM["portfolio"]
+)
+
+# The verified V6.9 category engine implements the V6.8.x compatibility
+# methods used by the existing /global-markets/* endpoints.
+GLOBAL_MARKET_ENGINE = CATEGORY_STRATEGY_ENGINE
 
 
 @app.get("/forward-evidence/regime")
