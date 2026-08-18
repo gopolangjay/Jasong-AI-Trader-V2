@@ -786,13 +786,44 @@ class IGDemoMirror:
             )
             by_class[cls] = stats
 
+        by_market_strategy: Dict[str, Dict[str, Any]] = {}
+        combos = {
+            (
+                self._clean_market_key(row.get("symbol") or row.get("market")),
+                str(row.get("selected_strategy") or "UNKNOWN").upper(),
+            )
+            for row in rows
+        }
+        for market_key, strategy in combos:
+            if not market_key or strategy == "UNKNOWN":
+                continue
+            bucket = [
+                row for row in rows
+                if self._clean_market_key(row.get("symbol") or row.get("market")) == market_key
+                and str(row.get("selected_strategy") or "UNKNOWN").upper() == strategy
+            ]
+            stats = self._wl_stats(bucket)
+            wr = stats.get("win_rate")
+            stats["quarantined"] = bool(
+                stats["trades"] >= self.quarantine_min_trades
+                and wr is not None
+                and wr < self.quarantine_wr
+            )
+            stats["hard_quarantined"] = bool(
+                stats["trades"] >= self.hard_quarantine_min_trades
+                and wr is not None
+                and wr < self.hard_quarantine_wr
+            )
+            by_market_strategy[f"{market_key}::{strategy}"] = stats
+
         return {
-            "version": "6.8.18",
+            "version": "6.8.19",
             "mode": mode,
             "window": self.regime_window,
             "recent": recent_stats,
             "by_market": by_market,
             "by_class": by_class,
+            "by_market_strategy": by_market_strategy,
             "quarantine_min_trades":
                 self.quarantine_min_trades,
             "quarantine_wr_pct":
@@ -877,10 +908,18 @@ class IGDemoMirror:
             reasons.append(
                 f"Fast {fast:.1f} < {self.prime_fx_fast_min:.0f}"
             )
-        if trade_class != "ELITE":
+        if trade_class not in {"ELITE", "PRIME"}:
             reasons.append(
                 f"Class {trade_class or '-'} is learning-only, not PRIME"
             )
+        selected_strategy = str(trade.get("selected_strategy") or "").upper()
+        if selected_strategy in {"", "NO_TRADE"}:
+            reasons.append("No executable adaptive strategy selected")
+        strategy_conf = self._safe_float(trade.get("strategy_confidence"), 0.0)
+        if selected_strategy and strategy_conf < 0.65:
+            reasons.append(f"Strategy confidence {strategy_conf*100:.1f}% < 65%")
+        if self._safe_float(trade.get("strategy_expected_value"), -1.0) <= 0.0:
+            reasons.append("Strategy expected value is not positive")
 
         guard = self.execution_guard_snapshot()
         market_key = self._clean_market_key(
@@ -899,6 +938,12 @@ class IGDemoMirror:
                 {},
             )
         )
+        market_strategy_stats = (
+            guard.get("by_market_strategy", {}).get(
+                f"{market_key}::{str(trade.get('selected_strategy') or 'UNKNOWN').upper()}",
+                {},
+            )
+        )
         if market_stats.get("hard_quarantined"):
             reasons.append(
                 "Market is HARD_QUARANTINED by real IG forward evidence"
@@ -911,6 +956,10 @@ class IGDemoMirror:
             reasons.append(
                 "Trade class is HARD_QUARANTINED by real IG forward evidence"
             )
+        if market_strategy_stats.get("hard_quarantined"):
+            reasons.append("Market+strategy is HARD_QUARANTINED by real IG forward evidence")
+        elif market_strategy_stats.get("quarantined"):
+            reasons.append("Market+strategy is QUARANTINED by real IG forward evidence")
 
         return (
             len(reasons) == 0,
@@ -1615,7 +1664,7 @@ class IGDemoMirror:
 
         return {
             "version":
-                "6.8.18-PRIME-EXECUTION-REGIME-GUARD",
+                "6.8.19-ADAPTIVE-STRATEGY-INTELLIGENCE",
             "environment": "IG_DEMO",
             "execution_evidence_only": True,
             "internal_paper_evidence_included": False,
@@ -2565,7 +2614,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.18-PRIME-EXECUTION-REGIME-GUARD",
+                "version": "6.8.19-ADAPTIVE-STRATEGY-INTELLIGENCE",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
