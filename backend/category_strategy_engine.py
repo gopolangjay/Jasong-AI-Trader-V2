@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# JASONG AI TRADER V6.9.0 - SPECIALIST MARKET CATEGORY INTELLIGENCE
+# JASONG AI TRADER V6.9.1 - ADAPTIVE SPECIALIST STRATEGY OPTIMISER
 # ---------------------------------------------------------------------------
 # Design contract
 #   * six independent specialist categories;
@@ -20,10 +20,12 @@ import pandas as pd
 #   * historical 70% is an evidence/validation target, NOT a live confidence;
 #   * each category ranks at most five selections;
 #   * ranks #1 and #2 are Compound slot candidates only when every gate passes;
+#   * finite strategy variants are selected BEFORE the untouched final holdout;
+#   * final 70% validation is allowed only when selection-window stability also passes;
 #   * execution remains IG DEMO only; this module contains no production URL.
 # ---------------------------------------------------------------------------
 
-VERSION = "6.9.0"
+VERSION = "6.9.1"
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
 HISTORICAL_WIN_RATE_TARGET = 0.70
@@ -490,13 +492,246 @@ def _share_signal(row: pd.Series) -> StrategySignal:
     return _score_to_signal(long, short, 5.45, 3.2, regime, "gap/relative-volume event + VWAP + trend + breakout")
 
 
+
+# ---------------------------------------------------------------------------
+# V6.9.1 finite strategy-variant library
+# ---------------------------------------------------------------------------
+# IMPORTANT: this is deliberately a small, explicit search space. The optimiser
+# never tunes against the final holdout. It chooses a variant using only the
+# earlier selection window, then freezes that variant before measuring the final
+# 30% holdout. This reduces the risk of manufacturing a high historical win rate
+# through repeated trial-and-error on the same final sample.
+
+@dataclass(frozen=True)
+class StrategyVariant:
+    strategy_id: str
+    strategy_name: str
+    signal_func: Callable[[pd.Series], StrategySignal]
+    holding_bars: int
+
+
+def _fx_breakout_signal(row: pd.Series) -> StrategySignal:
+    long = short = 0.0
+    adx = _safe_float(row["ADX14"])
+    if adx < 21.0:
+        return StrategySignal("WAIT", 0.0, "RANGE", 0.0, 0.0, 1.0, "FX breakout requires ADX >=21")
+    if row["EMA20"] > row["EMA50"] > row["EMA200"]: long += 1.6
+    if row["EMA20"] < row["EMA50"] < row["EMA200"]: short += 1.6
+    if row["BREAKOUT_UP"]: long += 1.5
+    if row["BREAKOUT_DOWN"]: short += 1.5
+    if row["RET4"] > 0 and row["RET8"] > 0: long += 1.1
+    if row["RET4"] < 0 and row["RET8"] < 0: short += 1.1
+    if row["REL_VOLUME"] >= 1.05:
+        if long > short: long += 0.6
+        elif short > long: short += 0.6
+    return _score_to_signal(long, short, 4.8, 3.0, "BREAKOUT", "FX EMA-stack + ADX + 20-bar breakout momentum")
+
+
+def _fx_range_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) > 23.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "FX range reversion disabled in strong trend")
+    long = short = 0.0
+    z = _safe_float(row["BB_Z"])
+    dist = _safe_float(row["EMA20_ATR_DIST"])
+    if z <= -1.35: long += 1.5
+    if z >= 1.35: short += 1.5
+    if row["RSI14"] <= 37.0: long += 1.0
+    if row["RSI14"] >= 63.0: short += 1.0
+    if dist <= -1.0: long += 0.8
+    if dist >= 1.0: short += 0.8
+    if row["Close"] < row["SESSION_VWAP"] and long > short: long += 0.5
+    if row["Close"] > row["SESSION_VWAP"] and short > long: short += 0.5
+    return _score_to_signal(long, short, 3.8, 2.7, "RANGE", "FX Bollinger/RSI/ATR mean reversion")
+
+
+def _index_breakout_signal(row: pd.Series) -> StrategySignal:
+    long = short = 0.0
+    if row["BREAKOUT_UP"]: long += 1.7
+    if row["BREAKOUT_DOWN"]: short += 1.7
+    if row["SESSION_RETURN"] > 0: long += 0.9
+    elif row["SESSION_RETURN"] < 0: short += 0.9
+    if row["Close"] > row["SESSION_VWAP"]: long += 0.9
+    else: short += 0.9
+    if row["ADX14"] >= 20.0:
+        if row["EMA20"] > row["EMA50"]: long += 0.8
+        else: short += 0.8
+    if row["REL_VOLUME"] >= 1.10:
+        if long > short: long += 0.6
+        elif short > long: short += 0.6
+    return _score_to_signal(long, short, 4.9, 3.0, "BREAKOUT", "Index 20-bar breakout + VWAP/session confirmation")
+
+
+def _index_reversion_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) > 24.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "Index reversion disabled in strong trend")
+    long = short = 0.0
+    vwap_dist = _safe_float(row["VWAP_ATR_DIST"])
+    z = _safe_float(row["BB_Z"])
+    if vwap_dist <= -1.0: long += 1.3
+    if vwap_dist >= 1.0: short += 1.3
+    if z <= -1.4: long += 1.1
+    if z >= 1.4: short += 1.1
+    if row["RSI14"] <= 38.0: long += 0.9
+    if row["RSI14"] >= 62.0: short += 0.9
+    return _score_to_signal(long, short, 3.3, 2.45, "VWAP_REVERSION", "Index VWAP/ATR + Bollinger + RSI reversion")
+
+
+def _crypto_trend_signal(row: pd.Series) -> StrategySignal:
+    atr_pct = _safe_float(row["ATR_PCT"])
+    if atr_pct >= _safe_float(row["ATR_Q95"], 1.0) and abs(_safe_float(row["RET1"])) >= max(0.02, 2.0 * _safe_float(row["VOL20"])):
+        return StrategySignal("WAIT", 0.0, "PANIC", 0.0, 0.0, 1.0, "panic volatility: no trend entry")
+    if _safe_float(row["ADX14"]) < 24.0:
+        return StrategySignal("WAIT", 0.0, "RANGE", 0.0, 0.0, 1.0, "crypto trend requires ADX >=24")
+    long = short = 0.0
+    if row["EMA20"] > row["EMA50"] > row["EMA200"]: long += 1.5
+    if row["EMA20"] < row["EMA50"] < row["EMA200"]: short += 1.5
+    if row["RET4"] > 0 and row["RET8"] > 0: long += 1.1
+    if row["RET4"] < 0 and row["RET8"] < 0: short += 1.1
+    if row["BREAKOUT_UP"]: long += 1.0
+    if row["BREAKOUT_DOWN"]: short += 1.0
+    if row["REL_VOLUME"] >= 1.20:
+        if long > short: long += 0.7
+        elif short > long: short += 0.7
+    return _score_to_signal(long, short, 4.3, 2.8, "TREND", "Crypto EMA-stack + momentum + breakout + volume")
+
+
+def _crypto_range_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) >= 22.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "crypto range reversion only below ADX22")
+    long = short = 0.0
+    z = _safe_float(row["BB_Z"])
+    if z <= -1.35: long += 1.5
+    if z >= 1.35: short += 1.5
+    if row["RSI14"] <= 36.0: long += 1.0
+    if row["RSI14"] >= 64.0: short += 1.0
+    if _safe_float(row["VWAP_ATR_DIST"]) <= -1.0: long += 0.7
+    if _safe_float(row["VWAP_ATR_DIST"]) >= 1.0: short += 0.7
+    return _score_to_signal(long, short, 3.2, 2.35, "RANGE", "Crypto Bollinger/RSI/VWAP range reversion")
+
+
+def _metals_breakout_signal(row: pd.Series) -> StrategySignal:
+    long = short = 0.0
+    if row["BREAKOUT_UP"]: long += 1.5
+    if row["BREAKOUT_DOWN"]: short += 1.5
+    if row["EMA20"] > row["EMA50"] > row["EMA200"]: long += 1.3
+    if row["EMA20"] < row["EMA50"] < row["EMA200"]: short += 1.3
+    if row["RET8"] > 0 and row["RET20"] > 0: long += 1.0
+    if row["RET8"] < 0 and row["RET20"] < 0: short += 1.0
+    if row["ADX14"] >= 22.0:
+        if long > short: long += 0.7
+        elif short > long: short += 0.7
+    return _score_to_signal(long, short, 4.5, 2.9, "BREAKOUT", "Metals breakout + medium trend confirmation")
+
+
+def _metals_reversion_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) > 21.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "metals reversion disabled above ADX21")
+    long = short = 0.0
+    z = _safe_float(row["BB_Z"])
+    if z <= -1.45: long += 1.5
+    if z >= 1.45: short += 1.5
+    if row["RSI14"] <= 38.0: long += 0.9
+    if row["RSI14"] >= 62.0: short += 0.9
+    if _safe_float(row["EMA20_ATR_DIST"]) <= -1.1: long += 0.7
+    if _safe_float(row["EMA20_ATR_DIST"]) >= 1.1: short += 0.7
+    return _score_to_signal(long, short, 3.1, 2.35, "RANGE", "Metals Bollinger/RSI/ATR reversion")
+
+
+def _energy_trend_signal(row: pd.Series) -> StrategySignal:
+    long = short = 0.0
+    if row["EMA20"] > row["EMA50"] > row["EMA200"]: long += 1.4
+    if row["EMA20"] < row["EMA50"] < row["EMA200"]: short += 1.4
+    if row["RET4"] > 0 and row["RET8"] > 0: long += 1.0
+    if row["RET4"] < 0 and row["RET8"] < 0: short += 1.0
+    if row["SESSION_RETURN"] > 0: long += 0.7
+    elif row["SESSION_RETURN"] < 0: short += 0.7
+    if row["Close"] > row["SESSION_VWAP"]: long += 0.7
+    else: short += 0.7
+    if row["ADX14"] >= 22.0:
+        if long > short: long += 0.7
+        elif short > long: short += 0.7
+    return _score_to_signal(long, short, 4.5, 2.9, "TREND", "Energy EMA-stack + session/VWAP trend continuation")
+
+
+def _energy_reversion_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) > 22.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "energy reversion disabled above ADX22")
+    long = short = 0.0
+    if _safe_float(row["VWAP_ATR_DIST"]) <= -1.15: long += 1.4
+    if _safe_float(row["VWAP_ATR_DIST"]) >= 1.15: short += 1.4
+    if _safe_float(row["BB_Z"]) <= -1.4: long += 1.0
+    if _safe_float(row["BB_Z"]) >= 1.4: short += 1.0
+    if row["RSI14"] <= 38.0: long += 0.8
+    if row["RSI14"] >= 62.0: short += 0.8
+    return _score_to_signal(long, short, 3.2, 2.4, "RANGE", "Energy VWAP/ATR + Bollinger reversion")
+
+
+def _share_trend_signal(row: pd.Series) -> StrategySignal:
+    long = short = 0.0
+    if row["EMA20"] > row["EMA50"] > row["EMA200"]: long += 1.4
+    if row["EMA20"] < row["EMA50"] < row["EMA200"]: short += 1.4
+    if row["RET4"] > 0 and row["RET8"] > 0: long += 1.0
+    if row["RET4"] < 0 and row["RET8"] < 0: short += 1.0
+    if row["Close"] > row["SESSION_VWAP"]: long += 0.8
+    else: short += 0.8
+    if row["BREAKOUT_UP"]: long += 0.8
+    if row["BREAKOUT_DOWN"]: short += 0.8
+    if row["REL_VOLUME"] >= 1.15:
+        if long > short: long += 0.6
+        elif short > long: short += 0.6
+    return _score_to_signal(long, short, 4.6, 2.95, "TREND_CONTINUATION", "Share trend continuation + VWAP + breakout + volume")
+
+
+def _share_reversion_signal(row: pd.Series) -> StrategySignal:
+    if _safe_float(row["ADX14"]) > 23.0:
+        return StrategySignal("WAIT", 0.0, "TREND", 0.0, 0.0, 1.0, "share reversion disabled above ADX23")
+    long = short = 0.0
+    if _safe_float(row["VWAP_ATR_DIST"]) <= -1.0: long += 1.3
+    if _safe_float(row["VWAP_ATR_DIST"]) >= 1.0: short += 1.3
+    if _safe_float(row["BB_Z"]) <= -1.35: long += 1.1
+    if _safe_float(row["BB_Z"]) >= 1.35: short += 1.1
+    if row["RSI14"] <= 37.0: long += 0.9
+    if row["RSI14"] >= 63.0: short += 0.9
+    return _score_to_signal(long, short, 3.3, 2.45, "VWAP_REVERSION", "Share VWAP/Bollinger/RSI reversion")
+
+
+STRATEGY_VARIANTS: Dict[str, List[StrategyVariant]] = {
+    "FOREX": [
+        StrategyVariant("FX_REGIME_TREND_PULLBACK_V1", "FX Regime + Trend Pullback", _fx_signal, 4),
+        StrategyVariant("FX_BREAKOUT_MOMENTUM_V2", "FX Breakout Momentum", _fx_breakout_signal, 4),
+        StrategyVariant("FX_RANGE_REVERSION_V2", "FX Range Reversion", _fx_range_signal, 3),
+    ],
+    "INDICES": [
+        StrategyVariant("INDEX_SESSION_MOMENTUM_V1", "Index Session Momentum", _index_signal, 2),
+        StrategyVariant("INDEX_BREAKOUT_V2", "Index Breakout Momentum", _index_breakout_signal, 2),
+        StrategyVariant("INDEX_VWAP_REVERSION_V2", "Index VWAP Reversion", _index_reversion_signal, 2),
+    ],
+    "CRYPTO": [
+        StrategyVariant("CRYPTO_REGIME_ROUTER_V1", "Crypto Regime Momentum / Range Router", _crypto_signal, 4),
+        StrategyVariant("CRYPTO_TREND_V2", "Crypto Trend Momentum", _crypto_trend_signal, 4),
+        StrategyVariant("CRYPTO_RANGE_V2", "Crypto Range Reversion", _crypto_range_signal, 3),
+    ],
+    "METALS": [
+        StrategyVariant("METALS_TREND_VOLATILITY_V1", "Metals Trend + Volatility", _metals_signal, 8),
+        StrategyVariant("METALS_BREAKOUT_V2", "Metals Breakout Momentum", _metals_breakout_signal, 6),
+        StrategyVariant("METALS_REVERSION_V2", "Metals Range Reversion", _metals_reversion_signal, 4),
+    ],
+    "ENERGY": [
+        StrategyVariant("ENERGY_SESSION_BREAKOUT_V1", "Energy Session Momentum + Breakout", _energy_signal, 3),
+        StrategyVariant("ENERGY_TREND_V2", "Energy Trend Continuation", _energy_trend_signal, 4),
+        StrategyVariant("ENERGY_REVERSION_V2", "Energy Range Reversion", _energy_reversion_signal, 3),
+    ],
+    "SHARES": [
+        StrategyVariant("SHARE_EVENT_MOMENTUM_V1", "Share Price/Volume Event Momentum", _share_signal, 4),
+        StrategyVariant("SHARE_TREND_CONTINUATION_V2", "Share Trend Continuation", _share_trend_signal, 4),
+        StrategyVariant("SHARE_VWAP_REVERSION_V2", "Share VWAP Reversion", _share_reversion_signal, 3),
+    ],
+}
+
+# Baseline mapping retained for compatibility with external imports/tests.
 _SIGNAL_FUNC: Dict[str, Callable[[pd.Series], StrategySignal]] = {
-    "FOREX": _fx_signal,
-    "INDICES": _index_signal,
-    "CRYPTO": _crypto_signal,
-    "METALS": _metals_signal,
-    "ENERGY": _energy_signal,
-    "SHARES": _share_signal,
+    category: variants[0].signal_func
+    for category, variants in STRATEGY_VARIANTS.items()
 }
 
 
@@ -649,48 +884,194 @@ class CategoryStrategyEngine:
             return 1.0 - up
         return 0.0
 
-    def _evaluate_seed(self, seed: Dict[str, Any]) -> Dict[str, Any]:
-        category = str(seed.get("category") or "").upper()
-        if category not in _SIGNAL_FUNC:
-            raise ValueError(f"Unsupported category: {category}")
-        raw = self.frame_func(seed)
-        frame = _feature_frame(raw)
-        signal_func = _SIGNAL_FUNC[category]
-        rule = CATEGORY_RULES[category]
-        holding = int(rule["holding_bars"])
-        cost = float(rule["cost_bps"]) / 10000.0
+    @staticmethod
+    def _metrics_from_returns(values: List[float]) -> Dict[str, Any]:
+        trades = len(values)
+        wins = sum(1 for value in values if value > 0.0)
+        losses = trades - wins
+        win_rate = wins / trades if trades else 0.0
+        return {
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "profit_factor": _profit_factor(values),
+            "max_drawdown": _max_drawdown(values),
+            "mean_return": (sum(values) / trades) if trades else 0.0,
+        }
 
-        # Genuine held-out assessment on the last 30%. No result is called 70%
-        # verified unless the specialist strategy itself reaches that threshold.
-        cut = max(200, int(len(frame) * 0.70))
-        strategy_returns: List[float] = []
-        for i in range(cut, max(cut, len(frame) - holding)):
+    def _simulate_variant(
+        self,
+        frame: pd.DataFrame,
+        variant: StrategyVariant,
+        *,
+        start: int,
+        end: int,
+        cost: float,
+    ) -> Dict[str, Any]:
+        """Evaluate one frozen variant over one chronological window.
+
+        Entries are non-overlapping: after an accepted trade the simulator moves
+        forward by the strategy holding horizon. This avoids inflating the sample
+        with several simultaneous copies of the same market position.
+        """
+        returns: List[float] = []
+        i = max(0, int(start))
+        stop = min(int(end), len(frame) - int(variant.holding_bars))
+        while i < stop:
             row = frame.iloc[i]
-            sig = signal_func(row)
+            sig = variant.signal_func(row)
             if sig.direction not in {"BUY", "SELL"} or sig.quant_confidence < QUANT_MIN_CONFIDENCE:
+                i += 1
                 continue
             ai = self._directional_ai(row, sig.direction)
             if ai < MODEL_AI_MIN_CONFIDENCE:
+                i += 1
                 continue
             entry = _safe_float(row["Close"])
-            exit_price = _safe_float(frame.iloc[i + holding]["Close"])
+            exit_price = _safe_float(frame.iloc[i + variant.holding_bars]["Close"])
             if entry <= 0 or exit_price <= 0:
+                i += 1
                 continue
             gross = exit_price / entry - 1.0
             if sig.direction == "SELL":
                 gross = -gross
-            strategy_returns.append(gross - cost)
+            returns.append(gross - cost)
+            i += max(1, int(variant.holding_bars))
+        metrics = self._metrics_from_returns(returns)
+        metrics["returns"] = returns
+        return metrics
 
-        trades = len(strategy_returns)
-        wins = sum(1 for value in strategy_returns if value > 0.0)
-        losses = trades - wins
-        win_rate = wins / trades if trades else 0.0
-        profit_factor = _profit_factor(strategy_returns)
-        max_dd = _max_drawdown(strategy_returns)
-        quality, category_validation_status, validated_70 = _historical_grade(trades, win_rate, profit_factor, max_dd)
-        # Existing V6.8.x Compound recognises VERIFIED/WATCH/REJECT. Keep the
-        # category-specific evidence label separately so no compatibility gate is
-        # weakened or confused by a new unrecognised deep-status string.
+    @staticmethod
+    def _window_score(metrics: Dict[str, Any]) -> float:
+        trades = int(metrics.get("trades") or 0)
+        if trades < 6:
+            return -1000.0 + trades
+        wr = _safe_float(metrics.get("win_rate"))
+        pf = _safe_float(metrics.get("profit_factor"))
+        dd = _safe_float(metrics.get("max_drawdown"))
+        mean = _safe_float(metrics.get("mean_return"))
+        sample = min(1.0, trades / 30.0)
+        # Bounded components; no final-holdout information enters this score.
+        score = (
+            45.0 * wr
+            + 20.0 * min(1.0, max(0.0, pf / 2.0))
+            + 15.0 * max(0.0, 1.0 - min(dd, 0.25) / 0.25)
+            + 10.0 * sample
+            + 10.0 * min(1.0, max(0.0, mean * 500.0))
+        )
+        if pf < 1.0:
+            score -= (1.0 - pf) * 20.0
+        if wr < 0.50:
+            score -= (0.50 - wr) * 30.0
+        return round(score, 4)
+
+    def _select_variant(self, frame: pd.DataFrame, category: str, cost: float) -> Dict[str, Any]:
+        n = len(frame)
+        # Features need a long warm-up (EMA200). Variant selection uses 40-70%;
+        # the final 30% is untouched until one variant has been frozen.
+        selection_start = max(200, int(n * 0.40))
+        selection_end = max(selection_start + 20, int(n * 0.70))
+        selection_end = min(selection_end, n - 1)
+        mid = selection_start + max(1, (selection_end - selection_start) // 2)
+
+        leaderboard: List[Dict[str, Any]] = []
+        for variant in STRATEGY_VARIANTS[category]:
+            full = self._simulate_variant(frame, variant, start=selection_start, end=selection_end, cost=cost)
+            first = self._simulate_variant(frame, variant, start=selection_start, end=mid, cost=cost)
+            second = self._simulate_variant(frame, variant, start=mid, end=selection_end, cost=cost)
+            score_full = self._window_score(full)
+            score_first = self._window_score(first)
+            score_second = self._window_score(second)
+            stable = bool(
+                int(full["trades"]) >= 16
+                and int(first["trades"]) >= 5
+                and int(second["trades"]) >= 5
+                and _safe_float(full["win_rate"]) >= 0.50
+                and _safe_float(full["profit_factor"]) >= 1.0
+                and _safe_float(full["max_drawdown"]) <= 0.20
+                and min(_safe_float(first["win_rate"]), _safe_float(second["win_rate"])) >= 0.40
+            )
+            # Reward performance that survives both chronological halves.
+            stability_floor = min(score_first, score_second)
+            optimiser_score = score_full + 0.35 * stability_floor + (8.0 if stable else 0.0)
+            leaderboard.append({
+                "variant": variant,
+                "optimizer_score": round(optimiser_score, 4),
+                "selection_stable": stable,
+                "selection": full,
+                "selection_first_half": first,
+                "selection_second_half": second,
+            })
+
+        leaderboard.sort(
+            key=lambda item: (
+                bool(item["selection_stable"]),
+                _safe_float(item["optimizer_score"]),
+                _safe_float(item["selection"].get("profit_factor")),
+                _safe_float(item["selection"].get("win_rate")),
+            ),
+            reverse=True,
+        )
+        selected = leaderboard[0]
+        selected["leaderboard"] = leaderboard
+        selected["holdout_start"] = selection_end
+        return selected
+
+    def _evaluate_seed(self, seed: Dict[str, Any]) -> Dict[str, Any]:
+        category = str(seed.get("category") or "").upper()
+        if category not in STRATEGY_VARIANTS:
+            raise ValueError(f"Unsupported category: {category}")
+        raw = self.frame_func(seed)
+        frame = _feature_frame(raw)
+        rule = CATEGORY_RULES[category]
+        cost = float(rule["cost_bps"]) / 10000.0
+
+        optimiser = self._select_variant(frame, category, cost)
+        variant: StrategyVariant = optimiser["variant"]
+        holding = int(variant.holding_bars)
+        signal_func = variant.signal_func
+        selection = optimiser["selection"]
+        selection_stable = bool(optimiser["selection_stable"])
+        cut = int(optimiser["holdout_start"])
+
+        # FINAL untouched 30% holdout. The chosen strategy variant is frozen
+        # before this function sees these outcomes.
+        holdout = self._simulate_variant(
+            frame,
+            variant,
+            start=cut,
+            end=len(frame),
+            cost=cost,
+        )
+        strategy_returns = list(holdout.pop("returns", []))
+        trades = int(holdout["trades"])
+        wins = int(holdout["wins"])
+        losses = int(holdout["losses"])
+        win_rate = _safe_float(holdout["win_rate"])
+        profit_factor = _safe_float(holdout["profit_factor"])
+        max_dd = _safe_float(holdout["max_drawdown"])
+
+        raw_quality, _, raw_verified_70 = _historical_grade(trades, win_rate, profit_factor, max_dd)
+        # A final 70% result is NOT accepted if the selected strategy was unstable
+        # in the earlier selection window. This is deliberately stricter than V6.9.0.
+        validated_70 = bool(raw_verified_70 and selection_stable)
+        if validated_70:
+            quality = raw_quality
+            category_validation_status = "CATEGORY_VERIFIED_70"
+        elif (
+            selection_stable
+            and trades >= 20
+            and win_rate >= 0.62
+            and profit_factor >= 1.10
+            and max_dd <= 0.16
+        ):
+            quality = "B"
+            category_validation_status = "CATEGORY_PROBATION"
+        else:
+            quality = "C"
+            category_validation_status = "CATEGORY_REJECT"
+
         deep_status = "VERIFIED" if validated_70 else ("WATCH" if quality == "B" else "REJECT")
         fast_score = _fast_score(trades, win_rate, profit_factor, max_dd)
 
@@ -700,13 +1081,39 @@ class CategoryStrategyEngine:
         quant_pass = live.quant_confidence >= QUANT_MIN_CONFIDENCE
         ai_pass = model_ai >= MODEL_AI_MIN_CONFIDENCE
 
+        leaderboard_public = []
+        for item in optimiser.get("leaderboard") or []:
+            v: StrategyVariant = item["variant"]
+            m = item["selection"]
+            leaderboard_public.append({
+                "strategy_id": v.strategy_id,
+                "strategy_name": v.strategy_name,
+                "holding_bars": v.holding_bars,
+                "optimizer_score": round(_safe_float(item.get("optimizer_score")), 3),
+                "selection_stable": bool(item.get("selection_stable")),
+                "selection_trades": int(m.get("trades") or 0),
+                "selection_win_rate_pct": round(_safe_float(m.get("win_rate")) * 100.0, 2),
+                "selection_profit_factor": round(_safe_float(m.get("profit_factor")), 4),
+                "selection_max_drawdown_pct": round(_safe_float(m.get("max_drawdown")) * 100.0, 2),
+            })
+
         row: Dict[str, Any] = {
             **seed,
             "version": self.VERSION,
             "market": seed.get("name"),
             "symbol": seed.get("key"),
-            "strategy_id": rule["strategy_id"],
-            "strategy_name": rule["strategy_name"],
+            "strategy_id": variant.strategy_id,
+            "strategy_name": variant.strategy_name,
+            "optimizer_enabled": True,
+            "optimizer_method": "FINITE_VARIANT_SELECTION_40_70_THEN_UNTOUCHED_70_100",
+            "strategy_variants_tested": len(STRATEGY_VARIANTS[category]),
+            "optimizer_selection_stable": selection_stable,
+            "optimizer_score": round(_safe_float(optimiser.get("optimizer_score")), 3),
+            "optimizer_leaderboard": leaderboard_public,
+            "selection_trades": int(selection.get("trades") or 0),
+            "selection_win_rate_pct": round(_safe_float(selection.get("win_rate")) * 100.0, 2),
+            "selection_profit_factor": round(_safe_float(selection.get("profit_factor")), 4),
+            "selection_max_drawdown_pct": round(_safe_float(selection.get("max_drawdown")) * 100.0, 2),
             "regime": live.regime,
             "direction": live.direction,
             "live_direction": live.direction,
@@ -724,6 +1131,7 @@ class CategoryStrategyEngine:
             "historical_losses": losses,
             "historical_max_drawdown_pct": round(max_dd * 100.0, 2),
             "historical_70_verified": validated_70,
+            "raw_holdout_70_pass": bool(raw_verified_70),
             "quality_tier": quality,
             "historical_grade": quality,
             "deep_status": deep_status,
@@ -739,9 +1147,8 @@ class CategoryStrategyEngine:
             "adx": round(_safe_float(latest.get("ADX14")), 2),
             "holding_bars": holding,
             "validation_target_pct": 70.0,
-            "analysis_source": "CATEGORY_SPECIALIST_PLUS_JASONG_MODEL_HELD_OUT",
-            # Persist a bounded recent-return vector so the cross-category risk
-            # engine measures actual co-movement instead of assuming zero.
+            "holdout_fraction_pct": 30.0,
+            "analysis_source": "CATEGORY_SPECIALIST_OPTIMISED_PLUS_JASONG_MODEL_FINAL_HOLDOUT",
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"].dropna().tail(160).tolist()
@@ -757,8 +1164,8 @@ class CategoryStrategyEngine:
             "live_money_execution": False,
         }
 
-        # Resolve IG only after the specialist signal passes the two live confidence
-        # paths and has at least probation-level historical evidence.
+        # IG preflight remains delayed until there is a meaningful live setup and
+        # at least a Fast 65 evidence profile; this protects IG request allowance.
         promising = live.direction in {"BUY", "SELL"} and quant_pass and ai_pass and fast_score >= 65.0
         if promising:
             try:
@@ -775,14 +1182,12 @@ class CategoryStrategyEngine:
                 bid = _safe_float(market.get("bid") if market.get("bid") is not None else snapshot.get("bid"))
                 offer = _safe_float(market.get("offer") if market.get("offer") is not None else snapshot.get("offer"))
                 if bid > 0 and offer >= bid:
-                    mid = (bid + offer) / 2.0
-                    row["ig_spread_bps"] = round((offer - bid) / mid * 10000.0, 4) if mid > 0 else None
+                    mid_price = (bid + offer) / 2.0
+                    row["ig_spread_bps"] = round((offer - bid) / mid_price * 10000.0, 4) if mid_price > 0 else None
             except Exception as exc:
                 row["ig_preflight_error"] = f"{type(exc).__name__}: {exc}"
 
         spread = row.get("ig_spread_bps")
-        # Fail closed: a tradeable candidate without a usable executable quote
-        # is not allowed to pass the spread gate.
         spread_pass = spread is not None and _safe_float(spread, 1e9) <= float(rule["spread_gate_bps"])
         row["spread_gate_bps"] = float(rule["spread_gate_bps"])
         row["spread_pass"] = spread_pass
@@ -795,26 +1200,24 @@ class CategoryStrategyEngine:
             and row["ig_tradeable"]
             and spread_pass
         )
-        # V6.8.x Compound candidate-schema compatibility. The Compound engine
-        # still performs its own adaptive-regime, PRIME-forward and correlation
-        # gates; these fields simply preserve the established contract.
         row["trade_eligible"] = row["standard_eligible"]
         row["direction_match"] = live.direction in {"BUY", "SELL"}
         row["confidence_qualified"] = bool(quant_pass and ai_pass)
-        row["intelligence_source"] = "CATEGORY_SPECIALIST_V690"
-        row["fast_threshold_source"] = "CATEGORY_SPECIALIST"
+        row["intelligence_source"] = "CATEGORY_SPECIALIST_V691"
+        row["fast_threshold_source"] = "CATEGORY_SPECIALIST_OPTIMISED"
         row["spread_bps"] = row.get("ig_spread_bps")
         row["spread_limit_bps"] = float(rule["spread_gate_bps"])
         row["required_fast_score"] = COMPOUND_FAST_SCORE_MIN
 
-        # Ranking score is category-local. It does not alter the 28/40 gates.
         pf_score = min(100.0, max(0.0, profit_factor / 2.0 * 100.0))
+        stability_bonus = 5.0 if selection_stable else 0.0
         row["category_rank_score"] = round(
-            0.30 * fast_score
-            + 0.25 * model_ai * 100.0
-            + 0.20 * live.quant_confidence * 100.0
+            0.28 * fast_score
+            + 0.24 * model_ai * 100.0
+            + 0.18 * live.quant_confidence * 100.0
             + 0.15 * win_rate * 100.0
-            + 0.10 * pf_score,
+            + 0.10 * pf_score
+            + stability_bonus,
             3,
         )
         return row
@@ -1002,7 +1405,8 @@ class CategoryStrategyEngine:
             standard_ready += standard
             compound_ready += compound
             by_category[category] = {
-                "strategy": CATEGORY_RULES[category]["strategy_name"],
+                "strategy": "Adaptive specialist optimiser (3 finite variants)",
+                "strategy_variants": len(STRATEGY_VARIANTS[category]),
                 "ranked": len(rows),
                 "standard_ready": standard,
                 "compound_ready": compound,
@@ -1023,7 +1427,7 @@ class CategoryStrategyEngine:
         with self._lock:
             return {
                 "version": self.VERSION,
-                "name": "JASONG SPECIALIST MARKET CATEGORY INTELLIGENCE",
+                "name": "JASONG ADAPTIVE SPECIALIST MARKET CATEGORY INTELLIGENCE",
                 "enabled": bool(self._state.get("enabled", True)),
                 "confidence_policy": {
                     "quant_min": QUANT_MIN_CONFIDENCE,
@@ -1031,6 +1435,8 @@ class CategoryStrategyEngine:
                     "model_ai_min": MODEL_AI_MIN_CONFIDENCE,
                     "model_ai_min_pct": 40.0,
                     "historical_validation_target_pct": 70.0,
+                    "optimizer_final_holdout_pct": 30.0,
+                    "optimizer_selection_window_pct": 30.0,
                 },
                 "categories": by_category,
                 "category_count": len(CATEGORY_ORDER),
@@ -1045,6 +1451,14 @@ class CategoryStrategyEngine:
                 "eligibility_refresh_seconds": self.eligibility_refresh_seconds,
                 "heavy_scan_seconds": self.scan_interval_seconds,
                 "top_n_per_category": TOP_N_PER_CATEGORY,
+                "strategy_optimizer": {
+                    "enabled": True,
+                    "variants_per_category": 3,
+                    "selection_window": "40%-70%",
+                    "final_holdout": "70%-100%",
+                    "final_holdout_used_for_selection": False,
+                    "non_overlapping_backtest_positions": True,
+                },
                 "compound_slots_per_category": COMPOUND_SLOTS_PER_CATEGORY,
                 "runs": int(self._state.get("runs") or 0),
                 "last_run_at": self._state.get("last_run_at"),
