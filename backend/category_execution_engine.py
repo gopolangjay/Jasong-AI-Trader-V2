@@ -20,7 +20,7 @@ class CategoryExecutionEngine:
       * no production/live-money endpoint exists here.
     """
 
-    VERSION = "6.9.0"
+    VERSION = "6.9.1"
     DEAL_PREFIX = "JSCAT_"
 
     def __init__(
