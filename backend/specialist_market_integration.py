@@ -214,12 +214,12 @@ def install_specialist_market_system(
         "/market-categories/status",
         lambda: intelligence.status(),
         methods=["GET"],
-        name="market_categories_status_v691",
+        name="market_categories_status_v692",
     )
 
     def category_universe() -> Dict[str, Any]:
         return {
-            "version": "6.9.1",
+            "version": "6.9.2",
             "categories": {
                 category: intelligence.universe(category)
                 for category in CATEGORY_ORDER
@@ -236,14 +236,14 @@ def install_specialist_market_system(
         "/market-categories",
         category_universe,
         methods=["GET"],
-        name="market_categories_universe_v691",
+        name="market_categories_universe_v692",
     )
 
     def category_rankings(category: str) -> Dict[str, Any]:
         clean = str(category or "").upper().strip()
         if clean not in CATEGORY_ORDER:
             return {
-                "version": "6.9.1",
+                "version": "6.9.2",
                 "category": clean,
                 "count": 0,
                 "selections": [],
@@ -252,7 +252,7 @@ def install_specialist_market_system(
             }
         rows = intelligence.category_rankings(clean).get(clean, [])
         return {
-            "version": "6.9.1",
+            "version": "6.9.2",
             "category": clean,
             "count": len(rows),
             "selections": rows,
@@ -260,47 +260,43 @@ def install_specialist_market_system(
         }
 
     def optimizer_status() -> Dict[str, Any]:
-        rankings = intelligence.category_rankings()
-        categories = {}
-        for category in CATEGORY_ORDER:
-            rows = rankings.get(category, [])
-            top = rows[0] if rows else None
-            categories[category] = {
-                "selected_strategy_id": (top or {}).get("strategy_id"),
-                "selected_strategy_name": (top or {}).get("strategy_name"),
-                "optimizer_selection_stable": bool((top or {}).get("optimizer_selection_stable", False)),
-                "selection_win_rate_pct": (top or {}).get("selection_win_rate_pct"),
-                "selection_profit_factor": (top or {}).get("selection_profit_factor"),
-                "final_holdout_win_rate_pct": (top or {}).get("historical_win_rate_pct"),
-                "final_holdout_profit_factor": (top or {}).get("historical_profit_factor"),
-                "historical_70_verified": bool((top or {}).get("historical_70_verified", False)),
-                "leaderboard": (top or {}).get("optimizer_leaderboard", []),
-            }
-        return {
-            "version": "6.9.1",
-            "method": "finite variant selection on 40%-70%; untouched final holdout 70%-100%",
-            "final_holdout_used_for_selection": False,
-            "quant_min_pct": 28.0,
-            "model_ai_min_pct": 40.0,
-            "historical_validation_target_pct": 70.0,
-            "categories": categories,
-            "live_money_execution": False,
-        }
+        return intelligence.optimizer_summary()
 
     app.add_api_route(
         "/market-categories/optimizer",
         optimizer_status,
         methods=["GET"],
-        name="market_category_optimizer_v691",
+        name="market_category_optimizer_v692",
+    )
+
+    app.add_api_route(
+        "/market-categories/evidence-health",
+        lambda: intelligence.evidence_coverage(),
+        methods=["GET"],
+        name="market_category_evidence_health_v692",
+    )
+
+    app.add_api_route(
+        "/market-categories/full-refresh",
+        lambda: intelligence.full_refresh_status(),
+        methods=["GET"],
+        name="market_category_full_refresh_status_v692",
+    )
+
+    app.add_api_route(
+        "/market-categories/full-refresh",
+        lambda: intelligence.start_full_refresh(force=True),
+        methods=["POST"],
+        name="market_category_full_refresh_start_v692",
     )
 
     def compound_candidates() -> Dict[str, Any]:
         rows = intelligence.compound_candidates()
         return {
-            "version": "6.9.1",
+            "version": "6.9.2",
             "count": len(rows),
             "candidates": rows,
-            "rule": "Only category ranks #1/#2 that pass 28/40 + real 70% historical validation + IG gates",
+            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + 3-fold walk-forward 70% validation + IG gates",
             "live_money_execution": False,
         }
 
@@ -310,61 +306,61 @@ def install_specialist_market_system(
         "/market-categories/compound-candidates",
         compound_candidates,
         methods=["GET"],
-        name="market_category_compound_candidates_v691",
+        name="market_category_compound_candidates_v692",
     )
 
     app.add_api_route(
         "/market-categories/{category}",
         category_rankings,
         methods=["GET"],
-        name="market_category_rankings_v691",
+        name="market_category_rankings_v692",
     )
 
     app.add_api_route(
         "/market-categories/run-now",
         lambda: intelligence.run_now(),
         methods=["POST"],
-        name="market_categories_run_now_v691",
+        name="market_categories_run_now_v692",
     )
 
     def run_category(category: str) -> Dict[str, Any]:
         clean = str(category or "").upper().strip()
         if clean not in CATEGORY_ORDER:
-            return {"version": "6.9.1", "error": "Unknown category", "category": clean}
+            return {"version": "6.9.2", "error": "Unknown category", "category": clean}
         return intelligence.run_now(clean)
 
     app.add_api_route(
         "/market-categories/{category}/run-now",
         run_category,
         methods=["POST"],
-        name="market_category_run_now_v691",
+        name="market_category_run_now_v692",
     )
 
     app.add_api_route(
         "/category-portfolio/status",
         lambda: portfolio.status(),
         methods=["GET"],
-        name="category_portfolio_status_v691",
+        name="category_portfolio_status_v692",
     )
     app.add_api_route(
         "/category-portfolio/positions",
         lambda: {
-            "version": "6.9.1",
+            "version": "6.9.2",
             "positions": portfolio.positions(),
             "live_money_execution": False,
         },
         methods=["GET"],
-        name="category_portfolio_positions_v691",
+        name="category_portfolio_positions_v692",
     )
     app.add_api_route(
         "/category-portfolio/run-now",
         lambda: portfolio.tick(),
         methods=["POST"],
-        name="category_portfolio_run_now_v691",
+        name="category_portfolio_run_now_v692",
     )
 
     return {
         "intelligence": intelligence,
         "portfolio": portfolio,
-        "version": "6.9.1",
+        "version": "6.9.2",
     }
