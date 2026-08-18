@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -29,14 +30,23 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   String selected = 'FOREX';
   Map<String, dynamic>? systemStatus;
   Map<String, dynamic>? portfolioStatus;
+  Map<String, dynamic>? optimizerStatus;
+  Map<String, dynamic>? fullRefreshStatus;
   List<Map<String, dynamic>> selections = const [];
   bool busy = false;
   String? error;
+  Timer? fullRefreshPollTimer;
 
   @override
   void initState() {
     super.initState();
     refreshAll();
+  }
+
+  @override
+  void dispose() {
+    fullRefreshPollTimer?.cancel();
+    super.dispose();
   }
 
   Future<Map<String, dynamic>> _get(String path) async {
@@ -98,14 +108,22 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
         _get('/market-categories/status'),
         _get('/market-categories/$selected'),
         _get('/category-portfolio/status'),
+        _get('/market-categories/optimizer'),
+        _get('/market-categories/full-refresh'),
       ]);
       if (!mounted) return;
       setState(() {
         systemStatus = results[0];
         selections = _mapList(results[1]['selections']);
         portfolioStatus = results[2];
+        optimizerStatus = results[3];
+        fullRefreshStatus = results[4];
         error = null;
       });
+      final refreshState = '${results[4]['status'] ?? ''}'.toUpperCase();
+      if (refreshState != 'RUNNING') {
+        fullRefreshPollTimer?.cancel();
+      }
     } catch (e) {
       if (!mounted || silent) return;
       setState(() => error = e.toString());
@@ -146,6 +164,26 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     try {
       await _post('/market-categories/run-now');
       await refreshAll(silent: true);
+    } catch (e) {
+      if (mounted) setState(() => error = e.toString());
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> optimiseAll40() async {
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await _post('/market-categories/full-refresh');
+      await refreshAll(silent: true);
+      fullRefreshPollTimer?.cancel();
+      fullRefreshPollTimer = Timer.periodic(
+        const Duration(seconds: 8),
+        (_) => refreshAll(silent: true),
+      );
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
     } finally {
@@ -210,6 +248,13 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     final strategy = '${data['strategy'] ?? '-'}';
     final openByCategory = portfolioStatus?['open_by_category'];
     final open = openByCategory is Map ? (openByCategory[selected] ?? 0) : 0;
+    final evidence = systemStatus?['evidence_hygiene'];
+    final evidenceMap = evidence is Map
+        ? Map<String, dynamic>.from(evidence)
+        : <String, dynamic>{};
+    final optimised = evidenceMap['markets_optimised'] ?? 0;
+    final pending = evidenceMap['markets_pending_optimisation'] ?? 40;
+    final refreshState = '${fullRefreshStatus?['status'] ?? 'PENDING'}';
 
     return Container(
       width: double.infinity,
@@ -254,7 +299,10 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
               _pill('$standardReady standard ready'),
               _pill('$compoundReady compound ready', color: const Color(0xFFFFD75E)),
               _pill('$open open', color: const Color(0xFFB899FF)),
-              _pill('70% evidence target', color: const Color(0xFF67F0C1)),
+              _pill('$optimised / 40 optimised', color: const Color(0xFF67F0C1)),
+              _pill('$pending pending', color: pending == 0 ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
+              _pill('refresh $refreshState', color: const Color(0xFFB899FF)),
+              _pill('70% + 3-fold evidence', color: const Color(0xFF67F0C1)),
             ],
           ),
         ],
@@ -275,6 +323,10 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     final compoundSlot = item['compound_slot_candidate'] == true;
     final compound = item['compound_eligible'] == true;
     final verified70 = item['historical_70_verified'] == true;
+    final optimizerComplete = item['optimizer_complete'] == true;
+    final selectionStable = item['optimizer_selection_stable'] == true;
+    final walkForward = item['walk_forward_pass'] == true;
+    final wfMedian = _num(item['walk_forward_median_win_rate_pct']);
     final tradeable = item['ig_tradeable'] == true;
     final regime = '${item['regime'] ?? '-'}'.replaceAll('_', ' ');
     final strategy = '${item['strategy_name'] ?? '-'}';
@@ -341,6 +393,9 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
               _pill('WR ${wr.toStringAsFixed(1)}%', color: verified70 ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
               _pill('PF ${pf.toStringAsFixed(2)}'),
               _pill('Fast ${fast.toStringAsFixed(0)}'),
+              _pill(optimizerComplete ? 'OPTIMISED' : 'PENDING OPT', color: optimizerComplete ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
+              _pill(selectionStable ? 'SELECTION STABLE' : 'SELECTION UNSTABLE', color: selectionStable ? const Color(0xFF67F0C1) : const Color(0xFFFF7E8B)),
+              _pill('WF median ${wfMedian.toStringAsFixed(1)}%', color: walkForward ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
             ],
           ),
           const SizedBox(height: 10),
@@ -369,7 +424,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
           ),
           const SizedBox(height: 5),
           Text(
-            tradeable ? 'IG DEMO tradeable' : 'IG DEMO not resolved/tradeable',
+            '${tradeable ? 'IG DEMO tradeable' : 'IG DEMO not resolved/tradeable'} • ${walkForward ? 'walk-forward PASS' : 'walk-forward not passed'}',
             style: const TextStyle(color: Colors.white38, fontSize: 9),
           ),
         ],
@@ -385,12 +440,12 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
         children: [
           const Text(
-            'SPECIALIST MARKET ENGINES',
+            'V6.9.2 SPECIALIST REAL-TIME TESTING',
             style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900),
           ),
           const SizedBox(height: 4),
           const Text(
-            'Each category trades its own strategy • top 1–5 ranked • ranks 1–2 feed Elite Compound when qualified',
+            'All 40 markets must complete current-schema optimisation and 3-fold chronological validation before Standard/Compound eligibility',
             style: TextStyle(color: Colors.white54, fontSize: 11, height: 1.35),
           ),
           const SizedBox(height: 14),
@@ -428,7 +483,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
                 child: OutlinedButton.icon(
                   onPressed: busy ? null : scanAll,
                   icon: const Icon(Icons.public_rounded),
-                  label: const Text('Scan All'),
+                  label: const Text('Scan Batch'),
                 ),
               ),
             ],
@@ -436,10 +491,19 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
           const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
+            child: FilledButton.tonalIcon(
+              onPressed: busy ? null : optimiseAll40,
+              icon: const Icon(Icons.model_training_rounded),
+              label: const Text('Optimise / Refresh All 40 Markets'),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
             child: OutlinedButton.icon(
               onPressed: busy ? null : runPortfolio,
               icon: const Icon(Icons.play_circle_outline_rounded),
-              label: const Text('Run Category Portfolio Now'),
+              label: const Text('Run IG DEMO Category Portfolio Now'),
             ),
           ),
           if (busy) ...[
@@ -489,7 +553,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
               border: Border.all(color: const Color(0xFF65E6D3).withValues(alpha: .16)),
             ),
             child: const Text(
-              'Confidence policy: 28% Quant and 40% directional Model-AI remain live entry gates. The 70% figure is a separate held-out historical validation target. IG DEMO only; live-money execution remains off.',
+              'Testing policy: 28% Quant and 40% directional Model-AI remain live gates. A strategy must also pass stable variant selection, genuine 70% aggregate held-out evidence, profit-factor/drawdown gates and 3 chronological validation folds before Standard/Compound execution. Real-time IG DEMO testing is enabled; live-money execution remains off.',
               style: TextStyle(color: Colors.white60, fontSize: 10, height: 1.45),
             ),
           ),
