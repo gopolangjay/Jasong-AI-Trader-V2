@@ -71,7 +71,7 @@ GLOBAL_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 class GlobalMarketEngine:
-    VERSION = "6.8.17"
+    VERSION = "6.8.18"
 
     def __init__(
         self,
@@ -452,11 +452,24 @@ class GlobalMarketEngine:
             quality_score = (
                 1.0
                 if quality == "A+"
-                else 0.90
+                else 0.92
                 if quality == "A"
-                else 0.65
-                if quality == "B"
-                else 0.50
+                else 0.35
+                if quality in {"B", "B+"}
+                else 0.20
+            )
+            prime_history_score = (
+                1.0
+                if (
+                    historical_wr >= 0.55
+                    and pf >= 1.20
+                )
+                else 0.20
+                if (
+                    historical_wr < 0.50
+                    or pf < 1.0
+                )
+                else 0.55
             )
 
             direction_ok = (
@@ -470,13 +483,14 @@ class GlobalMarketEngine:
             # It does not override Compound's hard confidence/spread/correlation
             # gates.
             score = 100.0 * (
-                0.25 * ai
-                + 0.20 * quant
-                + 0.20 * fast
+                0.22 * ai
+                + 0.18 * quant
+                + 0.18 * fast
                 + 0.10 * historical_wr
                 + 0.08 * pf_score
-                + 0.07 * quality_score
-                + 0.10 * freshness
+                + 0.10 * quality_score
+                + 0.07 * prime_history_score
+                + 0.07 * freshness
             )
 
             row["opportunity_score"] = round(
@@ -493,6 +507,11 @@ class GlobalMarketEngine:
             )
             row["opportunity_direction_valid"] = (
                 direction_ok
+            )
+            row["prime_rank_hint"] = bool(
+                quality in {"A", "A+"}
+                and historical_wr >= 0.55
+                and pf >= 1.20
             )
             row["opportunity_last_checked_at"] = (
                 now
