@@ -1475,6 +1475,125 @@ class IGDemoBroker:
             "valuation_source": "IG_MARKET_METADATA_AND_LIVE_QUOTE",
         }
 
+    def estimate_closed_position_pnl(
+        self,
+        *,
+        epic: str,
+        direction: str,
+        entry_level: float,
+        exit_level: float,
+        size: float,
+        settlement_currency: Optional[str],
+        account_currency: str,
+    ) -> Dict[str, Any]:
+        """Estimate a settled IG DEMO position's realised P&L.
+
+        Uses the same IG market valuation metadata as open-position isolation:
+        `valueOfOnePip`, `snapshot.scalingFactor`, size and exact FX conversion.
+
+        This is broker-derived valuation evidence, not internal/paper P&L.
+        If IG metadata is insufficient the method raises instead of guessing.
+        """
+        clean_epic = str(epic or "").strip()
+        side = str(direction or "").upper().strip()
+        entry = float(entry_level or 0.0)
+        exit_ = float(exit_level or 0.0)
+        qty = float(size or 0.0)
+
+        if not clean_epic:
+            raise IGDemoError("Closed P&L estimate requires EPIC")
+        if side not in {"BUY", "SELL"}:
+            raise IGDemoError("Closed P&L estimate requires BUY/SELL direction")
+        if entry <= 0 or exit_ <= 0 or qty <= 0:
+            raise IGDemoError("Closed P&L estimate requires entry, exit and size")
+
+        details = self._pnl_market_details(clean_epic)
+        instrument = details.get("instrument") or {}
+        snapshot = details.get("snapshot") or {}
+
+        scaling_factor = self._first_number(
+            snapshot.get("scalingFactor")
+        )
+        value_one_pip = self._first_number(
+            instrument.get("valueOfOnePip")
+        )
+
+        if not scaling_factor or scaling_factor <= 0:
+            raise IGDemoError(
+                f"IG market {clean_epic} has no usable scalingFactor"
+            )
+        if value_one_pip is None or value_one_pip <= 0:
+            raise IGDemoError(
+                f"IG market {clean_epic} has no usable valueOfOnePip"
+            )
+
+        pip_size = 1.0 / scaling_factor
+        signed_move = (
+            exit_ - entry
+            if side == "BUY"
+            else entry - exit_
+        )
+        pips = signed_move / pip_size
+        native_pnl = pips * value_one_pip * qty
+
+        native_ccy = str(
+            settlement_currency or ""
+        ).upper().strip()
+
+        if not native_ccy:
+            currencies = instrument.get("currencies") or []
+            default_row = next(
+                (
+                    row
+                    for row in currencies
+                    if isinstance(row, dict)
+                    and row.get("isDefault") is True
+                ),
+                None,
+            )
+            if default_row is None and currencies:
+                default_row = (
+                    currencies[0]
+                    if isinstance(currencies[0], dict)
+                    else None
+                )
+            if default_row:
+                native_ccy = str(
+                    default_row.get("code") or ""
+                ).upper().strip()
+
+        account_ccy = str(
+            account_currency or ""
+        ).upper().strip()
+        if not account_ccy:
+            raise IGDemoError("Account currency is unavailable")
+
+        conversion = self._fx_conversion_factor(
+            native_ccy or account_ccy,
+            account_ccy,
+        )
+        account_pnl = native_pnl * conversion
+
+        return {
+            "epic": clean_epic,
+            "direction": side,
+            "entry_level": entry,
+            "exit_level": exit_,
+            "size": qty,
+            "signed_move": signed_move,
+            "scaling_factor": scaling_factor,
+            "pip_size": pip_size,
+            "value_of_one_pip": value_one_pip,
+            "pips": pips,
+            "native_currency": native_ccy or account_ccy,
+            "native_pnl": native_pnl,
+            "conversion_to_account": conversion,
+            "account_currency": account_ccy,
+            "account_pnl": account_pnl,
+            "valuation_source":
+                "IG_MARKET_METADATA_SETTLED_POSITION_ESTIMATE",
+        }
+
     def estimate_positions_pnl(
         self,
         positions: list[Dict[str, Any]],
