@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# JASONG AI TRADER V6.9.1 - ADAPTIVE SPECIALIST STRATEGY OPTIMISER
+# JASONG AI TRADER V6.9.2 - COMPLETE REAL-TIME TESTING / EVIDENCE HYGIENE
 # ---------------------------------------------------------------------------
 # Design contract
 #   * six independent specialist categories;
@@ -25,7 +25,7 @@ import pandas as pd
 #   * execution remains IG DEMO only; this module contains no production URL.
 # ---------------------------------------------------------------------------
 
-VERSION = "6.9.1"
+VERSION = "6.9.2"
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
 HISTORICAL_WIN_RATE_TARGET = 0.70
@@ -33,6 +33,13 @@ STANDARD_FAST_SCORE_MIN = 80.0
 COMPOUND_FAST_SCORE_MIN = 90.0
 TOP_N_PER_CATEGORY = 5
 COMPOUND_SLOTS_PER_CATEGORY = 2
+EVIDENCE_SCHEMA_VERSION = 2
+WALK_FORWARD_FOLDS = 3
+WALK_FORWARD_MIN_FOLD_TRADES = 5
+WALK_FORWARD_MIN_FOLDS = 2
+WALK_FORWARD_MIN_FOLD_WIN_RATE = 0.55
+WALK_FORWARD_MIN_MEDIAN_WIN_RATE = 0.65
+WALK_FORWARD_MIN_PROFITABLE_FOLDS = 2
 
 CATEGORY_ORDER = ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES")
 
@@ -781,14 +788,18 @@ class CategoryStrategyEngine:
         )
         self.batch_size = max(3, min(18, int(batch_size or os.getenv("CATEGORY_SCAN_BATCH_SIZE", "6"))))
         self.candidate_ttl_seconds = max(300, int(os.getenv("CATEGORY_CANDIDATE_TTL_SECONDS", "1800")))
+        self.auto_full_refresh = str(os.getenv("CATEGORY_AUTO_FULL_REFRESH", "true")).lower().strip() in {"1", "true", "yes", "on"}
         self._lock = threading.RLock()
+        self._refresh_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._full_refresh_thread: Optional[threading.Thread] = None
         self._state = self._load_state()
 
     def _default_state(self) -> Dict[str, Any]:
         return {
             "version": self.VERSION,
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
             "enabled": True,
             "offset_by_category": {category: 0 for category in CATEGORY_ORDER},
             "runs": 0,
@@ -796,7 +807,30 @@ class CategoryStrategyEngine:
             "last_error": None,
             "evaluations": {},
             "last_batch_keys": [],
+            "legacy_rows_excluded": 0,
+            "migration_source_version": None,
+            "migration_at": None,
+            "full_refresh": {
+                "status": "PENDING",
+                "started_at": None,
+                "completed_at": None,
+                "processed": 0,
+                "total": len(CATEGORY_MARKET_SEEDS),
+                "current_key": None,
+                "errors": 0,
+                "last_error": None,
+            },
         }
+
+    def _is_current_evaluation(self, row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        return bool(
+            str(row.get("version") or "") == self.VERSION
+            and int(row.get("evidence_schema_version") or 0) == EVIDENCE_SCHEMA_VERSION
+            and row.get("optimizer_complete") is True
+            and row.get("walk_forward_complete") is True
+        )
 
     def _load_state(self) -> Dict[str, Any]:
         state = self._default_state()
@@ -805,10 +839,44 @@ class CategoryStrategyEngine:
                 with open(self.state_path, "r", encoding="utf-8") as fh:
                     raw = json.load(fh)
                 if isinstance(raw, dict):
-                    state.update(raw)
-        except Exception:
-            pass
+                    source_version = str(raw.get("version") or "UNKNOWN")
+                    state["migration_source_version"] = source_version
+                    # Preserve harmless scheduling/counter metadata, but never let
+                    # an older category-analysis row compete with V6.9.2 evidence.
+                    for key in ("enabled", "runs", "last_run_at"):
+                        if key in raw:
+                            state[key] = raw[key]
+                    raw_evaluations = raw.get("evaluations") or {}
+                    current: Dict[str, Any] = {}
+                    excluded = 0
+                    if isinstance(raw_evaluations, dict):
+                        for key, row in raw_evaluations.items():
+                            if self._is_current_evaluation(row):
+                                current[str(key)] = row
+                            else:
+                                excluded += 1
+                    state["evaluations"] = current
+                    state["legacy_rows_excluded"] = int(raw.get("legacy_rows_excluded") or 0) + excluded
+                    state["migration_at"] = time.time() if excluded or source_version != self.VERSION else raw.get("migration_at")
+                    # A version/schema change requires one clean 40-market bootstrap.
+                    if excluded or source_version != self.VERSION or len(current) < len(CATEGORY_MARKET_SEEDS):
+                        state["offset_by_category"] = {category: 0 for category in CATEGORY_ORDER}
+                        state["full_refresh"] = {
+                            "status": "PENDING",
+                            "started_at": None,
+                            "completed_at": None,
+                            "processed": len(current),
+                            "total": len(CATEGORY_MARKET_SEEDS),
+                            "current_key": None,
+                            "errors": 0,
+                            "last_error": None,
+                        }
+                    else:
+                        state["full_refresh"] = dict(raw.get("full_refresh") or state["full_refresh"])
+        except Exception as exc:
+            state["last_error"] = f"state_load: {type(exc).__name__}: {exc}"
         state["version"] = self.VERSION
+        state["evidence_schema_version"] = EVIDENCE_SCHEMA_VERSION
         state.setdefault("offset_by_category", {category: 0 for category in CATEGORY_ORDER})
         return state
 
@@ -822,6 +890,33 @@ class CategoryStrategyEngine:
             os.replace(tmp, self.state_path)
         except Exception as exc:
             self._state["last_error"] = f"persist: {type(exc).__name__}: {exc}"
+
+    def _current_evaluations(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            rows = self._state.get("evaluations") or {}
+            return {
+                str(key): dict(row)
+                for key, row in rows.items()
+                if self._is_current_evaluation(row)
+            }
+
+    def evidence_coverage(self) -> Dict[str, Any]:
+        current = self._current_evaluations()
+        universe_keys = [str(seed["key"]) for seed in CATEGORY_MARKET_SEEDS]
+        completed = [key for key in universe_keys if key in current]
+        pending = [key for key in universe_keys if key not in current]
+        return {
+            "version": self.VERSION,
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "markets_total": len(universe_keys),
+            "markets_optimised": len(completed),
+            "markets_pending_optimisation": len(pending),
+            "optimiser_complete": len(pending) == 0,
+            "completed_keys": completed,
+            "pending_keys": pending,
+            "legacy_rows_excluded": int(self._state.get("legacy_rows_excluded") or 0),
+            "live_money_execution": False,
+        }
 
     def universe(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
         rows = CATEGORY_MARKET_SEEDS
@@ -1018,6 +1113,73 @@ class CategoryStrategyEngine:
         selected["holdout_start"] = selection_end
         return selected
 
+    def _walk_forward_folds(
+        self,
+        frame: pd.DataFrame,
+        variant: StrategyVariant,
+        *,
+        holdout_start: int,
+        cost: float,
+    ) -> List[Dict[str, Any]]:
+        start = max(0, int(holdout_start))
+        end = len(frame)
+        span = max(0, end - start)
+        if span <= WALK_FORWARD_FOLDS:
+            return []
+        boundaries = [start]
+        for fold in range(1, WALK_FORWARD_FOLDS):
+            boundaries.append(start + int(span * fold / WALK_FORWARD_FOLDS))
+        boundaries.append(end)
+        folds: List[Dict[str, Any]] = []
+        for i in range(WALK_FORWARD_FOLDS):
+            left, right = boundaries[i], boundaries[i + 1]
+            metrics = self._simulate_variant(frame, variant, start=left, end=right, cost=cost)
+            metrics.pop("returns", None)
+            folds.append({
+                "fold": i + 1,
+                "start_index": left,
+                "end_index": right,
+                "trades": int(metrics.get("trades") or 0),
+                "wins": int(metrics.get("wins") or 0),
+                "losses": int(metrics.get("losses") or 0),
+                "win_rate": _safe_float(metrics.get("win_rate")),
+                "profit_factor": _safe_float(metrics.get("profit_factor")),
+                "max_drawdown": _safe_float(metrics.get("max_drawdown")),
+                "mean_return": _safe_float(metrics.get("mean_return")),
+            })
+        return folds
+
+    @staticmethod
+    def _walk_forward_gate(folds: List[Dict[str, Any]], aggregate: Dict[str, Any]) -> Dict[str, Any]:
+        qualifying = [fold for fold in folds if int(fold.get("trades") or 0) >= WALK_FORWARD_MIN_FOLD_TRADES]
+        win_rates = sorted(_safe_float(fold.get("win_rate")) for fold in qualifying)
+        median_wr = 0.0
+        if win_rates:
+            m = len(win_rates) // 2
+            median_wr = win_rates[m] if len(win_rates) % 2 else (win_rates[m - 1] + win_rates[m]) / 2.0
+        min_wr = min(win_rates) if win_rates else 0.0
+        profitable = sum(1 for fold in qualifying if _safe_float(fold.get("profit_factor")) >= 1.0)
+        fold_dd_ok = all(_safe_float(fold.get("max_drawdown")) <= 0.15 for fold in qualifying) if qualifying else False
+        passed = bool(
+            len(qualifying) >= WALK_FORWARD_MIN_FOLDS
+            and int(aggregate.get("trades") or 0) >= 30
+            and _safe_float(aggregate.get("win_rate")) >= HISTORICAL_WIN_RATE_TARGET
+            and _safe_float(aggregate.get("profit_factor")) >= 1.30
+            and _safe_float(aggregate.get("max_drawdown")) <= 0.12
+            and min_wr >= WALK_FORWARD_MIN_FOLD_WIN_RATE
+            and median_wr >= WALK_FORWARD_MIN_MEDIAN_WIN_RATE
+            and profitable >= WALK_FORWARD_MIN_PROFITABLE_FOLDS
+            and fold_dd_ok
+        )
+        return {
+            "passed": passed,
+            "qualifying_folds": len(qualifying),
+            "min_fold_win_rate": min_wr,
+            "median_fold_win_rate": median_wr,
+            "profitable_folds": profitable,
+            "fold_drawdown_ok": fold_dd_ok,
+        }
+
     def _evaluate_seed(self, seed: Dict[str, Any]) -> Dict[str, Any]:
         category = str(seed.get("category") or "").upper()
         if category not in STRATEGY_VARIANTS:
@@ -1053,12 +1215,19 @@ class CategoryStrategyEngine:
         max_dd = _safe_float(holdout["max_drawdown"])
 
         raw_quality, _, raw_verified_70 = _historical_grade(trades, win_rate, profit_factor, max_dd)
-        # A final 70% result is NOT accepted if the selected strategy was unstable
-        # in the earlier selection window. This is deliberately stricter than V6.9.0.
-        validated_70 = bool(raw_verified_70 and selection_stable)
+        walk_forward_folds = self._walk_forward_folds(
+            frame,
+            variant,
+            holdout_start=cut,
+            cost=cost,
+        )
+        walk_forward = self._walk_forward_gate(walk_forward_folds, holdout)
+        # V6.9.2 only promotes 70% evidence when variant selection was stable AND
+        # the untouched final holdout survives multiple chronological folds.
+        validated_70 = bool(raw_verified_70 and selection_stable and walk_forward["passed"])
         if validated_70:
             quality = raw_quality
-            category_validation_status = "CATEGORY_VERIFIED_70"
+            category_validation_status = "CATEGORY_VERIFIED_70_WALK_FORWARD"
         elif (
             selection_stable
             and trades >= 20
@@ -1100,12 +1269,15 @@ class CategoryStrategyEngine:
         row: Dict[str, Any] = {
             **seed,
             "version": self.VERSION,
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "optimizer_complete": True,
+            "walk_forward_complete": True,
             "market": seed.get("name"),
             "symbol": seed.get("key"),
             "strategy_id": variant.strategy_id,
             "strategy_name": variant.strategy_name,
             "optimizer_enabled": True,
-            "optimizer_method": "FINITE_VARIANT_SELECTION_40_70_THEN_UNTOUCHED_70_100",
+            "optimizer_method": "FINITE_VARIANT_SELECTION_40_70_THEN_3_FOLD_UNTOUCHED_70_100",
             "strategy_variants_tested": len(STRATEGY_VARIANTS[category]),
             "optimizer_selection_stable": selection_stable,
             "optimizer_score": round(_safe_float(optimiser.get("optimizer_score")), 3),
@@ -1132,6 +1304,22 @@ class CategoryStrategyEngine:
             "historical_max_drawdown_pct": round(max_dd * 100.0, 2),
             "historical_70_verified": validated_70,
             "raw_holdout_70_pass": bool(raw_verified_70),
+            "walk_forward_pass": bool(walk_forward["passed"]),
+            "walk_forward_fold_count": len(walk_forward_folds),
+            "walk_forward_qualifying_folds": int(walk_forward["qualifying_folds"]),
+            "walk_forward_min_win_rate_pct": round(_safe_float(walk_forward["min_fold_win_rate"]) * 100.0, 2),
+            "walk_forward_median_win_rate_pct": round(_safe_float(walk_forward["median_fold_win_rate"]) * 100.0, 2),
+            "walk_forward_profitable_folds": int(walk_forward["profitable_folds"]),
+            "walk_forward_fold_drawdown_ok": bool(walk_forward["fold_drawdown_ok"]),
+            "walk_forward_folds": [
+                {
+                    **fold,
+                    "win_rate_pct": round(_safe_float(fold.get("win_rate")) * 100.0, 2),
+                    "profit_factor": round(_safe_float(fold.get("profit_factor")), 4),
+                    "max_drawdown_pct": round(_safe_float(fold.get("max_drawdown")) * 100.0, 2),
+                }
+                for fold in walk_forward_folds
+            ],
             "quality_tier": quality,
             "historical_grade": quality,
             "deep_status": deep_status,
@@ -1148,7 +1336,7 @@ class CategoryStrategyEngine:
             "holding_bars": holding,
             "validation_target_pct": 70.0,
             "holdout_fraction_pct": 30.0,
-            "analysis_source": "CATEGORY_SPECIALIST_OPTIMISED_PLUS_JASONG_MODEL_FINAL_HOLDOUT",
+            "analysis_source": "CATEGORY_SPECIALIST_V692_OPTIMISED_PLUS_JASONG_MODEL_3_FOLD_HOLDOUT",
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"].dropna().tail(160).tolist()
@@ -1203,7 +1391,7 @@ class CategoryStrategyEngine:
         row["trade_eligible"] = row["standard_eligible"]
         row["direction_match"] = live.direction in {"BUY", "SELL"}
         row["confidence_qualified"] = bool(quant_pass and ai_pass)
-        row["intelligence_source"] = "CATEGORY_SPECIALIST_V691"
+        row["intelligence_source"] = "CATEGORY_SPECIALIST_V692"
         row["fast_threshold_source"] = "CATEGORY_SPECIALIST_OPTIMISED"
         row["spread_bps"] = row.get("ig_spread_bps")
         row["spread_limit_bps"] = float(rule["spread_gate_bps"])
@@ -1237,6 +1425,10 @@ class CategoryStrategyEngine:
                     "market": seed.get("name"),
                     "symbol": key,
                     "category": seed.get("category"),
+                    "version": self.VERSION,
+                    "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+                    "optimizer_complete": False,
+                    "walk_forward_complete": False,
                     "direction": "WAIT",
                     "deep_status": "CATEGORY_REJECT",
                     "historical_70_verified": False,
@@ -1256,9 +1448,90 @@ class CategoryStrategyEngine:
 
     def _fresh_rows(self) -> List[Dict[str, Any]]:
         now = time.time()
+        rows = list(self._current_evaluations().values())
+        return [
+            row for row in rows
+            if now - _safe_float(row.get("evaluated_at")) <= self.candidate_ttl_seconds
+        ]
+
+    def _full_refresh_worker(self, force: bool = False) -> None:
+        refresh = self._state.setdefault("full_refresh", {})
+        pending = set(self.evidence_coverage()["pending_keys"])
+        targets = [
+            seed for seed in CATEGORY_MARKET_SEEDS
+            if force or str(seed.get("key")) in pending
+        ]
         with self._lock:
-            rows = [dict(v) for v in (self._state.get("evaluations") or {}).values() if isinstance(v, dict)]
-        return [row for row in rows if now - _safe_float(row.get("evaluated_at")) <= self.candidate_ttl_seconds]
+            refresh.update({
+                "status": "RUNNING",
+                "mode": "FORCE_ALL" if force else "PENDING_ONLY",
+                "started_at": time.time(),
+                "completed_at": None,
+                "processed": 0,
+                "total": len(targets),
+                "current_key": None,
+                "errors": 0,
+                "last_error": None,
+            })
+            self._persist()
+        for seed in targets:
+            if self._stop.is_set():
+                break
+            key = str(seed.get("key") or seed.get("name"))
+            with self._lock:
+                refresh["current_key"] = key
+                self._persist()
+            try:
+                row = self._evaluate_seed(dict(seed))
+                with self._lock:
+                    self._state.setdefault("evaluations", {})[key] = row
+            except Exception as exc:
+                with self._lock:
+                    refresh["errors"] = int(refresh.get("errors") or 0) + 1
+                    refresh["last_error"] = f"{key}: {type(exc).__name__}: {exc}"
+            finally:
+                with self._lock:
+                    refresh["processed"] = int(refresh.get("processed") or 0) + 1
+                    self._state["last_run_at"] = time.time()
+                    self._persist()
+        with self._lock:
+            if self._stop.is_set():
+                refresh["status"] = "STOPPED"
+            elif int(refresh.get("errors") or 0) > 0:
+                refresh["status"] = "COMPLETED_WITH_ERRORS"
+            else:
+                refresh["status"] = "COMPLETED"
+            refresh["completed_at"] = time.time()
+            refresh["current_key"] = None
+            self._state["runs"] = int(self._state.get("runs") or 0) + 1
+            self._persist()
+
+    def start_full_refresh(self, force: bool = False) -> Dict[str, Any]:
+        with self._refresh_lock:
+            if self._full_refresh_thread and self._full_refresh_thread.is_alive():
+                return self.full_refresh_status()
+            self._full_refresh_thread = threading.Thread(
+                target=self._full_refresh_worker,
+                kwargs={"force": bool(force)},
+                daemon=True,
+                name="jasong-v692-full-market-optimiser",
+            )
+            self._full_refresh_thread.start()
+        return self.full_refresh_status()
+
+    def full_refresh_status(self) -> Dict[str, Any]:
+        with self._lock:
+            refresh = dict(self._state.get("full_refresh") or {})
+        coverage = self.evidence_coverage()
+        return {
+            "version": self.VERSION,
+            **refresh,
+            "markets_optimised": coverage["markets_optimised"],
+            "markets_pending_optimisation": coverage["markets_pending_optimisation"],
+            "pending_keys": coverage["pending_keys"],
+            "legacy_rows_excluded": coverage["legacy_rows_excluded"],
+            "live_money_execution": False,
+        }
 
     def category_rankings(self, category: Optional[str] = None, top_n: int = TOP_N_PER_CATEGORY) -> Dict[str, List[Dict[str, Any]]]:
         top_n = max(1, min(TOP_N_PER_CATEGORY, int(top_n)))
@@ -1394,6 +1667,55 @@ class CategoryStrategyEngine:
                 matrix[left][right] = float(cov / denom) if denom > 0 else 0.0
         return matrix
 
+    def optimizer_summary(self) -> Dict[str, Any]:
+        current = list(self._current_evaluations().values())
+        categories: Dict[str, Any] = {}
+        for category in CATEGORY_ORDER:
+            rows = [row for row in current if str(row.get("category") or "").upper() == category]
+            rows.sort(
+                key=lambda row: (
+                    bool(row.get("historical_70_verified")),
+                    bool(row.get("walk_forward_pass")),
+                    bool(row.get("optimizer_selection_stable")),
+                    _safe_float(row.get("historical_win_rate")),
+                    _safe_float(row.get("historical_profit_factor")),
+                    _safe_float(row.get("optimizer_score")),
+                    int(row.get("historical_trades") or 0),
+                ),
+                reverse=True,
+            )
+            best = rows[0] if rows else None
+            categories[category] = {
+                "market": (best or {}).get("market"),
+                "symbol": (best or {}).get("symbol"),
+                "selected_strategy_id": (best or {}).get("strategy_id"),
+                "selected_strategy_name": (best or {}).get("strategy_name"),
+                "optimizer_complete": bool((best or {}).get("optimizer_complete", False)),
+                "optimizer_selection_stable": bool((best or {}).get("optimizer_selection_stable", False)),
+                "selection_win_rate_pct": (best or {}).get("selection_win_rate_pct"),
+                "selection_profit_factor": (best or {}).get("selection_profit_factor"),
+                "final_holdout_win_rate_pct": (best or {}).get("historical_win_rate_pct"),
+                "final_holdout_profit_factor": (best or {}).get("historical_profit_factor"),
+                "walk_forward_pass": bool((best or {}).get("walk_forward_pass", False)),
+                "walk_forward_min_win_rate_pct": (best or {}).get("walk_forward_min_win_rate_pct"),
+                "walk_forward_median_win_rate_pct": (best or {}).get("walk_forward_median_win_rate_pct"),
+                "walk_forward_profitable_folds": (best or {}).get("walk_forward_profitable_folds"),
+                "historical_70_verified": bool((best or {}).get("historical_70_verified", False)),
+                "leaderboard": (best or {}).get("optimizer_leaderboard", []),
+            }
+        return {
+            "version": self.VERSION,
+            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological validation folds",
+            "final_holdout_used_for_selection": False,
+            "walk_forward_folds": WALK_FORWARD_FOLDS,
+            "quant_min_pct": 28.0,
+            "model_ai_min_pct": 40.0,
+            "historical_validation_target_pct": 70.0,
+            "coverage": self.evidence_coverage(),
+            "categories": categories,
+            "live_money_execution": False,
+        }
+
     def status(self) -> Dict[str, Any]:
         rankings = self.category_rankings()
         by_category: Dict[str, Any] = {}
@@ -1427,7 +1749,7 @@ class CategoryStrategyEngine:
         with self._lock:
             return {
                 "version": self.VERSION,
-                "name": "JASONG ADAPTIVE SPECIALIST MARKET CATEGORY INTELLIGENCE",
+                "name": "JASONG V6.9.2 COMPLETE SPECIALIST REAL-TIME TEST INTELLIGENCE",
                 "enabled": bool(self._state.get("enabled", True)),
                 "confidence_policy": {
                     "quant_min": QUANT_MIN_CONFIDENCE,
@@ -1437,6 +1759,7 @@ class CategoryStrategyEngine:
                     "historical_validation_target_pct": 70.0,
                     "optimizer_final_holdout_pct": 30.0,
                     "optimizer_selection_window_pct": 30.0,
+                    "walk_forward_folds": WALK_FORWARD_FOLDS,
                 },
                 "categories": by_category,
                 "category_count": len(CATEGORY_ORDER),
@@ -1455,10 +1778,13 @@ class CategoryStrategyEngine:
                     "enabled": True,
                     "variants_per_category": 3,
                     "selection_window": "40%-70%",
-                    "final_holdout": "70%-100%",
+                    "final_holdout": "70%-100% split into 3 chronological folds",
+                    "walk_forward_folds": WALK_FORWARD_FOLDS,
                     "final_holdout_used_for_selection": False,
                     "non_overlapping_backtest_positions": True,
                 },
+                "evidence_hygiene": self.evidence_coverage(),
+                "full_refresh": self.full_refresh_status(),
                 "compound_slots_per_category": COMPOUND_SLOTS_PER_CATEGORY,
                 "runs": int(self._state.get("runs") or 0),
                 "last_run_at": self._state.get("last_run_at"),
@@ -1483,7 +1809,13 @@ class CategoryStrategyEngine:
         while not self._stop.is_set():
             try:
                 if self._state.get("enabled", True):
-                    self.run_now()
+                    coverage = self.evidence_coverage()
+                    refresh_running = bool(self._full_refresh_thread and self._full_refresh_thread.is_alive())
+                    if self.auto_full_refresh and coverage["markets_pending_optimisation"] > 0:
+                        if not refresh_running:
+                            self.start_full_refresh()
+                    elif not refresh_running:
+                        self.run_now()
             except Exception as exc:
                 with self._lock:
                     self._state["last_error"] = f"{type(exc).__name__}: {exc}"
