@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.17"
+    VERSION = "6.8.18"
     DEAL_PREFIX = "JSCMP_"
     LEARNING_PREFIXES = (
         "JASONG_",
@@ -179,7 +179,7 @@ class EliteCompoundEngine:
         # distribution from SERVER_FRESH_SIGNAL. Keep mature FX/server
         # fast scoring at 90, but calibrate global learning at 60.
         self.global_fast_score_min = self._float_env(
-            "COMPOUND_GLOBAL_FAST_SCORE_MIN", 60.0, 0.0, 100.0
+            "COMPOUND_GLOBAL_FAST_SCORE_MIN", 70.0, 0.0, 100.0
         )
         # V6.8.0 minimum-to-maximum learning floor. These values do NOT
         # weaken Elite Compound execution; they only classify useful near-miss
@@ -193,6 +193,26 @@ class EliteCompoundEngine:
         self.learning_fast_score_min = self._float_env(
             "LEARNING_FAST_SCORE_MIN", 50.0, 0.0, 100.0
         )
+        # V6.8.18 PRIME broker-execution gates.
+        self.prime_min_historical_wr = self._float_env(
+            "PRIME_MIN_HISTORICAL_WR",
+            0.55,
+            0.0,
+            1.0,
+        )
+        self.prime_min_historical_pf = self._float_env(
+            "PRIME_MIN_HISTORICAL_PF",
+            1.20,
+            0.0,
+            20.0,
+        )
+        self.prime_min_historical_trades = self._int_env(
+            "PRIME_MIN_HISTORICAL_TRADES",
+            20,
+            1,
+            100000,
+        )
+        self.forward_evidence_source = None
         self.max_spread_bps = self._float_env(
             "COMPOUND_MAX_SPREAD_BPS", 8.0, 0.1, 100.0
         )
@@ -1132,18 +1152,66 @@ class EliteCompoundEngine:
             "market": market,
         }
 
+    def set_forward_evidence_source(
+        self,
+        source,
+    ) -> None:
+        """Attach lightweight genuine IG forward evidence for quarantine."""
+        with self._lock:
+            self.forward_evidence_source = source
+
+    @staticmethod
+    def _forward_market_key(
+        value: Any,
+    ) -> str:
+        return re.sub(
+            r"[^A-Z0-9]+",
+            "",
+            str(value or "").upper(),
+        )
+
+    def _forward_guard(self) -> Dict[str, Any]:
+        source = self.forward_evidence_source
+        if source is None:
+            return {
+                "mode": "CAUTION",
+                "by_market": {},
+                "by_class": {},
+            }
+        try:
+            payload = source() or {}
+            return (
+                dict(payload)
+                if isinstance(payload, dict)
+                else {
+                    "mode": "CAUTION",
+                    "by_market": {},
+                    "by_class": {},
+                }
+            )
+        except Exception as exc:
+            return {
+                "mode": "CAUTION",
+                "by_market": {},
+                "by_class": {},
+                "error":
+                    f"{type(exc).__name__}: {exc}",
+            }
+
     def _rank_candidates(
         self,
         capital: float,
         selection_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Rank all signals for IG DEMO confidence-first execution.
+        """Rank all signals for PRIME IG DEMO execution.
 
-        V6.8.2 learning rule:
-        - AI, Quant and Fast are the REQUIRED confidence gates.
-        - A/A+ Quality and Deep Validation still contribute evidence and the
-          Elite label, but they no longer block an otherwise confidence-qualified
-          IG DEMO trade.
+        V6.8.18 rule:
+        - AI, Quant and Fast remain required.
+        - Real broker execution additionally requires A/A+ quality, acceptable
+          deep validation, historical WR/PF/sample floors, and no forward
+          quarantine.
+        - We still retain weaker confidence-qualified rows as learning evidence,
+          but they cannot open JSCMP_ broker positions.
         - Direction agreement, exact IG mapping/tradeability and spread remain
           hard execution-safety requirements.
         - Correlation/exposure limits remain portfolio safety controls.
@@ -1162,10 +1230,12 @@ class EliteCompoundEngine:
         )
 
         allowed_deep = {
-            "VERIFIED", "NEAR_VERIFIED", "WATCH",
-            "AI_LEARNING_SHADOW_PROMOTION",
-            "GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED",
+            "VERIFIED",
+            "NEAR_VERIFIED",
+            "GLOBAL_VERIFIED",
+            "GLOBAL_NEAR_VERIFIED",
         }
+        forward_guard = self._forward_guard()
 
         for source_rank, raw in enumerate(source_rows, start=1):
             row = dict(raw or {})
@@ -1185,6 +1255,20 @@ class EliteCompoundEngine:
             quality = str(row.get("quality_tier") or "").upper().strip()
             deep = str(row.get("deep_status") or "").upper().strip()
             direction_match = bool(row.get("direction_match"))
+            historical_wr = self._safe_float(
+                row.get("historical_win_rate"),
+                0.0,
+            )
+            historical_pf = self._safe_float(
+                row.get("historical_profit_factor"),
+                0.0,
+            )
+            historical_trades = int(
+                self._safe_float(
+                    row.get("historical_trades"),
+                    0.0,
+                )
+            )
 
             row.update({
                 "symbol": symbol,
@@ -1319,8 +1403,82 @@ class EliteCompoundEngine:
                 and deep in allowed_deep
             )
 
-            # Confidence execution is the V6.8.2 IG DEMO rule.
-            execution_reasons = list(dict.fromkeys(confidence_reasons))
+            prime_reasons: List[str] = []
+            if quality not in {"A+", "A"}:
+                prime_reasons.append(
+                    f"Quality {quality or '-'} below PRIME A/A+"
+                )
+            if deep not in allowed_deep:
+                prime_reasons.append(
+                    f"Deep status {deep or '-'} below PRIME"
+                )
+            if historical_wr < self.prime_min_historical_wr:
+                prime_reasons.append(
+                    "Historical WR "
+                    f"{historical_wr*100:.1f}% < "
+                    f"{self.prime_min_historical_wr*100:.0f}%"
+                )
+            if historical_pf < self.prime_min_historical_pf:
+                prime_reasons.append(
+                    f"Historical PF {historical_pf:.2f} < "
+                    f"{self.prime_min_historical_pf:.2f}"
+                )
+            if historical_trades < self.prime_min_historical_trades:
+                prime_reasons.append(
+                    f"Historical sample {historical_trades} < "
+                    f"{self.prime_min_historical_trades}"
+                )
+
+            market_key = self._forward_market_key(
+                symbol or row.get("market")
+            )
+            market_forward = (
+                forward_guard.get("by_market", {})
+                .get(market_key, {})
+            )
+            class_forward = (
+                forward_guard.get("by_class", {})
+                .get("ELITE", {})
+            )
+            if market_forward.get("hard_quarantined"):
+                prime_reasons.append(
+                    "Market HARD_QUARANTINED by real IG forward evidence"
+                )
+            elif market_forward.get("quarantined"):
+                prime_reasons.append(
+                    "Market QUARANTINED by real IG forward evidence"
+                )
+            if class_forward.get("hard_quarantined"):
+                prime_reasons.append(
+                    "Elite class HARD_QUARANTINED by forward evidence"
+                )
+
+            prime_pass = bool(
+                confidence_pass
+                and strict_pass
+                and historical_wr
+                    >= self.prime_min_historical_wr
+                and historical_pf
+                    >= self.prime_min_historical_pf
+                and historical_trades
+                    >= self.prime_min_historical_trades
+                and not market_forward.get(
+                    "quarantined"
+                )
+                and not market_forward.get(
+                    "hard_quarantined"
+                )
+                and not class_forward.get(
+                    "hard_quarantined"
+                )
+            )
+
+            execution_reasons = list(
+                dict.fromkeys(
+                    confidence_reasons
+                    + prime_reasons
+                )
+            )
             row["rejection_reasons"] = execution_reasons
             row["elite_reasons"] = list(dict.fromkeys(elite_only_reasons))
             row["elite_evidence_notes"] = [
@@ -1330,7 +1488,17 @@ class EliteCompoundEngine:
                 for note in row["elite_reasons"]
             ]
             row["confidence_qualified"] = bool(confidence_pass)
-            row["execution_eligible"] = bool(confidence_pass)
+            row["prime_qualified"] = bool(prime_pass)
+            row["execution_eligible"] = bool(prime_pass)
+            row["prime_reasons"] = list(
+                dict.fromkeys(prime_reasons)
+            )
+            row["forward_regime"] = (
+                forward_guard.get("mode")
+            )
+            row["forward_market_stats"] = (
+                market_forward
+            )
             row["required_fast_score"] = round(required_fast, 2)
             row["fast_threshold_source"] = (
                 "GLOBAL_CALIBRATED"
@@ -1338,8 +1506,11 @@ class EliteCompoundEngine:
                 else "SERVER_FRESH"
             )
             row["elite_eligible"] = strict_pass
-            row["eligible"] = bool(confidence_pass)
-            row["learning_eligible"] = bool(confidence_pass and not strict_pass)
+            row["eligible"] = bool(prime_pass)
+            row["learning_eligible"] = bool(
+                confidence_pass
+                and not prime_pass
+            )
 
             row["elite_state"] = (
                 self._elite_state(
@@ -1359,23 +1530,31 @@ class EliteCompoundEngine:
             )
 
             row["trade_class"] = (
-                "ELITE"
-                if strict_pass
-                else "CONFIDENCE"
+                "PRIME"
+                if prime_pass
+                else "QUALIFIED_LEARNING"
                 if confidence_pass
                 else "OBSERVE"
             )
             row["execution_basis"] = (
-                "REQUIRED_CONFIDENCE"
+                "FORWARD_VALIDATED_PRIME"
+                if prime_pass
+                else "LEARNING_ONLY"
                 if confidence_pass
                 else "NOT_QUALIFIED"
             )
-            row["ig_demo_learning_eligible"] = bool(confidence_pass)
+            row["ig_demo_learning_eligible"] = False
             screened.append(row)
 
-        # V6.8.2: select all signals that pass the required confidence +
-        # broker-safety gates. Elite is now an evidence label, not a trade gate.
-        eligible = [row for row in screened if row.get("execution_eligible")]
+        # V6.8.18: only forward-validated PRIME candidates may become
+        # real Compound broker positions. Lower-quality confidence passes remain
+        # visible as learning evidence.
+        eligible = [
+            row
+            for row in screened
+            if row.get("prime_qualified")
+            and row.get("execution_eligible")
+        ]
         eligible.sort(
             key=lambda r: (
                 self._safe_float(r.get("elite_base_score"), 0.0),
@@ -1455,21 +1634,17 @@ class EliteCompoundEngine:
             row["diversification_score"] = round(diversification_score, 2)
             row["elite_score"] = round(elite_score, 2)
 
-            # V6.8.11:
-            # Selection by REQUIRED_CONFIDENCE must never mutate the evidence
-            # classification into ELITE. Elite remains a separate evidence
-            # label and is true only when the strict Elite gates passed.
-            if bool(row.get("elite_eligible")):
-                row["elite_state"] = (
-                    "ELITE_A_PLUS"
-                    if str(row.get("quality_tier")) == "A+"
-                    and elite_score >= 85.0
-                    else "ELITE_A"
-                )
-                row["trade_class"] = "ELITE"
-            else:
-                row["elite_state"] = "CONFIDENCE_QUALIFIED"
-                row["trade_class"] = "CONFIDENCE"
+            row["elite_state"] = (
+                "PRIME_A_PLUS"
+                if str(
+                    row.get("quality_tier")
+                ) == "A+"
+                else "PRIME_A"
+            )
+            row["trade_class"] = "PRIME"
+            row["execution_basis"] = (
+                "FORWARD_VALIDATED_PRIME"
+            )
 
             row["selected"] = True
             selected.append(row)
@@ -2477,14 +2652,14 @@ class EliteCompoundEngine:
         ):
             with self._lock:
                 self._state["status"] = (
-                    "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                    "WAITING_FOR_5_PRIME_MARKETS"
                 )
                 self._state["paused_reason"] = (
                     "Compound is continuously reassessing markets every "
                     f"{self.poll_seconds}s and will only start the next "
-                    "target cycle when five eligible, diversified IG DEMO "
+                    "target cycle when five PRIME, diversified IG DEMO "
                     "markets are simultaneously available. "
-                    f"Current qualified queue: {len(selected)}/"
+                    f"Current PRIME queue: {len(selected)}/"
                     f"{self.required_basket_positions}."
                 )
                 self._state[
@@ -2495,7 +2670,7 @@ class EliteCompoundEngine:
                 ]
                 self._state[
                     "intelligence_bridge_state"
-                ] = "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                ] = "WAITING_FOR_5_PRIME_MARKETS"
                 self._state[
                     "basket_assembly"
                 ] = {
@@ -3134,7 +3309,7 @@ class EliteCompoundEngine:
                     None
                 )
                 self._state["status"] = (
-                    "WAITING_FOR_5_ELIGIBLE_MARKETS"
+                    "WAITING_FOR_5_PRIME_MARKETS"
                 )
                 self._state["paused_reason"] = (
                     "IG accepted fewer than five "
@@ -4114,6 +4289,22 @@ class EliteCompoundEngine:
             "quant_min_confidence": self.quant_min_confidence,
             "fast_score_min": self.fast_score_min,
             "global_fast_score_min": self.global_fast_score_min,
+            "prime_execution": {
+                "enabled": True,
+                "quality_tiers": ["A", "A+"],
+                "min_historical_wr_pct":
+                    round(
+                        self.prime_min_historical_wr
+                        * 100.0,
+                        2,
+                    ),
+                "min_historical_pf":
+                    self.prime_min_historical_pf,
+                "min_historical_trades":
+                    self.prime_min_historical_trades,
+                "forward_guard":
+                    self._forward_guard(),
+            },
             "fast_threshold_policy": {
                 "SERVER_FRESH_SIGNAL": self.fast_score_min,
                 "GLOBAL_MULTI_MARKET": self.global_fast_score_min,
