@@ -6956,7 +6956,9 @@ GLOBAL_MARKET_ENGINE.start_thread()
 def _v673_compound_candidate_source(cycle_capital: float) -> list[dict]:
     """Merge mature FX watcher intelligence with the global multi-asset pool."""
     legacy_rows = _v671_compound_candidate_source(cycle_capital)
-    global_rows = GLOBAL_MARKET_ENGINE.candidates()
+    global_rows = (
+        GLOBAL_MARKET_ENGINE.opportunity_board()
+    )
     merged: list[dict] = []
     seen: set[str] = set()
 
@@ -7011,7 +7013,7 @@ def global_markets_status():
 @app.get("/global-markets/universe")
 def global_markets_universe():
     return {
-        "version": "6.7.3",
+        "version": "6.8.17",
         "fx": [
             {"key": key, "name": value, "asset_class": "FX"}
             for key, value in CORE_MARKETS.items()
@@ -7027,7 +7029,7 @@ def global_markets_candidates(limit: int = 100):
     rows = GLOBAL_MARKET_ENGINE.candidates()
     limit = max(1, min(int(limit), 500))
     return {
-        "version": "6.7.3",
+        "version": "6.8.17",
         "count": len(rows),
         "candidates": rows[:limit],
         "live_money_execution": False,
@@ -7037,6 +7039,37 @@ def global_markets_candidates(limit: int = 100):
 @app.post("/global-markets/run-now")
 def global_markets_run_now():
     return GLOBAL_MARKET_ENGINE.run_now()
+
+
+@app.get("/global-markets/opportunity-board")
+def global_markets_opportunity_board(
+    limit: int = 100,
+):
+    rows = (
+        GLOBAL_MARKET_ENGINE.opportunity_board(
+            limit=limit
+        )
+    )
+    return {
+        "version": "6.8.17",
+        "count": len(rows),
+        "eligibility_refresh_seconds":
+            GLOBAL_MARKET_ENGINE.
+            eligibility_refresh_seconds,
+        "heavy_scan_seconds":
+            GLOBAL_MARKET_ENGINE.
+            scan_interval_seconds,
+        "opportunities": rows,
+        "live_money_execution": False,
+    }
+
+
+@app.post("/global-markets/refresh-eligibility")
+def global_markets_refresh_eligibility():
+    return (
+        GLOBAL_MARKET_ENGINE.
+        refresh_opportunity_board()
+    )
 
 
 COMPOUND_STATE_PATH = os.getenv(
@@ -7086,6 +7119,30 @@ def execution_policy():
         "compound_max_open_positions": int(
             os.getenv("COMPOUND_MAX_POSITIONS", "5")
         ),
+        "compound_required_basket_positions": int(
+            os.getenv(
+                "COMPOUND_REQUIRED_BASKET_POSITIONS",
+                "5",
+            )
+        ),
+        "compound_candidate_pool_size": int(
+            os.getenv(
+                "COMPOUND_CANDIDATE_POOL_SIZE",
+                "12",
+            )
+        ),
+        "compound_eligibility_refresh_seconds": int(
+            os.getenv(
+                "COMPOUND_POLL_SECONDS",
+                "15",
+            )
+        ),
+        "global_eligibility_refresh_seconds": int(
+            os.getenv(
+                "GLOBAL_ELIGIBILITY_REFRESH_SECONDS",
+                "15",
+            )
+        ),
         "learning_max_open_signals": int(
             os.getenv("LEARNING_MAX_OPEN_SIGNALS", "10")
         ),
@@ -7093,6 +7150,12 @@ def execution_policy():
             os.getenv("IG_DEMO_MIRROR_POLL_SECONDS", "15")
         ),
     }
+
+
+@app.get("/compound/target-analysis")
+def compound_target_analysis():
+    """Compare 1.2x / 1.3x / 1.5x using genuine Compound cycles."""
+    return COMPOUND_ENGINE.target_analysis()
 
 
 @app.get("/compound/status")
@@ -7648,6 +7711,19 @@ def _v664_overnight_demo_snapshot() -> dict:
         "environment": "DEMO",
         "live_money_execution": False,
     }
+
+
+@app.get("/forward-evidence/analysis")
+def forward_evidence_analysis(
+    phase_id: Optional[int] = None,
+):
+    """Analyse genuine settled/open IG DEMO evidence for a phase.
+
+    Internal synthetic/paper results are deliberately excluded.
+    """
+    return IG_DEMO_MIRROR.phase_trade_analysis(
+        phase_id=phase_id,
+    )
 
 
 @app.get("/overnight-demo/status")
