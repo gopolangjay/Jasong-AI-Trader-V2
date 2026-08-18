@@ -71,7 +71,7 @@ GLOBAL_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 class GlobalMarketEngine:
-    VERSION = "6.8.6"
+    VERSION = "6.8.17"
 
     def __init__(
         self,
@@ -85,28 +85,60 @@ class GlobalMarketEngine:
         self.broker = broker
         self.analysis_func = analysis_func
         self.state_path = state_path
+        # Heavy analysis refresh remains slower than execution eligibility.
+        # The 15-second opportunity loop below re-ranks cached evidence without
+        # repeatedly downloading deep history from IG/public providers.
         self.scan_interval_seconds = max(
-            90,
-            int(scan_interval_seconds or os.getenv("GLOBAL_SCAN_INTERVAL_SECONDS", "180")),
+            30,
+            int(
+                scan_interval_seconds
+                or os.getenv(
+                    "GLOBAL_SCAN_INTERVAL_SECONDS",
+                    "60",
+                )
+            ),
+        )
+        self.eligibility_refresh_seconds = max(
+            10,
+            int(
+                os.getenv(
+                    "GLOBAL_ELIGIBILITY_REFRESH_SECONDS",
+                    "15",
+                )
+            ),
         )
         self.batch_size = max(
             2,
-            min(10, int(batch_size or os.getenv("GLOBAL_SCAN_BATCH_SIZE", "4"))),
+            min(
+                12,
+                int(
+                    batch_size
+                    or os.getenv(
+                        "GLOBAL_SCAN_BATCH_SIZE",
+                        "4",
+                    )
+                ),
+            ),
         )
         self.candidate_ttl_seconds = max(
             300,
             int(os.getenv("GLOBAL_CANDIDATE_TTL_SECONDS", "1800")),
         )
+        self.opportunity_board_limit = max(
+            20,
+            min(
+                200,
+                int(
+                    os.getenv(
+                        "GLOBAL_OPPORTUNITY_BOARD_LIMIT",
+                        "100",
+                    )
+                ),
+            ),
+        )
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self.execution_fast_score_min = max(
-            0.0,
-            min(
-                100.0,
-                float(os.getenv("COMPOUND_GLOBAL_FAST_SCORE_MIN", "60")),
-            ),
-        )
         self._state = self._load_state()
 
     def _default_state(self) -> Dict[str, Any]:
@@ -119,6 +151,9 @@ class GlobalMarketEngine:
             "last_error": None,
             "evaluations": {},
             "last_batch_keys": [],
+            "opportunity_board": [],
+            "last_eligibility_refresh_at": None,
+            "eligibility_refresh_runs": 0,
         }
 
     def _load_state(self) -> Dict[str, Any]:
@@ -176,7 +211,7 @@ class GlobalMarketEngine:
             search_terms=list(seed.get("ig_search_terms") or [seed.get("name")]),
             expected_types=list(seed.get("expected_types") or []),
             name_tokens=list(seed.get("name_tokens") or []),
-            require_tradeable=True,
+            require_tradeable=False,
             cache_key=str(seed.get("key") or seed.get("name") or ""),
         )
 
@@ -224,10 +259,8 @@ class GlobalMarketEngine:
         # after the public-data model has found a plausibly useful setup.
         promising = (
             direction in {"BUY", "SELL"}
-            and self._safe_float(row.get("model_ai_confidence")) >= 0.40
-            and self._safe_float(row.get("quant_confidence")) >= 0.30
-            and self._safe_float(row.get("smart_fast_score"))
-                >= self.execution_fast_score_min
+            and self._safe_float(row.get("model_ai_confidence")) >= 0.35
+            and self._safe_float(row.get("smart_fast_score")) >= 75.0
         )
         if promising:
             try:
@@ -241,12 +274,6 @@ class GlobalMarketEngine:
                 row["ig_expiry"] = market.get("expiry")
             except Exception as exc:
                 row["ig_preflight_error"] = f"{type(exc).__name__}: {exc}"
-                row["rejection_reasons"] = list(
-                    dict.fromkeys(
-                        list(row.get("rejection_reasons") or [])
-                        + [f"IG multi-asset preflight: {type(exc).__name__}: {exc}"]
-                    )
-                )
 
         return row
 
@@ -276,21 +303,328 @@ class GlobalMarketEngine:
             self._state["last_run_at"] = time.time()
             self._state["last_error"] = error
             self._persist()
+
+        try:
+            self.refresh_opportunity_board()
+        except Exception as exc:
+            with self._lock:
+                self._state["last_error"] = (
+                    f"eligibility: {type(exc).__name__}: {exc}"
+                )
+                self._persist()
+
         return self.status()
 
-    def candidates(self) -> List[Dict[str, Any]]:
+    def _raw_candidates(
+        self,
+    ) -> List[Dict[str, Any]]:
+        """Return persisted fresh evaluations before opportunity re-ranking."""
         now = time.time()
         with self._lock:
-            rows = [dict(v) for v in (self._state.get("evaluations") or {}).values() if isinstance(v, dict)]
+            rows = [
+                dict(value)
+                for value in (
+                    self._state.get("evaluations")
+                    or {}
+                ).values()
+                if isinstance(value, dict)
+            ]
+
         fresh = [
-            r for r in rows
-            if now - self._safe_float(r.get("evaluated_at"), 0.0) <= self.candidate_ttl_seconds
+            row
+            for row in rows
+            if (
+                now
+                - self._safe_float(
+                    row.get("evaluated_at"),
+                    0.0,
+                )
+                <= self.candidate_ttl_seconds
+            )
         ]
+        return fresh
+
+    def refresh_opportunity_board(
+        self,
+    ) -> Dict[str, Any]:
+        """Reassess cached market eligibility every ~15 seconds.
+
+        This deliberately does NOT perform a full historical retrain every
+        15 seconds. It continuously re-ranks the latest valid evidence and lets
+        Compound perform exact IG quote/spread/tradeability preflight on the
+        candidates it is actually considering for execution.
+        """
+        now = time.time()
+        rows = self._raw_candidates()
+        board: List[Dict[str, Any]] = []
+
+        for raw in rows:
+            row = dict(raw)
+            age = max(
+                0.0,
+                now
+                - self._safe_float(
+                    row.get("evaluated_at"),
+                    0.0,
+                ),
+            )
+            freshness = max(
+                0.0,
+                min(
+                    1.0,
+                    1.0
+                    - (
+                        age
+                        / max(
+                            float(
+                                self.candidate_ttl_seconds
+                            ),
+                            1.0,
+                        )
+                    ),
+                ),
+            )
+
+            ai = max(
+                0.0,
+                min(
+                    1.0,
+                    self._safe_float(
+                        row.get(
+                            "model_ai_confidence"
+                        ),
+                        0.0,
+                    ),
+                ),
+            )
+            quant = max(
+                0.0,
+                min(
+                    1.0,
+                    self._safe_float(
+                        row.get(
+                            "quant_confidence"
+                        ),
+                        0.0,
+                    ),
+                ),
+            )
+            fast = max(
+                0.0,
+                min(
+                    1.0,
+                    self._safe_float(
+                        row.get(
+                            "smart_fast_score"
+                        ),
+                        0.0,
+                    )
+                    / 100.0,
+                ),
+            )
+
+            historical_wr = self._safe_float(
+                row.get("historical_win_rate"),
+                0.50,
+            )
+            historical_wr = max(
+                0.0,
+                min(1.0, historical_wr),
+            )
+
+            pf = self._safe_float(
+                row.get(
+                    "historical_profit_factor"
+                ),
+                1.0,
+            )
+            pf_score = max(
+                0.0,
+                min(
+                    1.0,
+                    pf / 2.0,
+                ),
+            )
+
+            quality = str(
+                row.get("quality_tier") or ""
+            ).upper()
+            quality_score = (
+                1.0
+                if quality == "A+"
+                else 0.90
+                if quality == "A"
+                else 0.65
+                if quality == "B"
+                else 0.50
+            )
+
+            direction_ok = (
+                str(
+                    row.get("direction") or ""
+                ).upper()
+                in {"BUY", "SELL"}
+            )
+
+            # Opportunity score ranks what should be checked first.
+            # It does not override Compound's hard confidence/spread/correlation
+            # gates.
+            score = 100.0 * (
+                0.25 * ai
+                + 0.20 * quant
+                + 0.20 * fast
+                + 0.10 * historical_wr
+                + 0.08 * pf_score
+                + 0.07 * quality_score
+                + 0.10 * freshness
+            )
+
+            row["opportunity_score"] = round(
+                score,
+                2,
+            )
+            row["opportunity_freshness_pct"] = round(
+                freshness * 100.0,
+                2,
+            )
+            row["opportunity_age_seconds"] = round(
+                age,
+                2,
+            )
+            row["opportunity_direction_valid"] = (
+                direction_ok
+            )
+            row["opportunity_last_checked_at"] = (
+                now
+            )
+            board.append(row)
+
+        board.sort(
+            key=lambda row: (
+                bool(
+                    row.get(
+                        "opportunity_direction_valid"
+                    )
+                ),
+                self._safe_float(
+                    row.get("opportunity_score"),
+                    0.0,
+                ),
+                self._safe_float(
+                    row.get(
+                        "smart_fast_score"
+                    ),
+                    0.0,
+                ),
+                self._safe_float(
+                    row.get(
+                        "model_ai_confidence"
+                    ),
+                    0.0,
+                ),
+            ),
+            reverse=True,
+        )
+
+        board = board[
+            :self.opportunity_board_limit
+        ]
+
+        with self._lock:
+            self._state[
+                "opportunity_board"
+            ] = board
+            self._state[
+                "last_eligibility_refresh_at"
+            ] = now
+            self._state[
+                "eligibility_refresh_runs"
+            ] = int(
+                self._state.get(
+                    "eligibility_refresh_runs"
+                )
+                or 0
+            ) + 1
+            self._persist()
+
+        return {
+            "version": self.VERSION,
+            "count": len(board),
+            "refreshed_at": now,
+            "refresh_seconds":
+                self.eligibility_refresh_seconds,
+            "heavy_scan_seconds":
+                self.scan_interval_seconds,
+            "opportunities": board,
+            "environment":
+                "IG DEMO + PUBLIC ANALYSIS DATA",
+            "live_money_execution": False,
+        }
+
+    def opportunity_board(
+        self,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = [
+                dict(row)
+                for row in (
+                    self._state.get(
+                        "opportunity_board"
+                    )
+                    or []
+                )
+                if isinstance(row, dict)
+            ]
+
+        if not rows:
+            try:
+                self.refresh_opportunity_board()
+            except Exception:
+                pass
+            with self._lock:
+                rows = [
+                    dict(row)
+                    for row in (
+                        self._state.get(
+                            "opportunity_board"
+                        )
+                        or []
+                    )
+                    if isinstance(row, dict)
+                ]
+
+        max_rows = (
+            self.opportunity_board_limit
+            if limit is None
+            else max(
+                1,
+                min(
+                    int(limit),
+                    self.opportunity_board_limit,
+                ),
+            )
+        )
+        return rows[:max_rows]
+
+    def candidates(self) -> List[Dict[str, Any]]:
+        rows = self.opportunity_board()
+        if rows:
+            return rows
+
+        # Safe bootstrap fallback before the first eligibility refresh.
+        fresh = self._raw_candidates()
         fresh.sort(
-            key=lambda r: (
-                self._safe_float(r.get("smart_fast_score")),
-                self._safe_float(r.get("model_ai_confidence")),
-                self._safe_float(r.get("quant_confidence")),
+            key=lambda row: (
+                self._safe_float(
+                    row.get("smart_fast_score")
+                ),
+                self._safe_float(
+                    row.get("model_ai_confidence")
+                ),
+                self._safe_float(
+                    row.get("quant_confidence")
+                ),
             ),
             reverse=True,
         )
@@ -341,8 +675,9 @@ class GlobalMarketEngine:
                 str(row.get("direction") or "").upper() in {"BUY", "SELL"}
                 and self._safe_float(row.get("model_ai_confidence")) >= 0.40
                 and self._safe_float(row.get("quant_confidence")) >= 0.30
-                and self._safe_float(row.get("smart_fast_score"))
-                    >= self.execution_fast_score_min
+                and self._safe_float(row.get("smart_fast_score")) >= 90.0
+                and str(row.get("quality_tier") or "").upper() in {"A", "A+"}
+                and str(row.get("deep_status") or "").upper() in {"GLOBAL_VERIFIED", "GLOBAL_NEAR_VERIFIED"}
                 and bool(row.get("ig_tradeable"))
             ):
                 elite_ready += 1
@@ -358,9 +693,28 @@ class GlobalMarketEngine:
                 "evaluated_by_asset_class": counts,
                 "tradeable_by_asset_class": tradeable,
                 "elite_ready": elite_ready,
-                "confidence_ready": elite_ready,
-                "global_fast_score_min": self.execution_fast_score_min,
-                "scan_interval_seconds": self.scan_interval_seconds,
+                "scan_interval_seconds":
+                    self.scan_interval_seconds,
+                "eligibility_refresh_seconds":
+                    self.eligibility_refresh_seconds,
+                "last_eligibility_refresh_at":
+                    self._state.get(
+                        "last_eligibility_refresh_at"
+                    ),
+                "eligibility_refresh_runs":
+                    int(
+                        self._state.get(
+                            "eligibility_refresh_runs"
+                        )
+                        or 0
+                    ),
+                "opportunity_board_size":
+                    len(
+                        self._state.get(
+                            "opportunity_board"
+                        )
+                        or []
+                    ),
                 "batch_size": self.batch_size,
                 "runs": int(self._state.get("runs") or 0),
                 "last_run_at": self._state.get("last_run_at"),
@@ -383,15 +737,34 @@ class GlobalMarketEngine:
         # Short startup delay so Render can finish IG login / other engine startup.
         if self._stop.wait(12.0):
             return
+
+        next_heavy_scan_at = 0.0
+
         while not self._stop.is_set():
+            now = time.time()
             try:
                 if self._state.get("enabled", True):
-                    self.run_now()
+                    if now >= next_heavy_scan_at:
+                        self.run_now()
+                        next_heavy_scan_at = (
+                            time.time()
+                            + self.scan_interval_seconds
+                        )
+                    else:
+                        # Continuous eligibility assessment uses the persistent
+                        # cached evidence board; it does not retrain history.
+                        self.refresh_opportunity_board()
             except Exception as exc:
                 with self._lock:
-                    self._state["last_error"] = f"{type(exc).__name__}: {exc}"
+                    self._state["last_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     self._persist()
-            self._stop.wait(self.scan_interval_seconds)
+
+            self._stop.wait(
+                self.eligibility_refresh_seconds
+            )
 
     def stop_thread(self) -> None:
         self._stop.set()
+
