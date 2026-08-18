@@ -240,16 +240,6 @@ class EliteCompoundEngine:
             -10.0,
             10.0,
         )
-        self.auto_reseed_demo = self._bool_env(
-            "COMPOUND_AUTO_RESEED_DEMO",
-            True,
-        )
-        self.demo_reseed_capital = self._float_env(
-            "COMPOUND_DEMO_RESEED_CAPITAL",
-            2000.0,
-            self.min_cycle_capital,
-            100000000.0,
-        )
         self.forward_evidence_source = None
         self.max_spread_bps = self._float_env(
             "COMPOUND_MAX_SPREAD_BPS", 8.0, 0.1, 100.0
@@ -297,6 +287,16 @@ class EliteCompoundEngine:
         )
         self.min_cycle_capital = self._float_env(
             "COMPOUND_MIN_CYCLE_CAPITAL", 1.0, 0.01, 1000000000.0
+        )
+        self.auto_reseed_demo = self._bool_env(
+            "COMPOUND_AUTO_RESEED_DEMO",
+            True,
+        )
+        self.demo_reseed_capital = self._float_env(
+            "COMPOUND_DEMO_RESEED_CAPITAL",
+            2000.0,
+            self.min_cycle_capital,
+            100000000.0,
         )
 
         default_state = (
