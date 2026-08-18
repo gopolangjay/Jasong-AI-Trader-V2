@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -733,6 +734,561 @@ class IGDemoMirror:
         overall["target"] = self.phase_target
         overall["remaining_to_settle"] = max(0, self.phase_target - overall["settled"])
         return overall
+
+    @staticmethod
+    def _pct(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(number):
+            return None
+        return round(
+            number * 100.0 if abs(number) <= 1.0 else number,
+            2,
+        )
+
+    @staticmethod
+    def _mean(values: list[Optional[float]]) -> Optional[float]:
+        clean = [
+            float(value)
+            for value in values
+            if value is not None
+            and math.isfinite(float(value))
+        ]
+        if not clean:
+            return None
+        return round(sum(clean) / len(clean), 2)
+
+    def _phase_trade_detail(
+        self,
+        row: Dict[str, Any],
+        account_currency: str,
+    ) -> Dict[str, Any]:
+        result = str(
+            row.get("broker_result") or ""
+        ).upper()
+        status = str(
+            row.get("broker_status") or ""
+        ).upper()
+        open_result = (
+            row.get("open_result")
+            if isinstance(row.get("open_result"), dict)
+            else {}
+        )
+        close_result = (
+            row.get("close_result")
+            if isinstance(row.get("close_result"), dict)
+            else {}
+        )
+
+        entry = self._safe_float(
+            row.get("broker_entry_level")
+            or open_result.get("level"),
+            0.0,
+        )
+        exit_level = self._safe_float(
+            row.get("broker_exit_level")
+            or close_result.get("level"),
+            0.0,
+        )
+        size = self._safe_float(
+            row.get("ig_size")
+            or open_result.get("size"),
+            0.0,
+        )
+
+        cash_pnl = None
+        pnl_source = None
+        pnl_error = None
+
+        # Prefer any explicit broker-realised P&L field if present.
+        for key in (
+            "broker_realised_pnl",
+            "broker_realized_pnl",
+            "broker_pnl",
+            "realised_pnl",
+            "realized_pnl",
+        ):
+            value = row.get(key)
+            if value is not None:
+                try:
+                    cash_pnl = round(float(value), 2)
+                    pnl_source = f"LEDGER_{key.upper()}"
+                    break
+                except Exception:
+                    pass
+
+        # Otherwise derive a broker-metadata estimate for settled positions.
+        if (
+            cash_pnl is None
+            and result in {"WIN", "LOSS"}
+            and entry > 0
+            and exit_level > 0
+            and size > 0
+            and row.get("ig_epic")
+        ):
+            try:
+                estimate = self.broker.estimate_closed_position_pnl(
+                    epic=str(row.get("ig_epic") or ""),
+                    direction=str(row.get("direction") or ""),
+                    entry_level=entry,
+                    exit_level=exit_level,
+                    size=size,
+                    settlement_currency=(
+                        open_result.get("currencyCode")
+                        or row.get("currency")
+                    ),
+                    account_currency=account_currency,
+                )
+                cash_pnl = round(
+                    float(estimate.get("account_pnl") or 0.0),
+                    2,
+                )
+                pnl_source = str(
+                    estimate.get("valuation_source") or ""
+                )
+            except Exception as exc:
+                pnl_error = f"{type(exc).__name__}: {exc}"
+
+        opened_at = self._safe_float(
+            row.get("opened_at"),
+            0.0,
+        )
+        closed_at = self._safe_float(
+            row.get("closed_at"),
+            0.0,
+        )
+
+        holding_seconds = (
+            max(0.0, closed_at - opened_at)
+            if opened_at > 0 and closed_at > 0
+            else None
+        )
+
+        ai_pct = self._pct(
+            row.get("model_ai_confidence")
+        )
+        quant_pct = self._pct(
+            row.get("quant_confidence")
+        )
+        fast_score = (
+            round(
+                self._safe_float(
+                    row.get("smart_fast_score"),
+                    0.0,
+                ),
+                2,
+            )
+            if row.get("smart_fast_score") is not None
+            else None
+        )
+        mfe_bps = (
+            round(
+                self._safe_float(row.get("mfe_bps"), 0.0),
+                4,
+            )
+            if row.get("mfe_bps") is not None
+            else None
+        )
+        mae_bps = (
+            round(
+                self._safe_float(row.get("mae_bps"), 0.0),
+                4,
+            )
+            if row.get("mae_bps") is not None
+            else None
+        )
+
+        flags: list[str] = []
+        failed_gates = [
+            str(item)
+            for item in (
+                row.get("failed_gates")
+                or row.get("rejection_reasons")
+                or []
+            )
+        ]
+
+        if result == "LOSS":
+            if quant_pct is not None and quant_pct < 30.0:
+                flags.append("LOSS_BELOW_30_QUANT")
+            threshold_distance = (
+                row.get("threshold_distance")
+                if isinstance(row.get("threshold_distance"), dict)
+                else {}
+            )
+            fast_points = threshold_distance.get("fast_points")
+            try:
+                if (
+                    fast_points is not None
+                    and float(fast_points) < 0
+                ):
+                    flags.append("LOSS_BELOW_FAST_THRESHOLD")
+            except Exception:
+                pass
+            if (
+                mfe_bps is not None
+                and mfe_bps > 0
+            ):
+                flags.append("LOSS_HAD_FAVOURABLE_EXCURSION")
+            if (
+                mfe_bps is not None
+                and mae_bps is not None
+                and mfe_bps >= max(5.0, abs(mae_bps) * 0.5)
+            ):
+                flags.append("POSSIBLE_PROFIT_GIVEBACK")
+            if ai_pct is not None and ai_pct >= 60.0:
+                flags.append("HIGH_AI_CONFIDENCE_LOSS")
+
+        return {
+            "trade_id": row.get("trade_id"),
+            "phase_id": row.get("phase_id"),
+            "market": row.get("market") or row.get("symbol"),
+            "symbol": row.get("symbol"),
+            "direction": row.get("direction"),
+            "trade_class": (
+                row.get("trade_class")
+                or row.get("entry_class")
+            ),
+            "evidence_source": (
+                row.get("evidence_source")
+                or "LEARNING_MIRROR"
+            ),
+            "broker_status": status,
+            "broker_result": result or None,
+            "ig_deal_id": row.get("ig_deal_id"),
+            "ig_deal_reference": row.get("ig_deal_reference"),
+            "ig_epic": row.get("ig_epic"),
+            "ai_confidence_pct": ai_pct,
+            "quant_confidence_pct": quant_pct,
+            "fast_score": fast_score,
+            "quality_tier": row.get("quality_tier"),
+            "deep_status": row.get("deep_status"),
+            "elite_state": row.get("elite_state"),
+            "execution_basis": row.get("execution_basis"),
+            "entry_level": entry or None,
+            "exit_level": exit_level or None,
+            "size": size or None,
+            "mfe_bps": mfe_bps,
+            "mae_bps": mae_bps,
+            "opened_at": row.get("opened_at"),
+            "closed_at": row.get("closed_at"),
+            "holding_seconds": (
+                round(holding_seconds, 1)
+                if holding_seconds is not None
+                else None
+            ),
+            "broker_pnl": cash_pnl,
+            "broker_pnl_currency": (
+                account_currency
+                if cash_pnl is not None
+                else None
+            ),
+            "broker_pnl_source": pnl_source,
+            "broker_pnl_error": pnl_error,
+            "failed_gates": failed_gates,
+            "diagnostic_flags": flags,
+        }
+
+    @staticmethod
+    def _group_trade_diagnostics(
+        rows: list[Dict[str, Any]],
+        key: str,
+    ) -> Dict[str, Any]:
+        groups: Dict[str, list[Dict[str, Any]]] = {}
+        for row in rows:
+            value = str(
+                row.get(key) or "UNKNOWN"
+            ).upper()
+            groups.setdefault(value, []).append(row)
+
+        output: Dict[str, Any] = {}
+        for name, bucket in groups.items():
+            settled = [
+                row
+                for row in bucket
+                if row.get("broker_result") in {"WIN", "LOSS"}
+            ]
+            wins = [
+                row
+                for row in settled
+                if row.get("broker_result") == "WIN"
+            ]
+            losses = [
+                row
+                for row in settled
+                if row.get("broker_result") == "LOSS"
+            ]
+            pnl_values = [
+                row.get("broker_pnl")
+                for row in settled
+                if row.get("broker_pnl") is not None
+            ]
+            output[name] = {
+                "accepted": len(bucket),
+                "settled": len(settled),
+                "wins": len(wins),
+                "losses": len(losses),
+                "win_rate_pct": (
+                    round(
+                        len(wins) / len(settled) * 100.0,
+                        2,
+                    )
+                    if settled
+                    else 0.0
+                ),
+                "avg_ai_confidence_pct":
+                    IGDemoMirror._mean(
+                        [
+                            row.get("ai_confidence_pct")
+                            for row in settled
+                        ]
+                    ),
+                "avg_quant_confidence_pct":
+                    IGDemoMirror._mean(
+                        [
+                            row.get("quant_confidence_pct")
+                            for row in settled
+                        ]
+                    ),
+                "avg_fast_score":
+                    IGDemoMirror._mean(
+                        [
+                            row.get("fast_score")
+                            for row in settled
+                        ]
+                    ),
+                "broker_pnl": (
+                    round(
+                        sum(float(v) for v in pnl_values),
+                        2,
+                    )
+                    if pnl_values
+                    else None
+                ),
+            }
+        return output
+
+    def phase_trade_analysis(
+        self,
+        phase_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Broker-only forward evidence diagnostics for one phase.
+
+        This deliberately excludes internal/paper W/L from strategy evaluation.
+        """
+        pid = int(
+            phase_id
+            or self._state.get("current_phase_id")
+            or 1
+        )
+
+        try:
+            account = self.refresh_account_snapshot()
+        except Exception:
+            account = self._account_snapshot_from_state()
+
+        account_currency = str(
+            (account or {}).get("currency")
+            or "USD"
+        ).upper()
+
+        source_rows = self._phase_rows(pid)
+        accepted_source = [
+            row
+            for row in source_rows
+            if row.get("ig_deal_id")
+        ]
+
+        trades = [
+            self._phase_trade_detail(
+                row,
+                account_currency,
+            )
+            for row in accepted_source
+        ]
+
+        settled = [
+            row
+            for row in trades
+            if row.get("broker_result") in {"WIN", "LOSS"}
+        ]
+        winners = [
+            row
+            for row in settled
+            if row.get("broker_result") == "WIN"
+        ]
+        losers = [
+            row
+            for row in settled
+            if row.get("broker_result") == "LOSS"
+        ]
+        open_rows = [
+            row
+            for row in trades
+            if row.get("broker_result") not in {"WIN", "LOSS"}
+        ]
+
+        pnl_values = [
+            row.get("broker_pnl")
+            for row in settled
+            if row.get("broker_pnl") is not None
+        ]
+
+        loss_flag_counts: Dict[str, int] = {}
+        for row in losers:
+            for flag in row.get("diagnostic_flags") or []:
+                loss_flag_counts[flag] = (
+                    loss_flag_counts.get(flag, 0) + 1
+                )
+
+        winner_profile = {
+            "count": len(winners),
+            "avg_ai_confidence_pct": self._mean(
+                [row.get("ai_confidence_pct") for row in winners]
+            ),
+            "avg_quant_confidence_pct": self._mean(
+                [row.get("quant_confidence_pct") for row in winners]
+            ),
+            "avg_fast_score": self._mean(
+                [row.get("fast_score") for row in winners]
+            ),
+            "avg_mfe_bps": self._mean(
+                [row.get("mfe_bps") for row in winners]
+            ),
+            "avg_mae_bps": self._mean(
+                [row.get("mae_bps") for row in winners]
+            ),
+        }
+        loser_profile = {
+            "count": len(losers),
+            "avg_ai_confidence_pct": self._mean(
+                [row.get("ai_confidence_pct") for row in losers]
+            ),
+            "avg_quant_confidence_pct": self._mean(
+                [row.get("quant_confidence_pct") for row in losers]
+            ),
+            "avg_fast_score": self._mean(
+                [row.get("fast_score") for row in losers]
+            ),
+            "avg_mfe_bps": self._mean(
+                [row.get("mfe_bps") for row in losers]
+            ),
+            "avg_mae_bps": self._mean(
+                [row.get("mae_bps") for row in losers]
+            ),
+        }
+
+        provisional_findings: list[Dict[str, Any]] = []
+
+        if settled:
+            provisional_findings.append({
+                "type": "SAMPLE_SIZE",
+                "severity": (
+                    "CAUTION"
+                    if len(settled) < 30
+                    else "INFORMATION"
+                ),
+                "message": (
+                    f"{len(settled)} settled IG DEMO trades is still a "
+                    "small forward sample; do not redesign thresholds from "
+                    "win rate alone."
+                ),
+            })
+
+        if loss_flag_counts.get("LOSS_BELOW_30_QUANT", 0):
+            count = loss_flag_counts["LOSS_BELOW_30_QUANT"]
+            provisional_findings.append({
+                "type": "LOW_QUANT_LOSSES",
+                "severity": "WATCH",
+                "count": count,
+                "message": (
+                    f"{count} loss(es) entered with Quant below 30%; "
+                    "compare Boundary evidence against strict Confidence trades."
+                ),
+            })
+
+        if loss_flag_counts.get("POSSIBLE_PROFIT_GIVEBACK", 0):
+            count = loss_flag_counts["POSSIBLE_PROFIT_GIVEBACK"]
+            provisional_findings.append({
+                "type": "EXIT_EFFICIENCY",
+                "severity": "WATCH",
+                "count": count,
+                "message": (
+                    f"{count} loss(es) had meaningful favourable excursion "
+                    "before closing negative; investigate exit/hold logic, "
+                    "not only entry quality."
+                ),
+            })
+
+        if loss_flag_counts.get("HIGH_AI_CONFIDENCE_LOSS", 0):
+            count = loss_flag_counts["HIGH_AI_CONFIDENCE_LOSS"]
+            provisional_findings.append({
+                "type": "CALIBRATION",
+                "severity": "WATCH",
+                "count": count,
+                "message": (
+                    f"{count} loss(es) had AI directional confidence >=60%; "
+                    "confidence may not yet be monotonically calibrated to "
+                    "real IG DEMO outcomes."
+                ),
+            })
+
+        return {
+            "version":
+                "6.8.15-FORWARD-EVIDENCE-DIAGNOSTICS",
+            "environment": "IG_DEMO",
+            "execution_evidence_only": True,
+            "internal_paper_evidence_included": False,
+            "phase_id": pid,
+            "phase_target": self.phase_target,
+            "accepted": len(trades),
+            "settled": len(settled),
+            "open": len(open_rows),
+            "wins": len(winners),
+            "losses": len(losers),
+            "win_rate_pct": (
+                round(
+                    len(winners) / len(settled) * 100.0,
+                    2,
+                )
+                if settled
+                else 0.0
+            ),
+            "broker_pnl": (
+                round(
+                    sum(float(v) for v in pnl_values),
+                    2,
+                )
+                if pnl_values
+                else None
+            ),
+            "broker_pnl_currency": account_currency,
+            "broker_pnl_note": (
+                "Uses explicit broker P&L when present; otherwise an IG "
+                "market-metadata valuation estimate from entry/exit/size."
+            ),
+            "sample_size": len(settled),
+            "sample_size_sufficient_for_threshold_redesign":
+                len(settled) >= 30,
+            "winner_profile": winner_profile,
+            "loser_profile": loser_profile,
+            "loss_diagnostic_counts": loss_flag_counts,
+            "by_class": self._group_trade_diagnostics(
+                trades,
+                "trade_class",
+            ),
+            "by_source": self._group_trade_diagnostics(
+                trades,
+                "evidence_source",
+            ),
+            "winners": winners,
+            "losses_detail": losers,
+            "open_trades": open_rows,
+            "all_accepted_trades": trades,
+            "provisional_findings": provisional_findings,
+        }
 
     def _maybe_roll_phase(self) -> bool:
         """Archive a completed broker-settled phase and create the next phase."""
@@ -1631,7 +2187,7 @@ class IGDemoMirror:
             )
 
             return {
-                "version": "6.8.14-CAP15-CALIBRATION-ADVISORY",
+                "version": "6.8.15-FORWARD-EVIDENCE-DIAGNOSTICS",
                 "broker": self.broker.status(),
                 "enabled": self.enabled,
                 "configured": self.broker.configured(),
@@ -1647,6 +2203,9 @@ class IGDemoMirror:
                 "current_phase_performance": self._phase_stats(),
                 "phase_history": self.phase_history(),
                 "unified_evidence": True,
+                "phase_trade_analysis_available": True,
+                "phase_trade_analysis_endpoint":
+                    "/forward-evidence/analysis",
                 "evidence_sources": [
                     "LEARNING_MIRROR",
                     "COMPOUND",
