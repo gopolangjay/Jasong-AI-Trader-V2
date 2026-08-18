@@ -46,7 +46,7 @@ class EliteCompoundEngine:
     opportunity trail that produced the Compound decision.
     """
 
-    VERSION = "6.8.18"
+    VERSION = "6.8.19"
     DEAL_PREFIX = "JSCMP_"
     LEARNING_PREFIXES = (
         "JASONG_",
@@ -211,6 +211,44 @@ class EliteCompoundEngine:
             20,
             1,
             100000,
+        )
+
+        # V6.8.19 adaptive strategy intelligence. Keep the original AI floor
+        # at 40% and normal Quant at 30%. Quant 28-29.99% can only pass the
+        # conditional path when the selected strategy/regime evidence is strong.
+        self.quant_soft_floor = self._float_env(
+            "STRATEGY_QUANT_SOFT_FLOOR",
+            0.28,
+            0.0,
+            1.0,
+        )
+        self.strategy_confidence_min = self._float_env(
+            "STRATEGY_CONFIDENCE_MIN",
+            0.65,
+            0.0,
+            1.0,
+        )
+        self.strategy_confidence_soft_quant = self._float_env(
+            "STRATEGY_SOFT_QUANT_CONFIDENCE_MIN",
+            0.78,
+            0.0,
+            1.0,
+        )
+        self.strategy_ev_min = self._float_env(
+            "STRATEGY_MIN_EXPECTED_VALUE",
+            0.0,
+            -10.0,
+            10.0,
+        )
+        self.auto_reseed_demo = self._bool_env(
+            "COMPOUND_AUTO_RESEED_DEMO",
+            True,
+        )
+        self.demo_reseed_capital = self._float_env(
+            "COMPOUND_DEMO_RESEED_CAPITAL",
+            2000.0,
+            self.min_cycle_capital,
+            100000000.0,
         )
         self.forward_evidence_source = None
         self.max_spread_bps = self._float_env(
@@ -1198,6 +1236,144 @@ class EliteCompoundEngine:
                     f"{type(exc).__name__}: {exc}",
             }
 
+    @staticmethod
+    def _strategy_mean(values: List[float]) -> float:
+        clean = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+        return sum(clean) / len(clean) if clean else 0.0
+
+    @staticmethod
+    def _strategy_std(values: List[float]) -> float:
+        clean = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+        if len(clean) < 2:
+            return 0.0
+        mean = sum(clean) / len(clean)
+        return math.sqrt(sum((v - mean) ** 2 for v in clean) / len(clean))
+
+    def _adaptive_strategy_assessment(
+        self,
+        row: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Classify regime and select a strategy from recent market evidence.
+
+        This is deliberately transparent and deterministic. AI remains a
+        confirmation gate; the strategy selector prevents one generic signal
+        from being used identically in trend, range and breakout conditions.
+        """
+        returns_raw = row.get("recent_returns") or []
+        returns = []
+        for value in returns_raw[-120:]:
+            try:
+                number = float(value)
+            except Exception:
+                continue
+            if math.isfinite(number):
+                returns.append(number)
+
+        rsi = self._safe_float(row.get("rsi"), 50.0)
+        direction = str(row.get("direction") or "").upper()
+        hist_wr = max(0.0, min(1.0, self._safe_float(row.get("historical_win_rate"), 0.5)))
+        hist_pf = max(0.0, self._safe_float(row.get("historical_profit_factor"), 1.0))
+
+        if len(returns) < 12:
+            return {
+                "market_regime": "UNCERTAIN",
+                "selected_strategy": "NO_TRADE",
+                "strategy_direction": None,
+                "strategy_confidence": 0.0,
+                "strategy_expected_value": -1.0,
+                "strategy_direction_match": False,
+                "strategy_reason": "Insufficient recent returns for regime classification",
+                "strategy_metrics": {"samples": len(returns)},
+            }
+
+        short = returns[-5:]
+        medium = returns[-20:] if len(returns) >= 20 else returns
+        long = returns[-60:] if len(returns) >= 60 else returns
+        mean5 = self._strategy_mean(short)
+        mean20 = self._strategy_mean(medium)
+        mean60 = self._strategy_mean(long)
+        std20 = self._strategy_std(medium)
+        std60 = self._strategy_std(long)
+        last = returns[-1]
+        eps = 1e-12
+
+        trend_strength = abs(mean20) / max(std20, eps)
+        slow_strength = abs(mean60) / max(std60, eps)
+        breakout_z = abs(last - mean20) / max(std20, eps)
+        volatility_ratio = std20 / max(std60, eps)
+        aligned = (mean5 > 0 and mean20 > 0) or (mean5 < 0 and mean20 < 0)
+        slow_aligned = (mean20 > 0 and mean60 >= 0) or (mean20 < 0 and mean60 <= 0)
+
+        if breakout_z >= 1.65 and abs(last) >= max(std20 * 1.35, eps):
+            regime = "BREAKOUT"
+            strategy = "VOLATILITY_BREAKOUT"
+            strategy_direction = "BUY" if last > 0 else "SELL"
+            confidence = min(0.98, 0.58 + 0.12 * min(breakout_z, 3.0) + 0.08 * min(volatility_ratio, 2.0))
+            reason = "Volatility expansion with an outsized directional return"
+        elif aligned and slow_aligned and trend_strength >= 0.18:
+            regime = "TRENDING"
+            strategy = "MULTI_TIMEFRAME_MOMENTUM"
+            strategy_direction = "BUY" if mean20 > 0 else "SELL"
+            confidence = min(0.98, 0.60 + 0.55 * min(trend_strength, 0.5) + 0.10 * min(slow_strength, 0.5))
+            reason = "Fast/medium/slow returns align in one direction"
+        elif trend_strength <= 0.10 and 25.0 <= rsi <= 75.0:
+            regime = "RANGING"
+            strategy = "MEAN_REVERSION"
+            if rsi >= 60:
+                strategy_direction = "SELL"
+            elif rsi <= 40:
+                strategy_direction = "BUY"
+            else:
+                strategy_direction = "BUY" if last < 0 else "SELL"
+            rsi_extreme = min(1.0, abs(rsi - 50.0) / 25.0)
+            confidence = min(0.90, 0.56 + 0.20 * (1.0 - min(trend_strength / 0.10, 1.0)) + 0.12 * rsi_extreme)
+            reason = "Low directional persistence; use controlled mean reversion"
+        elif volatility_ratio >= 1.35 and ((mean20 > 0 and last < 0) or (mean20 < 0 and last > 0)):
+            regime = "HIGH_VOLATILITY_REVERSAL"
+            strategy = "REVERSAL_CONFIRMATION"
+            strategy_direction = "BUY" if last > 0 else "SELL"
+            confidence = min(0.88, 0.55 + 0.15 * min(volatility_ratio - 1.0, 1.5) + 0.08 * min(breakout_z, 2.0))
+            reason = "Volatility expansion opposes the preceding medium-horizon move"
+        else:
+            regime = "UNCERTAIN"
+            strategy = "NO_TRADE"
+            strategy_direction = None
+            confidence = 0.35
+            reason = "No sufficiently clear trend, range, breakout or reversal regime"
+
+        direction_match = bool(strategy_direction and strategy_direction == direction)
+        # Approximate payoff-normalised EV from historical WR/PF, then scale by
+        # current strategy confidence. PF <=1 naturally produces weak/negative EV.
+        if hist_wr > 0:
+            avg_win_to_loss = hist_pf * (1.0 - hist_wr) / max(hist_wr, eps)
+        else:
+            avg_win_to_loss = 0.0
+        blended_p = max(0.01, min(0.99, 0.55 * hist_wr + 0.45 * confidence))
+        expected_value = blended_p * avg_win_to_loss - (1.0 - blended_p)
+
+        return {
+            "market_regime": regime,
+            "selected_strategy": strategy,
+            "strategy_direction": strategy_direction,
+            "strategy_confidence": round(confidence, 6),
+            "strategy_confidence_pct": round(confidence * 100.0, 2),
+            "strategy_expected_value": round(expected_value, 6),
+            "strategy_direction_match": direction_match,
+            "strategy_reason": reason,
+            "strategy_metrics": {
+                "samples": len(returns),
+                "mean5": round(mean5, 8),
+                "mean20": round(mean20, 8),
+                "mean60": round(mean60, 8),
+                "std20": round(std20, 8),
+                "std60": round(std60, 8),
+                "trend_strength": round(trend_strength, 6),
+                "breakout_z": round(breakout_z, 4),
+                "volatility_ratio": round(volatility_ratio, 4),
+                "rsi": round(rsi, 2),
+            },
+        }
+
     def _rank_candidates(
         self,
         capital: float,
@@ -1269,6 +1445,21 @@ class EliteCompoundEngine:
                     0.0,
                 )
             )
+            strategy = self._adaptive_strategy_assessment(row)
+            row.update(strategy)
+            strategy_confidence = self._safe_float(
+                strategy.get("strategy_confidence"), 0.0
+            )
+            strategy_ev = self._safe_float(
+                strategy.get("strategy_expected_value"), -1.0
+            )
+            strategy_direction_match = bool(
+                strategy.get("strategy_direction_match")
+            )
+            strategy_clear = (
+                str(strategy.get("selected_strategy") or "") != "NO_TRADE"
+                and str(strategy.get("market_regime") or "") != "UNCERTAIN"
+            )
 
             row.update({
                 "symbol": symbol,
@@ -1296,9 +1487,23 @@ class EliteCompoundEngine:
                 confidence_reasons.append(
                     f"AI {ai*100:.1f}% < {self.ai_min_confidence*100:.0f}%"
                 )
-            if quant < self.quant_min_confidence:
+            soft_quant_pass = bool(
+                quant >= self.quant_soft_floor
+                and quant < self.quant_min_confidence
+                and strategy_clear
+                and strategy_direction_match
+                and strategy_confidence >= self.strategy_confidence_soft_quant
+                and strategy_ev > self.strategy_ev_min
+                and quality in {"A", "A+"}
+            )
+            quant_pass = bool(
+                quant >= self.quant_min_confidence
+                or soft_quant_pass
+            )
+            if not quant_pass:
                 confidence_reasons.append(
-                    f"Quant {quant*100:.1f}% < {self.quant_min_confidence*100:.0f}%"
+                    f"Quant {quant*100:.1f}% below normal {self.quant_min_confidence*100:.0f}% "
+                    f"and conditional {self.quant_soft_floor*100:.0f}% strategy gate did not pass"
                 )
             if fast < required_fast:
                 confidence_reasons.append(
@@ -1320,12 +1525,35 @@ class EliteCompoundEngine:
                     f"Deep status {deep or '-'} below Elite evidence standard"
                 )
 
+            if not strategy_clear:
+                confidence_reasons.append("Market regime is UNCERTAIN / no strategy selected")
+            if strategy_clear and not strategy_direction_match:
+                confidence_reasons.append("Selected strategy direction disagrees with signal")
+            if strategy_confidence < self.strategy_confidence_min:
+                confidence_reasons.append(
+                    f"Strategy confidence {strategy_confidence*100:.1f}% < "
+                    f"{self.strategy_confidence_min*100:.0f}%"
+                )
+            if strategy_ev <= self.strategy_ev_min:
+                confidence_reasons.append(
+                    f"Strategy expected value {strategy_ev:.3f} <= {self.strategy_ev_min:.3f}"
+                )
+
             confidence_pass = (
                 not technical_invalid
                 and ai >= self.ai_min_confidence
-                and quant >= self.quant_min_confidence
+                and quant_pass
                 and fast >= required_fast
                 and direction_match
+                and strategy_clear
+                and strategy_direction_match
+                and strategy_confidence >= self.strategy_confidence_min
+                and strategy_ev > self.strategy_ev_min
+            )
+            row["quant_gate"] = (
+                "NORMAL_30" if quant >= self.quant_min_confidence
+                else "CONDITIONAL_28_STRATEGY" if soft_quant_pass
+                else "FAIL"
             )
 
             # A confidence-qualified signal MUST get an IG execution preflight.
@@ -1557,6 +1785,8 @@ class EliteCompoundEngine:
         ]
         eligible.sort(
             key=lambda r: (
+                self._safe_float(r.get("strategy_expected_value"), -1.0),
+                self._safe_float(r.get("strategy_confidence"), 0.0),
                 self._safe_float(r.get("elite_base_score"), 0.0),
                 self._safe_float(r.get("model_ai_confidence"), 0.0),
                 self._safe_float(r.get("quant_confidence"), 0.0),
@@ -1977,6 +2207,15 @@ class EliteCompoundEngine:
                     multiple
                 )
             )
+            profitability_viable = bool(
+                break_even is not None
+                and smoothed_probability > break_even
+            )
+            loss_rate = (
+                len(losses) / settled
+                if settled
+                else 1.0
+            )
 
             recovery = {
                 str(streak): (
@@ -2151,6 +2390,8 @@ class EliteCompoundEngine:
                         if break_even is not None
                         else None
                     ),
+                "profitability_viable": profitability_viable,
+                "loss_rate_pct": round(loss_rate * 100.0, 2),
                 "expected_active_multiplier_per_cycle":
                     round(
                         expected_active_multiplier,
@@ -2175,13 +2416,11 @@ class EliteCompoundEngine:
         )
 
         durations = [
-            float(row["median_cycle_hours"])
+            float(row["median_win_hours"])
             for row in rows
-            if row.get("median_cycle_hours")
+            if row.get("median_win_hours")
             is not None
-            and float(
-                row["median_cycle_hours"]
-            ) > 0
+            and float(row["median_win_hours"]) > 0
         ]
         fastest = (
             min(durations)
@@ -2256,9 +2495,8 @@ class EliteCompoundEngine:
                 / 100.0
             )
 
-            duration = row.get(
-                "median_cycle_hours"
-            )
+            # Reward time-to-success only. Fast stop-outs are not a speed advantage.
+            duration = row.get("median_win_hours")
             duration_score = (
                 min(
                     1.0,
@@ -2306,7 +2544,7 @@ class EliteCompoundEngine:
                 else 0.0
             )
 
-            composite = (
+            raw_composite = (
                 probability_score
                 * self.target_weight_probability
                 + duration_score
@@ -2316,6 +2554,9 @@ class EliteCompoundEngine:
                 + reserve_score
                 * self.target_weight_reserve
             ) / weight_total
+            loss_penalty = max(0.0, min(1.0, 1.0 - float(row.get("loss_rate_pct") or 100.0) / 100.0))
+            viability_multiplier = 1.0 if row.get("profitability_viable") else 0.15
+            composite = raw_composite * (0.55 + 0.45 * loss_penalty) * viability_multiplier
 
             row["score_components"] = {
                 "win_probability":
@@ -2358,25 +2599,14 @@ class EliteCompoundEngine:
                 f"{selected:.2f}x target."
             )
         elif enough_all:
+            viable_rows = [row for row in rows if row.get("profitability_viable")]
+            selection_pool = viable_rows if viable_rows else rows
             best = max(
-                rows,
+                selection_pool,
                 key=lambda row: (
-                    float(
-                        row.get(
-                            "composite_score"
-                        )
-                        or 0.0
-                    ),
-                    # Tie preference goes to the middle target because it
-                    # preserves faster recovery without requiring 1.5x.
-                    -abs(
-                        float(
-                            row[
-                                "target_multiple"
-                            ]
-                        )
-                        - 1.3
-                    ),
+                    float(row.get("composite_score") or 0.0),
+                    self._safe_float(row.get("smoothed_win_probability_pct"), 0.0),
+                    -abs(float(row["target_multiple"]) - 1.3),
                 ),
             )
             selected = float(
@@ -2534,11 +2764,39 @@ class EliteCompoundEngine:
         if not enabled:
             return self.status()
         if capital < self.min_cycle_capital:
-            with self._lock:
-                self._state["status"] = "PAUSED_CAPITAL_TOO_LOW"
-                self._state["paused_reason"] = "Current compound capital is below the configured minimum."
-                self._persist()
-            return self.status()
+            if self.auto_reseed_demo and not bool(getattr(self.broker, "live_money_execution", False)):
+                account_balance = self._safe_float(account.get("balance"), 0.0)
+                reseed = min(self.demo_reseed_capital, account_balance)
+                if reseed >= self.min_cycle_capital:
+                    with self._lock:
+                        self._state["campaign_id"] = str(uuid.uuid4())
+                        self._state["campaign_started_at"] = self._now()
+                        self._state["campaign_initial_capital"] = round(reseed, 8)
+                        self._state["current_capital"] = round(reseed, 8)
+                        self._state["reserve_balance"] = 0.0
+                        self._state["total_harvested"] = 0.0
+                        self._state["cycle_number"] = 0
+                        self._state["status"] = "DEMO_RESEEDED_WAITING_FOR_5_PRIME_MARKETS"
+                        self._state["paused_reason"] = None
+                        self._state["last_error"] = None
+                        self._journal(
+                            "COMPOUND_DEMO_AUTO_RESEED",
+                            {"reseed_capital": reseed, "reason": "capital_below_minimum"},
+                        )
+                        self._persist()
+                    capital = reseed
+                else:
+                    with self._lock:
+                        self._state["status"] = "PAUSED_CAPITAL_TOO_LOW"
+                        self._state["paused_reason"] = "Compound capital is depleted and broker balance cannot support the configured demo reseed."
+                        self._persist()
+                    return self.status()
+            else:
+                with self._lock:
+                    self._state["status"] = "PAUSED_CAPITAL_TOO_LOW"
+                    self._state["paused_reason"] = "Current compound capital is below the configured minimum."
+                    self._persist()
+                return self.status()
         if next_cycle_at and self._now() < next_cycle_at:
             with self._lock:
                 self._state["status"] = "COOLDOWN"
@@ -3108,6 +3366,12 @@ class EliteCompoundEngine:
                         candidate.get(
                             "opportunity_age_seconds"
                         ),
+                    "market_regime": candidate.get("market_regime"),
+                    "selected_strategy": candidate.get("selected_strategy"),
+                    "strategy_confidence": candidate.get("strategy_confidence"),
+                    "strategy_expected_value": candidate.get("strategy_expected_value"),
+                    "strategy_direction": candidate.get("strategy_direction"),
+                    "quant_gate": candidate.get("quant_gate"),
                     "intelligence_source":
                         candidate.get(
                             "intelligence_source"
@@ -4289,6 +4553,17 @@ class EliteCompoundEngine:
             "quant_min_confidence": self.quant_min_confidence,
             "fast_score_min": self.fast_score_min,
             "global_fast_score_min": self.global_fast_score_min,
+            "adaptive_strategy_intelligence": {
+                "enabled": True,
+                "ai_min_confidence_pct": round(self.ai_min_confidence * 100.0, 2),
+                "quant_normal_min_pct": round(self.quant_min_confidence * 100.0, 2),
+                "quant_soft_floor_pct": round(self.quant_soft_floor * 100.0, 2),
+                "soft_quant_requires_strategy_confidence_pct": round(self.strategy_confidence_soft_quant * 100.0, 2),
+                "strategy_confidence_min_pct": round(self.strategy_confidence_min * 100.0, 2),
+                "strategy_expected_value_min": self.strategy_ev_min,
+                "regimes": ["TRENDING", "RANGING", "BREAKOUT", "HIGH_VOLATILITY_REVERSAL", "UNCERTAIN"],
+                "strategies": ["MULTI_TIMEFRAME_MOMENTUM", "MEAN_REVERSION", "VOLATILITY_BREAKOUT", "REVERSAL_CONFIRMATION", "NO_TRADE"],
+            },
             "prime_execution": {
                 "enabled": True,
                 "quality_tiers": ["A", "A+"],
