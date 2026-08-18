@@ -7104,13 +7104,13 @@ COMPOUND_ENGINE.set_forward_evidence_source(
 
 
 # ============================================================
-# V6.9 SPECIALIST MARKET CATEGORY INTEGRATION
+# V6.9.2 COMPLETE SPECIALIST MARKET CATEGORY INTEGRATION
 # ============================================================
 # Additive integration over the existing V6.8.19 Compound engine.
 # The current Compound execution, forward evidence, adaptive target,
 # reconciliation and IG DEMO protections remain in place.
 
-def _v690_specialist_frame(seed: dict):
+def _v692_specialist_frame(seed: dict):
     loader = globals().get("_v673_global_market_data")
     if callable(loader):
         raw = loader(seed)
@@ -7161,24 +7161,24 @@ except Exception:
     pass
 
 
-V690_SPECIALIST_SYSTEM = install_specialist_market_system(
+V692_SPECIALIST_SYSTEM = install_specialist_market_system(
     app=app,
     broker=IG_DEMO_BROKER,
     compound_engine=COMPOUND_ENGINE,
-    frame_func=_v690_specialist_frame,
+    frame_func=_v692_specialist_frame,
     ownership_components=[
         globals().get("IG_DEMO_MIRROR")
     ],
 )
 
 CATEGORY_STRATEGY_ENGINE = (
-    V690_SPECIALIST_SYSTEM["intelligence"]
+    V692_SPECIALIST_SYSTEM["intelligence"]
 )
 CATEGORY_PORTFOLIO_ENGINE = (
-    V690_SPECIALIST_SYSTEM["portfolio"]
+    V692_SPECIALIST_SYSTEM["portfolio"]
 )
 
-# The verified V6.9 category engine implements the V6.8.x compatibility
+# The verified V6.9.2 category engine implements the V6.8.x compatibility
 # methods used by the existing /global-markets/* endpoints.
 GLOBAL_MARKET_ENGINE = CATEGORY_STRATEGY_ENGINE
 
