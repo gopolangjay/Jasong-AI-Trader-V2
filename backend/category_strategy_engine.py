@@ -537,6 +537,13 @@ class CategoryStrategyEngine:
         self.frame_func = frame_func
         self.state_path = state_path
         self.scan_interval_seconds = max(90, int(scan_interval_seconds or os.getenv("CATEGORY_SCAN_INTERVAL_SECONDS", "180")))
+        # Compatibility with the existing V6.8.x /global-markets/opportunity-board
+        # endpoint. Specialist rankings are refreshed from already-evaluated
+        # evidence without triggering another heavy market-data scan.
+        self.eligibility_refresh_seconds = max(
+            15,
+            int(os.getenv("CATEGORY_ELIGIBILITY_REFRESH_SECONDS", "15")),
+        )
         self.batch_size = max(3, min(18, int(batch_size or os.getenv("CATEGORY_SCAN_BATCH_SIZE", "6"))))
         self.candidate_ttl_seconds = max(300, int(os.getenv("CATEGORY_CANDIDATE_TTL_SECONDS", "1800")))
         self._lock = threading.RLock()
@@ -921,6 +928,36 @@ class CategoryStrategyEngine:
         )
         return rows
 
+    # ------------------------------------------------------------------
+    # V6.8.x global-market compatibility surface
+    # ------------------------------------------------------------------
+    # backend/main.py already exposes /global-markets/* routes. Once the
+    # specialist engine becomes GLOBAL_MARKET_ENGINE those routes must remain
+    # callable instead of failing on missing methods.
+    def opportunity_board(self, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        rows = self.candidates()
+        rows.sort(
+            key=lambda row: (
+                bool(row.get("standard_eligible")),
+                bool(row.get("compound_eligible")),
+                _safe_float(row.get("category_rank_score")),
+                _safe_float(row.get("smart_fast_score")),
+            ),
+            reverse=True,
+        )
+        return rows[:limit]
+
+    def refresh_opportunity_board(self) -> Dict[str, Any]:
+        rows = self.opportunity_board(limit=100)
+        return {
+            "version": self.VERSION,
+            "count": len(rows),
+            "eligibility_refresh_seconds": self.eligibility_refresh_seconds,
+            "opportunities": rows,
+            "live_money_execution": False,
+        }
+
     def correlation_matrix(self) -> Dict[str, Dict[str, float]]:
         rows = self.candidates()
         series: Dict[str, List[float]] = {}
@@ -971,6 +1008,18 @@ class CategoryStrategyEngine:
                 "compound_ready": compound,
                 "top": rows[0] if rows else None,
             }
+
+        evaluated_by_asset_class: Dict[str, int] = {}
+        for row in self._fresh_rows():
+            asset_class = str(
+                row.get("asset_class")
+                or row.get("category")
+                or "UNKNOWN"
+            ).upper().strip()
+            evaluated_by_asset_class[asset_class] = (
+                evaluated_by_asset_class.get(asset_class, 0) + 1
+            )
+
         with self._lock:
             return {
                 "version": self.VERSION,
@@ -989,6 +1038,12 @@ class CategoryStrategyEngine:
                 "fresh_evaluations": len(self._fresh_rows()),
                 "standard_ready": standard_ready,
                 "compound_ready": compound_ready,
+                # Backward-compatible names consumed by the existing
+                # V6.8.x /global-markets status/dashboard surface.
+                "elite_ready": compound_ready,
+                "evaluated_by_asset_class": evaluated_by_asset_class,
+                "eligibility_refresh_seconds": self.eligibility_refresh_seconds,
+                "heavy_scan_seconds": self.scan_interval_seconds,
                 "top_n_per_category": TOP_N_PER_CATEGORY,
                 "compound_slots_per_category": COMPOUND_SLOTS_PER_CATEGORY,
                 "runs": int(self._state.get("runs") or 0),
