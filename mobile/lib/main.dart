@@ -158,10 +158,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
-  // V6.8.1 global multi-market intelligence.
+  // V6.8.19 global multi-market + adaptive strategy intelligence.
   Map<String, dynamic>? globalMarketsStatus;
   List<Map<String, dynamic>> globalMarketCandidates = [];
   bool globalMarketsBusy = false;
+
+  Map<String, dynamic>? compoundStatusDirect;
+  Map<String, dynamic>? forwardRegime;
+  Map<String, dynamic>? strategyIntelligence;
+  Map<String, dynamic>? opportunityBoard;
 
   Timer? watcherPollTimer;
   Timer? autoDashboardPollTimer;
@@ -1527,7 +1532,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         timeoutSeconds: 60,
       );
       final candidates = await getJson(
-        Uri.parse('$apiBase/global-markets/candidates').replace(
+        Uri.parse('$apiBase/global-markets/opportunity-board').replace(
           queryParameters: {'limit': '60'},
         ),
         timeoutSeconds: 60,
@@ -1535,13 +1540,62 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         globalMarketsStatus = status;
-        final raw = candidates['candidates'];
+        final raw = candidates['opportunities'] ?? candidates['candidates'];
         globalMarketCandidates = raw is List
             ? raw.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList()
             : [];
       });
     } catch (_) {
       // Supplemental dashboard. Keep last known snapshot on one failed poll.
+    }
+  }
+
+  Future<void> loadV6819Architecture() async {
+    try {
+      final compoundFuture = getJson(
+        Uri.parse('$apiBase/compound/status'),
+        timeoutSeconds: 45,
+      );
+      final regimeFuture = getJson(
+        Uri.parse('$apiBase/forward-evidence/regime'),
+        timeoutSeconds: 45,
+      );
+      final strategyFuture = getJson(
+        Uri.parse('$apiBase/compound/strategy-intelligence'),
+        timeoutSeconds: 45,
+      );
+      final boardFuture = getJson(
+        Uri.parse('$apiBase/global-markets/opportunity-board').replace(
+          queryParameters: {'limit': '60'},
+        ),
+        timeoutSeconds: 45,
+      );
+
+      final results = await Future.wait([
+        compoundFuture,
+        regimeFuture,
+        strategyFuture,
+        boardFuture,
+      ]);
+
+      if (!mounted) return;
+
+      setState(() {
+        compoundStatusDirect = results[0];
+        forwardRegime = results[1];
+        strategyIntelligence = results[2];
+        opportunityBoard = results[3];
+
+        final raw = results[3]['opportunities'];
+        if (raw is List) {
+          globalMarketCandidates = raw
+              .whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+        }
+      });
+    } catch (_) {
+      // Keep last known V6.8.19 architecture snapshot.
     }
   }
 
@@ -2136,7 +2190,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     autoDashboardPollTimer =
         Timer.periodic(
       const Duration(
-        seconds: 20,
+        seconds: 15,
       ),
       (_) {
         loadAutoDashboard();
@@ -2144,6 +2198,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         loadAiLearningStatus();
         loadOvernightDemoStatus();
         loadGlobalMarkets();
+        loadV6819Architecture();
       },
     );
 
@@ -2165,6 +2220,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     Future.microtask(
       loadGlobalMarkets,
+    );
+
+    Future.microtask(
+      loadV6819Architecture,
     );
   }
 
@@ -3364,6 +3423,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       loadAutoDashboard,
     );
 
+    Future.microtask(
+      loadV6819Architecture,
+    );
+
     startAutoDashboardPolling();
   }
 
@@ -3380,6 +3443,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Future.microtask(loadAiLearningStatus);
       Future.microtask(loadSystemOverview);
       Future.microtask(loadGlobalMarkets);
+      Future.microtask(loadV6819Architecture);
     }
   }
 
@@ -3990,9 +4054,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final summary = dashboard['summary'] is Map
         ? Map<String, dynamic>.from(dashboard['summary'] as Map)
         : <String, dynamic>{};
-    final compound = dashboard['compound'] is Map
+    final dashboardCompound = dashboard['compound'] is Map
         ? Map<String, dynamic>.from(dashboard['compound'] as Map)
         : <String, dynamic>{};
+    final compound = compoundStatusDirect != null &&
+            compoundStatusDirect!.isNotEmpty
+        ? Map<String, dynamic>.from(compoundStatusDirect!)
+        : dashboardCompound;
     final compoundStatus =
         compound['status']?.toString().toUpperCase() ?? 'STOPPED';
     final compoundEnabled = compound['enabled'] == true;
@@ -4034,6 +4102,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final compoundBridgeState =
         compound['intelligence_bridge_state']?.toString().toUpperCase() ??
             'IDLE';
+
+    final targetOptimizerHome = compound['target_optimizer'] is Map
+        ? Map<String, dynamic>.from(compound['target_optimizer'] as Map)
+        : <String, dynamic>{};
+    final homeTargetMultiple = double.tryParse(
+          '${targetOptimizerHome['selected_target_multiple'] ?? compoundCurrent['target_multiple'] ?? 1.5}',
+        ) ??
+        1.5;
+    final homeTargetPct = double.tryParse(
+          '${targetOptimizerHome['selected_profit_target_pct'] ?? 50}',
+        ) ??
+        50.0;
+    final requiredPrimeMarkets = int.tryParse(
+          '${compound['required_basket_positions'] ?? 5}',
+        ) ??
+        5;
+    final basketAssemblyHome = compound['basket_assembly'] is Map
+        ? Map<String, dynamic>.from(compound['basket_assembly'] as Map)
+        : <String, dynamic>{};
+    final primeQueueNow = int.tryParse(
+          '${basketAssemblyHome['eligible_now'] ?? 0}',
+        ) ??
+        0;
+    final regimeHome = forwardRegime ?? <String, dynamic>{};
+    final regimeModeHome =
+        regimeHome['mode']?.toString().toUpperCase() ?? 'UNKNOWN';
+    final recentRegimeHome = regimeHome['recent'] is Map
+        ? Map<String, dynamic>.from(regimeHome['recent'] as Map)
+        : <String, dynamic>{};
+    final recentBrokerWrHome = double.tryParse(
+          '${recentRegimeHome['win_rate_pct'] ?? 0}',
+        ) ??
+        0.0;
 
     final integrity = integrityStatus ??
         (dashboard['integrity'] is Map
@@ -4573,7 +4674,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                igBalance != null ? 'IG funds' : 'Reference balance',
+                igBalance != null ? 'IG funds' : 'Model reference',
                 igBalance != null
                     ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}'
                     : '$paperBalance',
@@ -4649,7 +4750,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'JASONG ELITE COMPOUND',
+                            'JASONG ADAPTIVE COMPOUND',
                             style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w900,
@@ -4657,7 +4758,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            '+50% basket • 20% harvest • AI ≥40% • best 1–5 markets',
+                            'Adaptive 1.2× / 1.3× / 1.5× • exactly 5 PRIME markets • AI ≥40% • Quant 30% / 28% conditional',
                             style: TextStyle(
                               color: Colors.white.withValues(alpha: .52),
                               fontSize: 11,
@@ -4706,8 +4807,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   children: [
                     Expanded(
                       child: _midnightValue(
-                        'Compound',
-                        '$compoundOpen / $compoundMax',
+                        'Compound PRIME',
+                        '$compoundOpen / $requiredPrimeMarkets',
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -4751,6 +4852,56 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Adaptive target',
+                        '${homeTargetMultiple.toStringAsFixed(1)}× (+${homeTargetPct.toStringAsFixed(0)}%)',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'PRIME queue',
+                        '$primeQueueNow / $requiredPrimeMarkets',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Regime guard',
+                        regimeModeHome,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Recent broker WR',
+                        '${recentBrokerWrHome.toStringAsFixed(1)}%',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: _MidnightValue(
+                        'Assessment',
+                        '15 sec',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: _MidnightValue(
+                        'Execution',
+                        'PRIME',
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 9),
                 Container(
                   width: double.infinity,
@@ -4772,7 +4923,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const SizedBox(width: 7),
                       Expanded(
                         child: Text(
-                          'Live Intelligence ↔ Compound: '
+                          'V6.8.19 Strategy ↔ Compound: '
                           '${compoundBridgeState.replaceAll('_', ' ')}'
                           '${compoundPending > 0 ? ' • $compoundPending Elite ready' : ''}',
                           style: const TextStyle(
@@ -4791,7 +4942,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: FilledButton.icon(
                     onPressed: openCompoundDashboard,
                     icon: const Icon(Icons.dashboard_customize_rounded),
-                    label: const Text('Open Compound Strategy'),
+                    label: const Text('Open Adaptive Compound'),
                   ),
                 ),
               ],
@@ -4919,15 +5070,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: watcherCard(w),
                 )),
           const SizedBox(height: 10),
-          sectionTitle('V6.5 learning policy'),
+          sectionTitle('V6.8.19 execution policy'),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Normal forward path', '≥ 30%', 'Verified + live direction agrees'),
+                _MidnightRuleRow('AI directional gate', '≥ 40%', 'Required before broker execution'),
                 Divider(height: 24),
-                _MidnightRuleRow('AI forward path', '≥ 40%', 'AI approves + direction agrees'),
+                _MidnightRuleRow('Quant normal gate', '≥ 30%', 'Normal PRIME path'),
                 Divider(height: 24),
-                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
+                _MidnightRuleRow('Quant conditional gate', '28–29.99%', 'Exceptional strategy evidence required'),
+                Divider(height: 24),
+                _MidnightRuleRow('Execution quality', 'PRIME', 'A/A+ + regime + history + forward guard'),
+                Divider(height: 24),
+                _MidnightRuleRow('Broker execution', 'IG DEMO', 'No paper execution'),
               ],
             ),
           ),
@@ -5452,20 +5607,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           const SizedBox(height: 20),
           sectionTitle(
-            'Model forward evidence',
+            'Model observation evidence',
             subtitle:
-                'V6 AI-learning entries • open trades count immediately; W/L only after settlement',
+                'Non-broker model observations • genuine execution evidence is tracked separately by IG DEMO',
           ),
           Row(
             children: [
               statTile(
-                'Model entries',
+                'Observations',
                 '$forwardTrades',
                 Icons.receipt_long_outlined,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Open model',
+                'Open observations',
                 '$modelOpen',
                 Icons.hourglass_top_rounded,
               ),
@@ -5475,13 +5630,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Settled model',
+                'Settled observations',
                 '$modelSettled',
                 Icons.fact_check_outlined,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Model W / L',
+                'Observation W / L',
                 '$modelWins / $modelLosses',
                 Icons.insights_rounded,
               ),
@@ -5491,13 +5646,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Model WR',
+                'Observation WR',
                 '${formatNumber(forwardWr, decimals: 1)}%',
                 Icons.percent_rounded,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Broker matched',
+                'Matched to IG',
                 '$modelBrokerMatched',
                 Icons.link_rounded,
               ),
@@ -5507,7 +5662,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Model P&L',
+                'Observation P&L',
                 formatMoney(totalPnl),
                 Icons.analytics_outlined,
                 valueColor:
@@ -6543,7 +6698,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'IG DEMO forward learning stays active alongside Compound. Compound selects up to 5 broker positions, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
+                  'IG DEMO forward evidence stays active alongside Adaptive Compound. Compound waits for exactly 5 PRIME markets, applies regime-specific strategy validation, uses an adaptive 1.2× / 1.3× / 1.5× target, and retains the -15% basket stop.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -6556,7 +6711,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: OutlinedButton.icon(
                     onPressed: openCompoundDashboard,
                     icon: const Icon(Icons.open_in_new_rounded),
-                    label: const Text('Open Elite Compound'),
+                    label: const Text('Open Adaptive Compound'),
                   ),
                 ),
               ],
@@ -7156,7 +7311,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.8.1 • Rolling IG DEMO Forward Learning', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.8.19 • Adaptive Strategy Intelligence • IG DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
                 ],
               ),
             ),
@@ -7171,6 +7326,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               await loadAiLearningStatus();
               await loadOvernightDemoStatus();
               await loadGlobalMarkets();
+              await loadV6819Architecture();
               await refreshServerWatchers();
             },
             icon: const Icon(Icons.refresh_rounded),
@@ -7185,6 +7341,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           await loadAiLearningStatus();
           await loadOvernightDemoStatus();
           await loadGlobalMarkets();
+          await loadV6819Architecture();
           await refreshServerWatchers();
           if (selectedTab == 0) {
             await refreshSignal();
@@ -7475,7 +7632,7 @@ class _CompoundDashboardScreenState
                 'Close compound basket?',
               ),
               content: const Text(
-                'This closes only JASONG Elite Compound IG DEMO positions. '
+                'This closes only JASONG Adaptive Compound IG DEMO positions. '
                 'The completed cycle will be recorded using the realised broker result.',
               ),
               actions: [
@@ -7658,6 +7815,28 @@ class _CompoundDashboardScreenState
           )
         : <String, dynamic>{};
 
+    final targetOptimizer = data['target_optimizer'] is Map
+        ? Map<String, dynamic>.from(data['target_optimizer'] as Map)
+        : <String, dynamic>{};
+    final selectedTargetMultiple = _number(
+      current['target_multiple'] ??
+          targetOptimizer['selected_target_multiple'] ??
+          1.5,
+      fallback: 1.5,
+    );
+    final selectedTargetPct = _number(
+      targetOptimizer['selected_profit_target_pct'] ??
+          ((selectedTargetMultiple - 1.0) * 100.0),
+      fallback: 50.0,
+    );
+    final targetSelectionState =
+        targetOptimizer['selection_state']?.toString().toUpperCase() ??
+            'ADAPTIVE';
+    final requiredBasketPositions = int.tryParse(
+          '${data['required_basket_positions'] ?? 5}',
+        ) ??
+        5;
+
     final positions = data['compound_broker_positions'] is List
         ? (data['compound_broker_positions'] as List)
             .whereType<Map>()
@@ -7737,8 +7916,7 @@ class _CompoundDashboardScreenState
     final cycleNumber = data['cycle_number'] ?? 0;
     final runningPnl = current['running_pnl'] ?? 0;
     final targetProfit = current['target_profit'] ??
-        (_number(currentCapital) *
-            _number(rules['profit_target_pct'], fallback: .50));
+        (_number(currentCapital) * (selectedTargetPct / 100.0));
     final stopAmount = current['stop_loss_amount'] ??
         (_number(currentCapital) *
             _number(rules['stop_loss_pct'], fallback: .15));
@@ -7757,18 +7935,18 @@ class _CompoundDashboardScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: const Column(
+        title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Elite Compound',
+            const Text(
+              'Adaptive Compound',
               style: TextStyle(
                 fontWeight: FontWeight.w900,
               ),
             ),
             Text(
-              'V6.7.2 • IG DEMO ONLY',
-              style: TextStyle(
+              'V${data['version'] ?? '6.8.19'} • IG DEMO ONLY',
+              style: const TextStyle(
                 fontSize: 10,
                 color: Colors.white54,
               ),
@@ -7808,7 +7986,7 @@ class _CompoundDashboardScreenState
                     children: [
                       Expanded(
                         child: Text(
-                          'JASONG ELITE 80/20 COMPOUND',
+                          'JASONG ADAPTIVE 80/20 COMPOUND',
                           style: const TextStyle(
                             fontSize: 17,
                             fontWeight:
@@ -7843,7 +8021,7 @@ class _CompoundDashboardScreenState
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Best available 1–5 markets • no forced filler trades • live-money execution hard OFF',
+                    'Exactly 5 PRIME markets • 15-second assessment • adaptive regime strategy • live-money execution OFF',
                     style: TextStyle(
                       color: Colors.white54,
                       fontSize: 11,
@@ -7925,7 +8103,7 @@ class _CompoundDashboardScreenState
                   if (pendingElite.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(
-                      '${pendingElite.length} Elite setup(s) are ready. '
+                      '${pendingElite.length} PRIME setup(s) are ready. '
                       '${blockers.isNotEmpty ? 'Execution is queued until the broker is clean.' : 'Compound can execute immediately after final broker preflight.'}',
                       style: const TextStyle(
                         color: Color(0xFF67F0C1),
@@ -7992,8 +8170,8 @@ class _CompoundDashboardScreenState
                 ),
                 const SizedBox(width: 8),
                 _metric(
-                  'Open elite',
-                  '${positions.length} / ${rules['max_positions'] ?? 5}',
+                  'Compound PRIME',
+                  '${positions.length} / $requiredBasketPositions',
                 ),
               ],
             ),
@@ -8010,7 +8188,7 @@ class _CompoundDashboardScreenState
                 ),
                 const SizedBox(width: 8),
                 _metric(
-                  'Target',
+                  'Target ${selectedTargetMultiple.toStringAsFixed(1)}×',
                   '+${currency.isNotEmpty ? '$currency ' : ''}${_money(targetProfit)}',
                 ),
               ],
@@ -8041,9 +8219,9 @@ class _CompoundDashboardScreenState
                 children: [
                   Row(
                     children: [
-                      const Text(
-                        '+50% target progress',
-                        style: TextStyle(
+                      Text(
+                        '+${selectedTargetPct.toStringAsFixed(0)}% target progress • $targetSelectionState',
+                        style: const TextStyle(
                           fontWeight:
                               FontWeight.w800,
                           fontSize: 11,
@@ -8242,8 +8420,12 @@ class _CompoundDashboardScreenState
               child: Column(
                 children: [
                   _ruleRow(
-                    'Basket take-profit',
-                    '+${_percent01(rules['profit_target_pct'] ?? .50)}',
+                    'Adaptive target',
+                    '${selectedTargetMultiple.toStringAsFixed(1)}× (+${selectedTargetPct.toStringAsFixed(0)}%)',
+                  ),
+                  _ruleRow(
+                    'Target mode',
+                    targetSelectionState,
                   ),
                   _ruleRow(
                     'Basket stop',
@@ -8257,26 +8439,13 @@ class _CompoundDashboardScreenState
                     'Profit compounded',
                     _percent01(rules['profit_compound_pct'] ?? .80),
                   ),
-                  _ruleRow(
-                    'Model-AI minimum',
-                    _percent01(rules['model_ai_min_confidence'] ?? .40),
-                  ),
-                  _ruleRow(
-                    'Quant minimum',
-                    _percent01(rules['quant_min_confidence'] ?? .30),
-                  ),
-                  _ruleRow(
-                    'Fast score minimum',
-                    '${_number(rules['fast_score_min'], fallback: 90).toStringAsFixed(0)}+',
-                  ),
-                  _ruleRow(
-                    'Quality',
-                    'A / A+',
-                  ),
-                  _ruleRow(
-                    'Maximum positions',
-                    '${rules['max_positions'] ?? 5}',
-                  ),
+                  _ruleRow('AI minimum', '40%'),
+                  _ruleRow('Quant normal', '30%'),
+                  _ruleRow('Quant conditional', '28–29.99%'),
+                  _ruleRow('FX Fast minimum', '90+'),
+                  _ruleRow('Global Fast minimum', '70+'),
+                  _ruleRow('Execution quality', 'PRIME • A / A+'),
+                  _ruleRow('Required basket', 'Exactly $requiredBasketPositions'),
                   _ruleRow(
                     'Reserve reused',
                     'NO',
@@ -8290,7 +8459,27 @@ class _CompoundDashboardScreenState
             ),
             const SizedBox(height: 20),
             const Text(
-              'Current Elite basket',
+              'Adaptive strategy intelligence',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            _card(
+              child: Column(
+                children: [
+                  _ruleRow('TRENDING', 'MULTI-TIMEFRAME MOMENTUM'),
+                  _ruleRow('RANGING', 'MEAN REVERSION'),
+                  _ruleRow('BREAKOUT', 'VOLATILITY BREAKOUT'),
+                  _ruleRow('HIGH-VOL REVERSAL', 'REVERSAL CONFIRMATION'),
+                  _ruleRow('UNCERTAIN', 'NO TRADE'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Current PRIME basket',
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w900,
@@ -8300,7 +8489,7 @@ class _CompoundDashboardScreenState
             if (positions.isEmpty)
               _card(
                 child: const Text(
-                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
+                  'No PRIME Compound positions are open. The engine reassesses opportunities every 15 seconds and waits for five PRIME, diversified, broker-accepted IG DEMO markets before starting the adaptive cycle.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
