@@ -41,15 +41,20 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   List<Map<String, dynamic>> selections = const [];
 
   bool busy = false;
+  bool _refreshInFlight = false;
   String? error;
   Timer? livePollTimer;
+  DateTime? lastGoodRefreshAt;
+  final http.Client _client = http.Client();
 
   @override
   void initState() {
     super.initState();
     refreshAll();
+    // The backend already refreshes its intelligence continuously.
+    // Poll at 30s to avoid mobile request bursts against Render.
     livePollTimer = Timer.periodic(
-      const Duration(seconds: 15),
+      const Duration(seconds: 30),
       (_) => refreshAll(silent: true),
     );
   }
@@ -57,22 +62,64 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   @override
   void dispose() {
     livePollTimer?.cancel();
+    _client.close();
     super.dispose();
   }
 
-  Future<Map<String, dynamic>> _get(String path) async {
-    final response = await http
+  bool _isTransientBackendError(Object value) {
+    final text = value.toString().toLowerCase();
+    return value is TimeoutException ||
+        value is SocketException ||
+        value is http.ClientException ||
+        text.contains('http 502') ||
+        text.contains('http 503') ||
+        text.contains('http 504') ||
+        text.contains('connection reset') ||
+        text.contains('connection closed') ||
+        text.contains('timed out') ||
+        text.contains('timeout');
+  }
+
+  String _friendlyError(Object value) {
+    final text = value.toString().toLowerCase();
+    if (text.contains('502')) {
+      return 'Market server is temporarily busy (HTTP 502). Last good market data is being kept. Automatic retry is active.';
+    }
+    if (text.contains('503')) {
+      return 'Market server is temporarily unavailable (HTTP 503). Last good market data is being kept. Automatic retry is active.';
+    }
+    if (text.contains('504') || value is TimeoutException) {
+      return 'Market request timed out. Last good market data is being kept. Automatic retry is active.';
+    }
+    if (value is SocketException || value is http.ClientException) {
+      return 'Network connection interrupted. Last good market data is being kept. Automatic retry is active.';
+    }
+    if (value is FormatException) {
+      return 'The server returned an invalid response. Last good market data is still displayed.';
+    }
+    return 'Could not refresh market intelligence. Last good market data is still displayed.';
+  }
+
+  Future<Map<String, dynamic>> _get(
+    String path, {
+    int timeoutSeconds = 40,
+  }) async {
+    final response = await _client
         .get(
           Uri.parse('${widget.apiBase}$path'),
-          headers: const {
-            'Accept': 'application/json',
-            'Connection': 'close',
-          },
+          headers: const {'Accept': 'application/json'},
         )
-        .timeout(const Duration(seconds: 60));
+        .timeout(Duration(seconds: timeoutSeconds));
 
     if (response.statusCode != 200) {
-      throw HttpException('HTTP ${response.statusCode}: ${response.body}');
+      // Do not put Render's full HTML error page into the Flutter widget tree.
+      throw HttpException('HTTP ${response.statusCode}');
+    }
+
+    final contentType = response.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().contains('json') &&
+        response.body.trimLeft().startsWith('<')) {
+      throw const FormatException('Backend returned HTML instead of JSON');
     }
 
     final decoded = jsonDecode(response.body);
@@ -82,21 +129,48 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     return Map<String, dynamic>.from(decoded);
   }
 
+  Future<Map<String, dynamic>> _getWithRetry(
+    String path, {
+    int attempts = 2,
+  }) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await _get(path);
+      } catch (e) {
+        lastError = e;
+        if (!_isTransientBackendError(e) || attempt >= attempts) {
+          rethrow;
+        }
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+    throw lastError ?? const HttpException('Market request failed');
+  }
+
+  Future<Map<String, dynamic>?> _optionalGet(String path) async {
+    try {
+      return await _getWithRetry(path);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>> _post(String path) async {
-    final response = await http
+    final response = await _client
         .post(
           Uri.parse('${widget.apiBase}$path'),
           headers: const {
             'Accept': 'application/json',
             'Content-Type': 'application/json',
-            'Connection': 'close',
           },
           body: '{}',
         )
         .timeout(const Duration(seconds: 180));
 
     if (response.statusCode != 200) {
-      throw HttpException('HTTP ${response.statusCode}: ${response.body}');
+      // A POST may already have reached the backend, so do not auto-repeat it.
+      throw HttpException('HTTP ${response.statusCode}');
     }
 
     final decoded = jsonDecode(response.body);
@@ -125,7 +199,8 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   }
 
   Future<void> refreshAll({bool silent = false}) async {
-    if (busy && !silent) return;
+    if (_refreshInFlight) return;
+    _refreshInFlight = true;
 
     if (!silent && mounted) {
       setState(() {
@@ -134,26 +209,49 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
       });
     }
 
+    Object? criticalError;
     try {
-      final results = await Future.wait<Map<String, dynamic>>([
-        _get('/market-categories/status'),
-        _get('/market-categories/$selected'),
-        _get('/category-portfolio/status'),
-        _get('/forward-validation/status'),
-      ]);
+      // Fetch the selected ranking first because this is the data the user is
+      // actually looking at. The remaining status calls are deliberately
+      // sequential and optional, avoiding the four-request burst that was
+      // causing Render 502 responses in the previous mobile build.
+      Map<String, dynamic>? categoryPayload;
+      try {
+        categoryPayload = await _getWithRetry(
+          '/market-categories/$selected',
+          attempts: 2,
+        );
+      } catch (e) {
+        criticalError = e;
+      }
+
+      final statusPayload = await _optionalGet('/market-categories/status');
+      final portfolioPayload = await _optionalGet('/category-portfolio/status');
+      final forwardPayload = await _optionalGet('/forward-validation/status');
 
       if (!mounted) return;
       setState(() {
-        systemStatus = results[0];
-        selections = _mapList(results[1]['selections']);
-        portfolioStatus = results[2];
-        forwardStatus = results[3];
-        error = null;
+        if (categoryPayload != null) {
+          final next = _mapList(categoryPayload['selections']);
+          selections = next;
+          lastGoodRefreshAt = DateTime.now();
+        }
+        if (statusPayload != null) systemStatus = statusPayload;
+        if (portfolioPayload != null) portfolioStatus = portfolioPayload;
+        if (forwardPayload != null) forwardStatus = forwardPayload;
+
+        if (criticalError != null) {
+          // Silent polls still surface one compact warning, but never raw HTML.
+          error = _friendlyError(criticalError!);
+        } else {
+          error = null;
+        }
       });
     } catch (e) {
-      if (!mounted || silent) return;
-      setState(() => error = e.toString());
+      if (!mounted) return;
+      setState(() => error = _friendlyError(e));
     } finally {
+      _refreshInFlight = false;
       if (!silent && mounted) {
         setState(() => busy = false);
       }
@@ -179,7 +277,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
       await _post(path);
       await refreshAll(silent: true);
     } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+      if (mounted) setState(() => error = _friendlyError(e));
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -558,7 +656,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
                     ),
                     SizedBox(height: 3),
                     Text(
-                      'V6.9.4-forward • live categories • IG DEMO',
+                      'V6.9.4-forward • broker-settled categories • IG DEMO',
                       style: TextStyle(color: Colors.white54, fontSize: 9.5),
                     ),
                   ],
