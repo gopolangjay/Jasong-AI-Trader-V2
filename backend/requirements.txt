@@ -7,3 +7,4 @@ yfinance>=0.2.40
 sqlalchemy>=2.0
 pydantic>=2.8
 openai>=1.0.0
+mcp>=2.0.0
