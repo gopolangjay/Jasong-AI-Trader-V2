@@ -92,6 +92,7 @@ class _JasongShellState extends State<JasongShell>
   String? error;
   DateTime? lastUpdated;
   Timer? refreshTimer;
+  final http.Client _client = http.Client();
 
   Map<String, dynamic> marketStatus = {};
   Map<String, dynamic> portfolioStatus = {};
@@ -106,9 +107,15 @@ class _JasongShellState extends State<JasongShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     Future.microtask(refreshAll);
+    // Keep the shell light. The Markets tab has its own focused poller,
+    // so do not run the seven-endpoint shell refresh at the same time.
     refreshTimer = Timer.periodic(
-      const Duration(seconds: 15),
-      (_) => refreshAll(silent: true),
+      const Duration(seconds: 30),
+      (_) {
+        if (selectedTab != 1) {
+          refreshAll(silent: true);
+        }
+      },
     );
   }
 
@@ -116,6 +123,7 @@ class _JasongShellState extends State<JasongShell>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     refreshTimer?.cancel();
+    _client.close();
     super.dispose();
   }
 
@@ -126,43 +134,87 @@ class _JasongShellState extends State<JasongShell>
     }
   }
 
-  Future<Map<String, dynamic>> _get(
-    String path, {
-    int timeoutSeconds = 60,
-  }) async {
-    final client = http.Client();
-    try {
-      final response = await client
-          .get(
-            Uri.parse('$apiBase$path'),
-            headers: const {
-              'Accept': 'application/json',
-              'Connection': 'close',
-            },
-          )
-          .timeout(Duration(seconds: timeoutSeconds));
-
-      if (response.statusCode != 200) {
-        throw HttpException(
-          'HTTP ${response.statusCode}: ${response.body}',
-        );
-      }
-      final decoded = jsonDecode(response.body);
-      if (decoded is! Map) {
-        throw const FormatException('Unexpected backend response');
-      }
-      return Map<String, dynamic>.from(decoded);
-    } finally {
-      client.close();
-    }
+  bool _isTransientBackendError(Object value) {
+    final text = value.toString().toLowerCase();
+    return value is TimeoutException ||
+        value is SocketException ||
+        value is http.ClientException ||
+        text.contains('http 502') ||
+        text.contains('http 503') ||
+        text.contains('http 504') ||
+        text.contains('connection reset') ||
+        text.contains('connection closed') ||
+        text.contains('timed out') ||
+        text.contains('timeout');
   }
 
-  Future<Map<String, dynamic>> _safeGet(String path) async {
-    try {
-      return await _get(path);
-    } catch (_) {
-      return <String, dynamic>{};
+  String _friendlyBackendError(Object value) {
+    final text = value.toString().toLowerCase();
+    if (text.contains('502')) {
+      return 'Backend temporarily busy (HTTP 502). Keeping the last good data and retrying automatically.';
     }
+    if (text.contains('503')) {
+      return 'Backend temporarily unavailable (HTTP 503). Keeping the last good data and retrying automatically.';
+    }
+    if (text.contains('504') || value is TimeoutException) {
+      return 'Backend response timed out. Keeping the last good data and retrying automatically.';
+    }
+    if (value is SocketException || value is http.ClientException) {
+      return 'Network connection interrupted. Keeping the last good data and retrying automatically.';
+    }
+    return 'Could not refresh the latest data. The previous snapshot is still being shown.';
+  }
+
+  Future<Map<String, dynamic>> _get(
+    String path, {
+    int timeoutSeconds = 35,
+  }) async {
+    final response = await _client
+        .get(
+          Uri.parse('$apiBase$path'),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(Duration(seconds: timeoutSeconds));
+
+    if (response.statusCode != 200) {
+      // Never expose Render's full HTML error document inside the mobile UI.
+      throw HttpException('HTTP ${response.statusCode}');
+    }
+
+    final contentType = response.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().contains('json') &&
+        response.body.trimLeft().startsWith('<')) {
+      throw const FormatException('Backend returned HTML instead of JSON');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw const FormatException('Unexpected backend response');
+    }
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  Future<Map<String, dynamic>> _safeGet(
+    String path, {
+    int attempts = 2,
+  }) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await _get(path);
+      } catch (e) {
+        lastError = e;
+        if (!_isTransientBackendError(e) || attempt >= attempts) {
+          break;
+        }
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+    return <String, dynamic>{
+      '_request_error': _friendlyBackendError(
+        lastError ?? const HttpException('Unknown backend error'),
+      ),
+    };
   }
 
   Future<void> refreshAll({bool silent = false}) async {
@@ -175,27 +227,51 @@ class _JasongShellState extends State<JasongShell>
     }
 
     try {
-      final results = await Future.wait<Map<String, dynamic>>([
-        _safeGet('/market-categories/status'),
-        _safeGet('/category-portfolio/status'),
-        _safeGet('/forward-validation/status'),
-        _safeGet('/forward-validation/learning'),
-        _safeGet('/market-categories/compound-candidates'),
-        _safeGet('/category-portfolio/positions'),
-        _safeGet('/forward-validation/trades'),
-      ]);
+      // Deliberately sequential. The previous V6.9.4 mobile build fired seven
+      // requests at Render at once. Together with the Markets poller this could
+      // create request bursts and surface Render 502 pages.
+      final market = await _safeGet('/market-categories/status');
+      final portfolio = await _safeGet('/category-portfolio/status');
+      final forward = await _safeGet('/forward-validation/status');
+      final learning = await _safeGet('/forward-validation/learning');
+      final compound = await _safeGet('/market-categories/compound-candidates');
+      final positions = await _safeGet('/category-portfolio/positions');
+      final trades = await _safeGet('/forward-validation/trades');
 
       if (!mounted) return;
 
-      final positionsRaw = results[5]['positions'];
-      final tradesRaw = results[6]['trades'];
+      final positionsRaw = positions['positions'];
+      final tradesRaw = trades['trades'];
+      final requestErrors = <String>[
+        for (final payload in [
+          market,
+          portfolio,
+          forward,
+          learning,
+          compound,
+          positions,
+          trades,
+        ])
+          if (payload['_request_error'] != null)
+            '${payload['_request_error']}',
+      ];
 
       setState(() {
-        if (results[0].isNotEmpty) marketStatus = results[0];
-        if (results[1].isNotEmpty) portfolioStatus = results[1];
-        if (results[2].isNotEmpty) forwardStatus = results[2];
-        if (results[3].isNotEmpty) forwardLearning = results[3];
-        if (results[4].isNotEmpty) compoundPayload = results[4];
+        if (market.isNotEmpty && market['_request_error'] == null) {
+          marketStatus = market;
+        }
+        if (portfolio.isNotEmpty && portfolio['_request_error'] == null) {
+          portfolioStatus = portfolio;
+        }
+        if (forward.isNotEmpty && forward['_request_error'] == null) {
+          forwardStatus = forward;
+        }
+        if (learning.isNotEmpty && learning['_request_error'] == null) {
+          forwardLearning = learning;
+        }
+        if (compound.isNotEmpty && compound['_request_error'] == null) {
+          compoundPayload = compound;
+        }
         if (positionsRaw is List) {
           categoryPositions = positionsRaw
               .whereType<Map>()
@@ -208,12 +284,16 @@ class _JasongShellState extends State<JasongShell>
               .map((row) => Map<String, dynamic>.from(row))
               .toList();
         }
-        lastUpdated = DateTime.now();
-        error = null;
+        if (requestErrors.length < 7) {
+          lastUpdated = DateTime.now();
+        }
+        error = !silent && requestErrors.isNotEmpty
+            ? requestErrors.first
+            : null;
       });
     } catch (e) {
       if (!mounted || silent) return;
-      setState(() => error = e.toString());
+      setState(() => error = _friendlyBackendError(e));
     } finally {
       if (mounted) setState(() => refreshing = false);
     }
