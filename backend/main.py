@@ -7104,13 +7104,13 @@ COMPOUND_ENGINE.set_forward_evidence_source(
 
 
 # ============================================================
-# V6.9.2 COMPLETE SPECIALIST MARKET CATEGORY INTEGRATION
+# V6.9.3 COMPLETE IG DEMO TESTING INTEGRATION
 # ============================================================
 # Additive integration over the existing V6.8.19 Compound engine.
 # The current Compound execution, forward evidence, adaptive target,
 # reconciliation and IG DEMO protections remain in place.
 
-def _v692_specialist_frame(seed: dict):
+def _v693_specialist_frame(seed: dict):
     loader = globals().get("_v673_global_market_data")
     if callable(loader):
         raw = loader(seed)
@@ -7161,24 +7161,24 @@ except Exception:
     pass
 
 
-V692_SPECIALIST_SYSTEM = install_specialist_market_system(
+V693_SPECIALIST_SYSTEM = install_specialist_market_system(
     app=app,
     broker=IG_DEMO_BROKER,
     compound_engine=COMPOUND_ENGINE,
-    frame_func=_v692_specialist_frame,
+    frame_func=_v693_specialist_frame,
     ownership_components=[
         globals().get("IG_DEMO_MIRROR")
     ],
 )
 
 CATEGORY_STRATEGY_ENGINE = (
-    V692_SPECIALIST_SYSTEM["intelligence"]
+    V693_SPECIALIST_SYSTEM["intelligence"]
 )
 CATEGORY_PORTFOLIO_ENGINE = (
-    V692_SPECIALIST_SYSTEM["portfolio"]
+    V693_SPECIALIST_SYSTEM["portfolio"]
 )
 
-# The verified V6.9.2 category engine implements the V6.8.x compatibility
+# The verified V6.9.3 category engine implements the V6.8.x compatibility
 # methods used by the existing /global-markets/* endpoints.
 GLOBAL_MARKET_ENGINE = CATEGORY_STRATEGY_ENGINE
 
@@ -7217,21 +7217,15 @@ def execution_policy():
             "PRIME",
         "adaptive_strategy_intelligence": True,
         "strategy_ai_min_confidence_pct": float(os.getenv("COMPOUND_AI_MIN_CONFIDENCE", "0.40")) * 100.0,
-        "strategy_quant_normal_min_pct": float(os.getenv("COMPOUND_QUANT_MIN_CONFIDENCE", "0.30")) * 100.0,
+        "strategy_quant_normal_min_pct": float(getattr(COMPOUND_ENGINE, "quant_min_confidence", 0.28)) * 100.0,
         "strategy_quant_soft_floor_pct": float(os.getenv("STRATEGY_QUANT_SOFT_FLOOR", "0.28")) * 100.0,
         "strategy_soft_quant_confidence_min_pct": float(os.getenv("STRATEGY_SOFT_QUANT_CONFIDENCE_MIN", "0.78")) * 100.0,
         "prime_quality_tiers": ["A", "A+"],
         "prime_min_historical_wr_pct": float(
-            os.getenv(
-                "PRIME_MIN_HISTORICAL_WR",
-                "0.55",
-            )
+            getattr(COMPOUND_ENGINE, "prime_min_historical_wr", 0.60)
         ) * 100.0,
         "prime_min_historical_pf": float(
-            os.getenv(
-                "PRIME_MIN_HISTORICAL_PF",
-                "1.20",
-            )
+            getattr(COMPOUND_ENGINE, "prime_min_historical_pf", 1.20)
         ),
         "prime_min_historical_trades": int(
             os.getenv(
@@ -7240,10 +7234,10 @@ def execution_policy():
             )
         ),
         "prime_global_fast_min": float(
-            os.getenv(
-                "COMPOUND_GLOBAL_FAST_SCORE_MIN",
-                "70",
-            )
+            getattr(COMPOUND_ENGINE, "global_fast_score_min", 60.0)
+        ),
+        "prime_server_fast_min": float(
+            getattr(COMPOUND_ENGINE, "fast_score_min", 60.0)
         ),
         "forward_regime_endpoint":
             "/forward-evidence/regime",
