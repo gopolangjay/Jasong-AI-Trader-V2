@@ -275,6 +275,185 @@ class CategoryExecutionEngine:
         self._state["opens"] = int(self._state.get("opens") or 0) + 1
         self._journal("OPEN", category=category, symbol=position["symbol"], deal_id=deal_id, dual_track=position["dual_track"])
 
+    @staticmethod
+    def _symbol_key(value: Any) -> str:
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    def set_enabled(self, enabled: bool) -> Dict[str, Any]:
+        """Enable/disable Category autotrading for the current running process.
+
+        The environment variable remains the restart-time authority. This method
+        is intentionally runtime-scoped so a GPT Action cannot silently rewrite
+        Render environment configuration.
+        """
+        with self._lock:
+            self.enabled = bool(enabled)
+            self._state["enabled"] = self.enabled
+            self._journal("AUTOTRADE_SET", enabled=self.enabled, source="GPT_ACTION")
+            self._persist()
+            return {
+                "version": self.VERSION,
+                "enabled": self.enabled,
+                "scope": "RUNTIME_ONLY",
+                "restart_authority": "CATEGORY_AUTOTRADE environment variable",
+                "live_money_execution": False,
+            }
+
+    def open_qualified_symbol(self, symbol: str) -> Dict[str, Any]:
+        """Open one currently qualified Category candidate through normal gates.
+
+        This method deliberately does not accept EPIC, direction, size, or a
+        bypass flag from the caller. The live ranking owns those values and
+        _may_open() still enforces standard eligibility, portfolio/global caps,
+        duplicate exposure, dual-track EPIC caps, and theme exposure limits.
+        """
+        wanted = self._symbol_key(symbol)
+        if not wanted:
+            return {
+                "version": self.VERSION,
+                "opened": False,
+                "error": "symbol is required",
+                "live_money_execution": False,
+            }
+
+        with self._lock:
+            try:
+                self._reconcile()
+                self._due_closes()
+                rankings = self.ranking_source() or {}
+                candidate: Optional[Dict[str, Any]] = None
+                for category in ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"):
+                    for raw in rankings.get(category, [])[:5]:
+                        if not isinstance(raw, dict):
+                            continue
+                        variants = {
+                            self._symbol_key(raw.get("key")),
+                            self._symbol_key(raw.get("symbol")),
+                            self._symbol_key(raw.get("market")),
+                            self._symbol_key(raw.get("name")),
+                        }
+                        if wanted in variants:
+                            candidate = dict(raw)
+                            break
+                    if candidate is not None:
+                        break
+
+                if candidate is None:
+                    return {
+                        "version": self.VERSION,
+                        "opened": False,
+                        "symbol": symbol,
+                        "reason": "Market is not in the current top-five-per-category ranking surface.",
+                        "live_money_execution": False,
+                    }
+
+                external = self._external_positions()
+                allowed, reason = self._may_open(candidate, external)
+                if not allowed:
+                    return {
+                        "version": self.VERSION,
+                        "opened": False,
+                        "symbol": candidate.get("symbol") or candidate.get("key"),
+                        "market": candidate.get("market") or candidate.get("name"),
+                        "category": candidate.get("category"),
+                        "reason": reason,
+                        "rejection_reasons": candidate.get("rejection_reasons") or [],
+                        "standard_eligible": bool(candidate.get("standard_eligible")),
+                        "live_money_execution": False,
+                    }
+
+                before = {
+                    str(row.get("deal_id") or "")
+                    for row in self._open_positions()
+                    if row.get("deal_id")
+                }
+                self._open_candidate(candidate, external)
+                self._persist()
+                opened = next(
+                    (
+                        dict(row)
+                        for row in reversed(self._open_positions())
+                        if str(row.get("deal_id") or "") not in before
+                    ),
+                    None,
+                )
+                if opened is None:
+                    return {
+                        "version": self.VERSION,
+                        "opened": False,
+                        "symbol": candidate.get("symbol") or candidate.get("key"),
+                        "reason": "No new Category position was created.",
+                        "live_money_execution": False,
+                    }
+                return {
+                    "version": self.VERSION,
+                    "opened": True,
+                    "position": opened,
+                    "execution_basis": "CURRENT_STANDARD_ELIGIBILITY_PLUS_CATEGORY_RISK_GATES",
+                    "live_money_execution": False,
+                }
+            except Exception as exc:
+                self._state["last_error"] = f"GPT open: {type(exc).__name__}: {exc}"
+                self._persist()
+                return {
+                    "version": self.VERSION,
+                    "opened": False,
+                    "symbol": symbol,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "live_money_execution": False,
+                }
+
+    def close_category_position(self, deal_id: str) -> Dict[str, Any]:
+        """Close a JSCAT-owned IG DEMO position and reconcile local state."""
+        wanted = str(deal_id or "").strip()
+        if not wanted:
+            return {
+                "version": self.VERSION,
+                "closed": False,
+                "error": "deal_id is required",
+                "live_money_execution": False,
+            }
+        with self._lock:
+            try:
+                self._reconcile()
+                tracked = next(
+                    (
+                        row for row in self._state.setdefault("positions", [])
+                        if row.get("status") == "OPEN"
+                        and str(row.get("deal_id") or "") == wanted
+                        and str(row.get("deal_reference") or "").upper().startswith(self.DEAL_PREFIX)
+                    ),
+                    None,
+                )
+                if tracked is None:
+                    return {
+                        "version": self.VERSION,
+                        "closed": False,
+                        "deal_id": wanted,
+                        "reason": "Only an open JSCAT-owned Category position can be closed by this action.",
+                        "live_money_execution": False,
+                    }
+                result = self.broker.close_position(wanted)
+                self._reconcile()
+                self._journal("GPT_CLOSE_REQUEST", deal_id=wanted, result=result.get("status") or result.get("dealStatus"))
+                self._persist()
+                return {
+                    "version": self.VERSION,
+                    "closed": bool(result.get("closeVerified")) or str(result.get("status") or "").upper() in {"ALREADY_CLOSED_OR_NOT_FOUND", "CLOSED_VERIFIED"},
+                    "result": result,
+                    "live_money_execution": False,
+                }
+            except Exception as exc:
+                self._state["last_error"] = f"GPT close: {type(exc).__name__}: {exc}"
+                self._persist()
+                return {
+                    "version": self.VERSION,
+                    "closed": False,
+                    "deal_id": wanted,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "live_money_execution": False,
+                }
+
     def tick(self) -> Dict[str, Any]:
         with self._lock:
             try:
