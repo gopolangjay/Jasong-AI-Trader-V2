@@ -12,9 +12,10 @@ from category_strategy_engine import (
     MODEL_AI_MIN_CONFIDENCE,
     QUANT_MIN_CONFIDENCE,
 )
-
-from chatgpt_mcp import install_chatgpt_mcp
 from chatgpt_actions import install_chatgpt_actions
+from chatgpt_mcp import install_chatgpt_mcp
+from prime_policy import ForwardPrimeArchitecture, make_provenance_frame_func
+from provenance import ProvenanceRegistry
 
 
 def _position_identity(row: Dict[str, Any]) -> tuple[str, str]:
@@ -28,12 +29,7 @@ def _non_category_broker_positions(
     broker: Any,
     intelligence: CategoryStrategyEngine,
 ) -> List[Dict[str, Any]]:
-    """Return every open broker position not owned by the JSCAT track.
-
-    Category execution must share the existing account-wide capacity and exposure
-    budget with Compound, learning/boundary tracks and manual positions.  Rows are
-    enriched with specialist exposure tags when their EPIC/symbol is known.
-    """
+    """Return every open broker position not owned by the JSCAT track."""
     try:
         payload = broker.positions() or {}
     except Exception:
@@ -86,7 +82,7 @@ def _non_category_broker_positions(
 
 
 def _extend_owned_prefix(component: Any) -> None:
-    """Teach a V6.8.x ownership-aware component that JSCAT_* is internal."""
+    """Teach ownership-aware components that JSCAT_* is an internal DEMO track."""
     if component is None:
         return
     for attr in (
@@ -118,21 +114,9 @@ def _extend_owned_prefix(component: Any) -> None:
 
 
 def _enable_compound_category_coexistence(compound_engine: Any) -> None:
-    """Allow JSCAT_* positions to coexist without contaminating Compound P&L.
-
-    V6.8.x already supports multi-track Jasong ownership.  Older V6.7.x engines
-    considered every non-JSCMP position "foreign" and would block a new basket.
-    For those older engines only, make JSCAT positions non-blocking while leaving
-    _compound_positions untouched so Compound P&L still contains JSCMP only.
-    """
+    """Allow JSCAT_* positions to coexist without contaminating Compound P&L."""
     version = str(getattr(compound_engine, "VERSION", "") or "")
-
-    # Extend known ownership-prefix containers/methods without dropping any
-    # existing V6.8.x Jasong prefixes.
     _extend_owned_prefix(compound_engine)
-
-    # Compatibility only for recovered V6.7.x behavior.  Do not replace newer
-    # V6.8.x dual-track foreign-position logic.
     if not version.startswith("6.7.") or not hasattr(compound_engine, "_foreign_positions"):
         return
 
@@ -140,17 +124,11 @@ def _enable_compound_category_coexistence(compound_engine: Any) -> None:
 
     def _foreign_positions_allow_category(positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows = original(positions)
-        allowed: List[Dict[str, Any]] = []
-        for row in rows:
-            ref = str(
-                row.get("deal_reference")
-                or row.get("dealReference")
-                or ""
-            ).upper()
-            if ref.startswith("JSCAT_"):
-                continue
-            allowed.append(row)
-        return allowed
+        return [
+            row
+            for row in rows
+            if not str(row.get("deal_reference") or row.get("dealReference") or "").upper().startswith("JSCAT_")
+        ]
 
     compound_engine._foreign_positions = _foreign_positions_allow_category
 
@@ -163,11 +141,7 @@ def install_specialist_market_system(
     frame_func: Callable[[Dict[str, Any]], pd.DataFrame],
     ownership_components: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
-    """Install V6.9 specialist-market engines into an existing Jasong FastAPI app.
-
-    This is deliberately additive so the current V6.8.x execution-integrity,
-    reconciliation and Compound accounting code does not need to be replaced.
-    """
+    """Install V6.9 specialist markets with broker-settled forward PRIME authority."""
     base_dir = "/var/data" if os.path.isdir("/var/data") else "/tmp"
     category_state_path = os.getenv(
         "CATEGORY_STRATEGY_STATE_PATH",
@@ -182,90 +156,104 @@ def install_specialist_market_system(
     for component in ownership_components or []:
         _extend_owned_prefix(component)
 
+    # Current V6.9.3 _v673_global_market_data uses yfinance for specialist
+    # analysis. Keep the provider explicit/configurable instead of labelling the
+    # strategy pipeline itself as the data source.
+    analysis_price_source = os.getenv(
+        "SPECIALIST_ANALYSIS_PRICE_SOURCE",
+        "YAHOO_FINANCE",
+    ).upper().strip()
+    provenance_registry = ProvenanceRegistry(
+        default_analysis_source=analysis_price_source,
+    )
+    provenance_frame_func = make_provenance_frame_func(
+        frame_func,
+        provenance_registry,
+        analysis_source=analysis_price_source,
+    )
+
     intelligence = CategoryStrategyEngine(
         broker=broker,
-        frame_func=frame_func,
+        frame_func=provenance_frame_func,
         state_path=category_state_path,
     )
     intelligence.start_thread()
 
-    # Preserve the user's 28 / 40 policy inside Compound too. This alters only
-    # the confidence floors; all newer reconciliation/integrity behavior remains
-    # owned by the existing Compound engine.
+    legacy_forward_evidence = next(
+        (
+            component
+            for component in (ownership_components or [])
+            if component is not None
+            and hasattr(component, "status")
+            and hasattr(component, "execution_guard_snapshot")
+        ),
+        None,
+    )
+
+    forward_prime = ForwardPrimeArchitecture(
+        intelligence=intelligence,
+        broker=broker,
+        provenance_registry=provenance_registry,
+        legacy_evidence_source=legacy_forward_evidence,
+        state_dir=base_dir,
+    )
+    forward_prime.install(compound_engine=compound_engine)
+
+    # Make every existing consumer (including GPT Actions/MCP helpers) read the
+    # same forward-policy rankings instead of the legacy historical eligibility
+    # aliases. Private optimiser/evaluation methods remain untouched.
+    intelligence.category_rankings = forward_prime.category_rankings
+    intelligence.compound_candidates = forward_prime.compound_candidates
+
+    # Preserve the requested live confidence floors. Historical holdout/WF
+    # values are no longer written into Compound PRIME thresholds.
     if hasattr(compound_engine, "quant_min_confidence"):
         compound_engine.quant_min_confidence = QUANT_MIN_CONFIDENCE
     if hasattr(compound_engine, "ai_min_confidence"):
         compound_engine.ai_min_confidence = MODEL_AI_MIN_CONFIDENCE
-
-    # V6.9.3 user-selected IG DEMO qualification policy. These are capability-
-    # gated so the current V6.8.x Compound implementation can be tuned without
-    # replacing compound_engine.py or disturbing its reconciliation/accounting.
-    for attr, value in {
-        "fast_score_min": 45.0,
-        "prime_fast_score_min": 45.0,
-        "global_fast_score_min": 45.0,
-        "compound_fast_score_min": 45.0,
-        "prime_min_historical_wr": 0.60,
-        "prime_min_historical_win_rate": 0.60,
-        "prime_min_historical_pf": 1.20,
-        "prime_min_profit_factor": 1.20,
-        "min_profit_factor": 1.20,
-        "prime_min_historical_trades": 10,
-        "min_historical_trades": 10,
-        "historical_min_trades": 10,
-        "walk_forward_min_win_rate": 0.40,
-        "walk_forward_min_fold_win_rate": 0.40,
-        "walk_forward_min_median_win_rate": 0.40,
-        "walk_forward_min_pct": 40.0,
-    }.items():
+    for attr in (
+        "fast_score_min",
+        "prime_fast_score_min",
+        "global_fast_score_min",
+        "compound_fast_score_min",
+    ):
         if hasattr(compound_engine, attr):
-            setattr(compound_engine, attr, value)
+            setattr(compound_engine, attr, 45.0)
 
-    # Compound now receives only rank #1/#2 candidates from each specialist
-    # category that pass all evidence/live/IG gates. No filler candidates.
-    compound_engine.candidate_source = lambda _cycle_capital: intelligence.compound_candidates()
     if hasattr(compound_engine, "correlation_source"):
         compound_engine.correlation_source = intelligence.correlation_matrix
 
+    # The standard Category IG DEMO track is now the controlled STRONG learning
+    # lane. Compound receives only rank #1/#2 candidates that have already met
+    # the broker-settled forward PRIME criteria.
     portfolio = CategoryExecutionEngine(
         broker=broker,
-        ranking_source=intelligence.category_rankings,
+        ranking_source=forward_prime.category_rankings,
         external_positions_source=lambda: _non_category_broker_positions(broker, intelligence),
         state_path=portfolio_state_path,
     )
+    forward_prime.attach_category_portfolio(portfolio)
     portfolio.start_thread()
 
-    # Keep Swagger/OpenAPI metadata aligned with the specialist runtime even
-    # though the legacy main.py creates the FastAPI object earlier.
-    app.title = "Jasong AI Trader V6.9.3 API"
-    app.version = "6.9.3"
+    app.title = "Jasong AI Trader V6.9.4 Forward API"
+    app.version = "6.9.4-forward"
     app.description = (
-        "Jasong AI Trader V6.9.3 — specialist market intelligence, "
-        "IG DEMO execution, adaptive 80/20 compound, and authenticated "
-        "read-only ChatGPT MCP diagnostics."
+        "Jasong AI Trader — specialist market intelligence, broker-settled "
+        "forward PRIME validation, controlled IG DEMO learning, adaptive "
+        "80/20 compound, and authenticated ChatGPT diagnostics."
     )
     app.openapi_schema = None
 
-    # Install the authenticated read-only MCP bridge. Failure to initialise the
-    # optional assistant bridge must never stop the trading backend itself.
+    # Assistant diagnostics should see the new PRIME authority, not the legacy
+    # historical threshold labels.
     try:
-        forward_evidence_source = next(
-            (
-                component
-                for component in (ownership_components or [])
-                if component is not None
-                and hasattr(component, "status")
-                and hasattr(component, "execution_guard_snapshot")
-            ),
-            None,
-        )
         install_chatgpt_mcp(
             app,
             intelligence=intelligence,
             portfolio=portfolio,
             compound_engine=compound_engine,
             broker=broker,
-            evidence_source=forward_evidence_source,
+            evidence_source=forward_prime,
         )
     except Exception as exc:
         mcp_error = f"{type(exc).__name__}: {exc}"
@@ -274,7 +262,7 @@ def install_specialist_market_system(
             app.add_api_route(
                 "/chatgpt-mcp/status",
                 lambda: {
-                    "version": "6.9.3",
+                    "version": "6.9.4-forward",
                     "enabled": True,
                     "installed": False,
                     "runtime_ready": False,
@@ -287,9 +275,6 @@ def install_specialist_market_system(
                 name="jasong_mcp_status_install_error",
             )
 
-    # Install the Plus-compatible GPT Actions gateway. It supports both reads
-    # and controlled IG DEMO writes. A gateway failure must never take the
-    # trading backend offline.
     try:
         install_chatgpt_actions(
             app,
@@ -297,23 +282,25 @@ def install_specialist_market_system(
             portfolio=portfolio,
             compound_engine=compound_engine,
             broker=broker,
-            evidence_source=forward_evidence_source,
+            evidence_source=forward_prime,
         )
     except Exception as exc:
         app.state.jasong_actions_install_error = f"{type(exc).__name__}: {exc}"
 
-    # FastAPI route registration is done programmatically to avoid a large,
-    # fragile replacement of the current backend/main.py.
     app.add_api_route(
         "/market-categories/status",
-        lambda: intelligence.status(),
+        lambda: {
+            **intelligence.status(),
+            "prime_authority": "BROKER_SETTLED_FORWARD_ONLY",
+            "historical_validation_mode": "INFORMATIONAL_ONLY",
+        },
         methods=["GET"],
-        name="market_categories_status_v693",
+        name="market_categories_status_v694",
     )
 
     def category_universe() -> Dict[str, Any]:
         return {
-            "version": "6.9.3",
+            "version": "6.9.4-forward",
             "categories": {
                 category: intelligence.universe(category)
                 for category in CATEGORY_ORDER
@@ -321,11 +308,20 @@ def install_specialist_market_system(
             "confidence_policy": {
                 "quant_min_pct": 28.0,
                 "model_ai_min_pct": 40.0,
-                "historical_validation_target_pct": 60.0,
-                "profit_factor_target": 1.20,
                 "fast_score_min": 45.0,
-                "walk_forward_min_pct": 40.0,
+                "historical_validation_mode": "INFORMATIONAL_ONLY",
+                "historical_execution_veto": False,
+                "prime_authority": "BROKER_SETTLED_FORWARD_ONLY",
+                "forward_min_settled_trades": forward_prime.validator.config.min_settled_trades_for_prime,
+                "forward_rolling_window_trades": forward_prime.validator.config.rolling_window_trades,
+                "forward_min_profit_factor": forward_prime.validator.config.min_profit_factor,
+                "forward_min_expectancy_r": forward_prime.validator.config.min_expectancy_r,
+                "forward_min_win_rate": forward_prime.validator.config.min_win_rate,
+                "forward_min_bootstrap_positive_expectancy": forward_prime.validator.config.min_bootstrap_prob_positive_expectancy,
+                "forward_max_drawdown_r": forward_prime.validator.config.max_drawdown_r,
             },
+            "analysis_price_source": analysis_price_source,
+            "broker_quote_source": "IG_DEMO",
             "live_money_execution": False,
         }
 
@@ -333,131 +329,129 @@ def install_specialist_market_system(
         "/market-categories",
         category_universe,
         methods=["GET"],
-        name="market_categories_universe_v693",
+        name="market_categories_universe_v694",
     )
 
     def category_rankings(category: str) -> Dict[str, Any]:
         clean = str(category or "").upper().strip()
         if clean not in CATEGORY_ORDER:
             return {
-                "version": "6.9.3",
+                "version": "6.9.4-forward",
                 "category": clean,
                 "count": 0,
                 "selections": [],
                 "error": f"Unknown category. Use: {', '.join(CATEGORY_ORDER)}",
                 "live_money_execution": False,
             }
-        rows = intelligence.category_rankings(clean).get(clean, [])
+        rows = forward_prime.category_rankings(clean).get(clean, [])
         return {
-            "version": "6.9.3",
+            "version": "6.9.4-forward",
             "category": clean,
             "count": len(rows),
             "selections": rows,
             "live_money_execution": False,
         }
 
-    def optimizer_status() -> Dict[str, Any]:
-        return intelligence.optimizer_summary()
-
     app.add_api_route(
         "/market-categories/optimizer",
-        optimizer_status,
+        lambda: intelligence.optimizer_summary(),
         methods=["GET"],
-        name="market_category_optimizer_v693",
+        name="market_category_optimizer_v694",
     )
-
     app.add_api_route(
         "/market-categories/evidence-health",
         lambda: intelligence.evidence_coverage(),
         methods=["GET"],
-        name="market_category_evidence_health_v693",
+        name="market_category_evidence_health_v694",
     )
-
     app.add_api_route(
         "/market-categories/full-refresh",
         lambda: intelligence.full_refresh_status(),
         methods=["GET"],
-        name="market_category_full_refresh_status_v693",
+        name="market_category_full_refresh_status_v694",
     )
-
     app.add_api_route(
         "/market-categories/full-refresh",
         lambda: intelligence.start_full_refresh(force=True),
         methods=["POST"],
-        name="market_category_full_refresh_start_v693",
+        name="market_category_full_refresh_start_v694",
     )
 
     def compound_candidates() -> Dict[str, Any]:
-        rows = intelligence.compound_candidates()
+        rows = forward_prime.compound_candidates()
         return {
-            "version": "6.9.3",
+            "version": "6.9.4-forward",
             "count": len(rows),
             "candidates": rows,
-            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + holdout WR 60% + PF 1.20 + minimum 10 holdout trades + each qualifying WF fold >=40% + Fast 45 + IG gates",
+            "rule": (
+                "Category rank #1/#2 + Quant >=28 + directional AI >=40 + "
+                "Fast >=45 + fresh sourced analysis + fresh IG quote + "
+                "tradeable/spread gates + broker-settled forward PF/expectancy/"
+                "WR/drawdown/bootstrap PRIME criteria. Historical holdout and "
+                "walk-forward metrics are informational only."
+            ),
             "live_money_execution": False,
         }
 
-    # Register this static path before /{category}; Starlette resolves routes in
-    # declaration order.
     app.add_api_route(
         "/market-categories/compound-candidates",
         compound_candidates,
         methods=["GET"],
-        name="market_category_compound_candidates_v693",
+        name="market_category_compound_candidates_v694",
     )
-
     app.add_api_route(
         "/market-categories/{category}",
         category_rankings,
         methods=["GET"],
-        name="market_category_rankings_v693",
+        name="market_category_rankings_v694",
     )
-
     app.add_api_route(
         "/market-categories/run-now",
         lambda: intelligence.run_now(),
         methods=["POST"],
-        name="market_categories_run_now_v693",
+        name="market_categories_run_now_v694",
     )
 
     def run_category(category: str) -> Dict[str, Any]:
         clean = str(category or "").upper().strip()
         if clean not in CATEGORY_ORDER:
-            return {"version": "6.9.3", "error": "Unknown category", "category": clean}
+            return {"version": "6.9.4-forward", "error": "Unknown category", "category": clean}
         return intelligence.run_now(clean)
 
     app.add_api_route(
         "/market-categories/{category}/run-now",
         run_category,
         methods=["POST"],
-        name="market_category_run_now_v693",
+        name="market_category_run_now_v694",
     )
-
     app.add_api_route(
         "/category-portfolio/status",
         lambda: portfolio.status(),
         methods=["GET"],
-        name="category_portfolio_status_v693",
+        name="category_portfolio_status_v694",
     )
     app.add_api_route(
         "/category-portfolio/positions",
         lambda: {
-            "version": "6.9.3",
+            "version": "6.9.4-forward",
             "positions": portfolio.positions(),
             "live_money_execution": False,
         },
         methods=["GET"],
-        name="category_portfolio_positions_v693",
+        name="category_portfolio_positions_v694",
     )
     app.add_api_route(
         "/category-portfolio/run-now",
         lambda: portfolio.tick(),
         methods=["POST"],
-        name="category_portfolio_run_now_v693",
+        name="category_portfolio_run_now_v694",
     )
+
+    forward_prime.routes(app)
 
     return {
         "intelligence": intelligence,
         "portfolio": portfolio,
-        "version": "6.9.3",
+        "forward_prime": forward_prime,
+        "version": "6.9.4-forward",
     }
