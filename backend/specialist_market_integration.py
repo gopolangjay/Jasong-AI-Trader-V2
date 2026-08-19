@@ -316,7 +316,7 @@ def install_specialist_market_system(
             "version": "6.9.3",
             "count": len(rows),
             "candidates": rows,
-            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + 3-fold walk-forward 60% validation + PF 1.20 + Fast 60 + IG gates",
+            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + holdout WR 60% + PF 1.20 + minimum 30 holdout trades + each qualifying WF fold >=60% + Fast 60 + IG gates",
             "live_money_execution": False,
         }
 
