@@ -12,33 +12,33 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# JASONG AI TRADER V6.9.2 - COMPLETE REAL-TIME TESTING / EVIDENCE HYGIENE
+# JASONG AI TRADER V6.9.3 - COMPLETE IG DEMO TESTING / 60% WALK-FORWARD POLICY
 # ---------------------------------------------------------------------------
 # Design contract
 #   * six independent specialist categories;
 #   * live confidence floors remain 28% Quant + 40% directional Model-AI;
-#   * historical 70% is an evidence/validation target, NOT a live confidence;
+#   * final holdout target is 60% WR with PF >=1.20; live confidence remains separate;
 #   * each category ranks at most five selections;
 #   * ranks #1 and #2 are Compound slot candidates only when every gate passes;
 #   * finite strategy variants are selected BEFORE the untouched final holdout;
-#   * final 70% validation is allowed only when selection-window stability also passes;
+#   * final 60% validation is allowed only when selection-window stability and 3-fold WF also pass;
 #   * execution remains IG DEMO only; this module contains no production URL.
 # ---------------------------------------------------------------------------
 
-VERSION = "6.9.2"
+VERSION = "6.9.3"
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
-HISTORICAL_WIN_RATE_TARGET = 0.70
-STANDARD_FAST_SCORE_MIN = 80.0
-COMPOUND_FAST_SCORE_MIN = 90.0
+HISTORICAL_WIN_RATE_TARGET = 0.60
+STANDARD_FAST_SCORE_MIN = 60.0
+COMPOUND_FAST_SCORE_MIN = 60.0
 TOP_N_PER_CATEGORY = 5
 COMPOUND_SLOTS_PER_CATEGORY = 2
-EVIDENCE_SCHEMA_VERSION = 2
+EVIDENCE_SCHEMA_VERSION = 3
 WALK_FORWARD_FOLDS = 3
 WALK_FORWARD_MIN_FOLD_TRADES = 5
 WALK_FORWARD_MIN_FOLDS = 2
-WALK_FORWARD_MIN_FOLD_WIN_RATE = 0.55
-WALK_FORWARD_MIN_MEDIAN_WIN_RATE = 0.65
+WALK_FORWARD_MIN_FOLD_WIN_RATE = 0.60
+WALK_FORWARD_MIN_MEDIAN_WIN_RATE = 0.60
 WALK_FORWARD_MIN_PROFITABLE_FOLDS = 2
 
 CATEGORY_ORDER = ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES")
@@ -743,12 +743,12 @@ _SIGNAL_FUNC: Dict[str, Callable[[pd.Series], StrategySignal]] = {
 
 
 def _historical_grade(trades: int, win_rate: float, profit_factor: float, max_dd: float) -> tuple[str, str, bool]:
-    validated_70 = trades >= 30 and win_rate >= HISTORICAL_WIN_RATE_TARGET and profit_factor >= 1.30 and max_dd <= 0.12
-    if trades >= 40 and win_rate >= 0.72 and profit_factor >= 1.50 and max_dd <= 0.10:
-        return "A+", "CATEGORY_VERIFIED_70", True
-    if validated_70:
-        return "A", "CATEGORY_VERIFIED_70", True
-    if trades >= 20 and win_rate >= 0.62 and profit_factor >= 1.10 and max_dd <= 0.16:
+    validated_target = trades >= 30 and win_rate >= HISTORICAL_WIN_RATE_TARGET and profit_factor >= 1.20 and max_dd <= 0.12
+    if trades >= 40 and win_rate >= 0.70 and profit_factor >= 1.50 and max_dd <= 0.10:
+        return "A+", "CATEGORY_ELITE_70", True
+    if validated_target:
+        return "A", "CATEGORY_VERIFIED_60", True
+    if trades >= 20 and win_rate >= 0.55 and profit_factor >= 1.05 and max_dd <= 0.16:
         return "B", "CATEGORY_PROBATION", False
     return "C", "CATEGORY_REJECT", False
 
@@ -842,7 +842,7 @@ class CategoryStrategyEngine:
                     source_version = str(raw.get("version") or "UNKNOWN")
                     state["migration_source_version"] = source_version
                     # Preserve harmless scheduling/counter metadata, but never let
-                    # an older category-analysis row compete with V6.9.2 evidence.
+                    # an older category-analysis row compete with V6.9.3 evidence.
                     for key in ("enabled", "runs", "last_run_at"):
                         if key in raw:
                             state[key] = raw[key]
@@ -1164,7 +1164,7 @@ class CategoryStrategyEngine:
             len(qualifying) >= WALK_FORWARD_MIN_FOLDS
             and int(aggregate.get("trades") or 0) >= 30
             and _safe_float(aggregate.get("win_rate")) >= HISTORICAL_WIN_RATE_TARGET
-            and _safe_float(aggregate.get("profit_factor")) >= 1.30
+            and _safe_float(aggregate.get("profit_factor")) >= 1.20
             and _safe_float(aggregate.get("max_drawdown")) <= 0.12
             and min_wr >= WALK_FORWARD_MIN_FOLD_WIN_RATE
             and median_wr >= WALK_FORWARD_MIN_MEDIAN_WIN_RATE
@@ -1214,7 +1214,7 @@ class CategoryStrategyEngine:
         profit_factor = _safe_float(holdout["profit_factor"])
         max_dd = _safe_float(holdout["max_drawdown"])
 
-        raw_quality, _, raw_verified_70 = _historical_grade(trades, win_rate, profit_factor, max_dd)
+        raw_quality, _, raw_verified_target = _historical_grade(trades, win_rate, profit_factor, max_dd)
         walk_forward_folds = self._walk_forward_folds(
             frame,
             variant,
@@ -1222,17 +1222,17 @@ class CategoryStrategyEngine:
             cost=cost,
         )
         walk_forward = self._walk_forward_gate(walk_forward_folds, holdout)
-        # V6.9.2 only promotes 70% evidence when variant selection was stable AND
+        # V6.9.3 promotes the user-selected 60% evidence policy only when variant selection is stable AND
         # the untouched final holdout survives multiple chronological folds.
-        validated_70 = bool(raw_verified_70 and selection_stable and walk_forward["passed"])
-        if validated_70:
+        validated_target = bool(raw_verified_target and selection_stable and walk_forward["passed"])
+        if validated_target:
             quality = raw_quality
-            category_validation_status = "CATEGORY_VERIFIED_70_WALK_FORWARD"
+            category_validation_status = "CATEGORY_VERIFIED_60_WALK_FORWARD"
         elif (
             selection_stable
             and trades >= 20
-            and win_rate >= 0.62
-            and profit_factor >= 1.10
+            and win_rate >= 0.55
+            and profit_factor >= 1.05
             and max_dd <= 0.16
         ):
             quality = "B"
@@ -1241,7 +1241,7 @@ class CategoryStrategyEngine:
             quality = "C"
             category_validation_status = "CATEGORY_REJECT"
 
-        deep_status = "VERIFIED" if validated_70 else ("WATCH" if quality == "B" else "REJECT")
+        deep_status = "VERIFIED" if validated_target else ("WATCH" if quality == "B" else "REJECT")
         fast_score = _fast_score(trades, win_rate, profit_factor, max_dd)
 
         latest = frame.dropna(subset=["Close"]).iloc[-1]
@@ -1302,8 +1302,11 @@ class CategoryStrategyEngine:
             "historical_wins": wins,
             "historical_losses": losses,
             "historical_max_drawdown_pct": round(max_dd * 100.0, 2),
-            "historical_70_verified": validated_70,
-            "raw_holdout_70_pass": bool(raw_verified_70),
+            "historical_target_verified": validated_target,
+            "historical_60_verified": validated_target,
+            "historical_70_verified": bool(trades >= 30 and win_rate >= 0.70 and profit_factor >= 1.30 and max_dd <= 0.12 and selection_stable and walk_forward["passed"]),
+            "raw_holdout_target_pass": bool(raw_verified_target),
+            "raw_holdout_70_pass": bool(trades >= 30 and win_rate >= 0.70 and profit_factor >= 1.30 and max_dd <= 0.12),
             "walk_forward_pass": bool(walk_forward["passed"]),
             "walk_forward_fold_count": len(walk_forward_folds),
             "walk_forward_qualifying_folds": int(walk_forward["qualifying_folds"]),
@@ -1324,8 +1327,8 @@ class CategoryStrategyEngine:
             "historical_grade": quality,
             "deep_status": deep_status,
             "category_validation_status": category_validation_status,
-            "verified": validated_70,
-            "experimental": not validated_70,
+            "verified": validated_target,
+            "experimental": not validated_target,
             "strategy_quarantined": False,
             "smart_fast_score": round(fast_score, 2),
             "strategy_reason": live.reason,
@@ -1334,9 +1337,9 @@ class CategoryStrategyEngine:
             "rsi": round(_safe_float(latest.get("RSI14"), 50.0), 2),
             "adx": round(_safe_float(latest.get("ADX14")), 2),
             "holding_bars": holding,
-            "validation_target_pct": 70.0,
+            "validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
             "holdout_fraction_pct": 30.0,
-            "analysis_source": "CATEGORY_SPECIALIST_V692_OPTIMISED_PLUS_JASONG_MODEL_3_FOLD_HOLDOUT",
+            "analysis_source": "CATEGORY_SPECIALIST_V693_60WF_PLUS_JASONG_MODEL_3_FOLD_HOLDOUT",
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"].dropna().tail(160).tolist()
@@ -1352,9 +1355,8 @@ class CategoryStrategyEngine:
             "live_money_execution": False,
         }
 
-        # IG preflight remains delayed until there is a meaningful live setup and
-        # at least a Fast 65 evidence profile; this protects IG request allowance.
-        promising = live.direction in {"BUY", "SELL"} and quant_pass and ai_pass and fast_score >= 65.0
+        # V6.9.3 testing preflight begins at the same Fast 60 execution floor.
+        promising = live.direction in {"BUY", "SELL"} and quant_pass and ai_pass and fast_score >= STANDARD_FAST_SCORE_MIN
         if promising:
             try:
                 market = self._resolve_execution_market(seed)
@@ -1379,11 +1381,35 @@ class CategoryStrategyEngine:
         spread_pass = spread is not None and _safe_float(spread, 1e9) <= float(rule["spread_gate_bps"])
         row["spread_gate_bps"] = float(rule["spread_gate_bps"])
         row["spread_pass"] = spread_pass
+        rejection_reasons: List[str] = []
+        if live.direction not in {"BUY", "SELL"}:
+            rejection_reasons.append("NO_DIRECTION")
+        if not quant_pass:
+            rejection_reasons.append("QUANT_BELOW_28")
+        if not ai_pass:
+            rejection_reasons.append("MODEL_AI_BELOW_40")
+        if fast_score < STANDARD_FAST_SCORE_MIN:
+            rejection_reasons.append("FAST_BELOW_60")
+        if not selection_stable:
+            rejection_reasons.append("SELECTION_UNSTABLE")
+        if win_rate < HISTORICAL_WIN_RATE_TARGET:
+            rejection_reasons.append("HOLDOUT_WR_BELOW_60")
+        if profit_factor < 1.20:
+            rejection_reasons.append("PROFIT_FACTOR_BELOW_1_20")
+        if not walk_forward["passed"]:
+            rejection_reasons.append("WALK_FORWARD_BELOW_60")
+        if promising and not row["ig_tradeable"]:
+            rejection_reasons.append("IG_NOT_TRADEABLE")
+        if promising and not spread_pass:
+            rejection_reasons.append("SPREAD_GATE_FAIL")
+        if not promising:
+            rejection_reasons.append("IG_PREFLIGHT_NOT_REACHED")
+        row["rejection_reasons"] = rejection_reasons
         row["standard_eligible"] = bool(
             live.direction in {"BUY", "SELL"}
             and quant_pass
             and ai_pass
-            and validated_70
+            and validated_target
             and fast_score >= STANDARD_FAST_SCORE_MIN
             and row["ig_tradeable"]
             and spread_pass
@@ -1391,7 +1417,7 @@ class CategoryStrategyEngine:
         row["trade_eligible"] = row["standard_eligible"]
         row["direction_match"] = live.direction in {"BUY", "SELL"}
         row["confidence_qualified"] = bool(quant_pass and ai_pass)
-        row["intelligence_source"] = "CATEGORY_SPECIALIST_V692"
+        row["intelligence_source"] = "CATEGORY_SPECIALIST_V693"
         row["fast_threshold_source"] = "CATEGORY_SPECIALIST_OPTIMISED"
         row["spread_bps"] = row.get("ig_spread_bps")
         row["spread_limit_bps"] = float(rule["spread_gate_bps"])
@@ -1431,6 +1457,8 @@ class CategoryStrategyEngine:
                     "walk_forward_complete": False,
                     "direction": "WAIT",
                     "deep_status": "CATEGORY_REJECT",
+                    "historical_target_verified": False,
+                    "historical_60_verified": False,
                     "historical_70_verified": False,
                     "standard_eligible": False,
                     "compound_eligible": False,
@@ -1575,7 +1603,7 @@ class CategoryStrategyEngine:
                     row["elite_state"] = "ELITE_A"
                 else:
                     row["elite_state"] = "OBSERVE"
-                row["execution_basis"] = "CATEGORY_TOP2_VALIDATED_70" if row["compound_eligible"] else "NOT_QUALIFIED"
+                row["execution_basis"] = "CATEGORY_TOP2_VALIDATED_60_WF" if row["compound_eligible"] else "NOT_QUALIFIED"
                 row["rejection_reasons"] = [] if row["compound_eligible"] else list(row.get("rejection_reasons") or [])
                 ranked.append(row)
             output[cat] = ranked
@@ -1674,7 +1702,7 @@ class CategoryStrategyEngine:
             rows = [row for row in current if str(row.get("category") or "").upper() == category]
             rows.sort(
                 key=lambda row: (
-                    bool(row.get("historical_70_verified")),
+                    bool(row.get("historical_target_verified")),
                     bool(row.get("walk_forward_pass")),
                     bool(row.get("optimizer_selection_stable")),
                     _safe_float(row.get("historical_win_rate")),
@@ -1700,17 +1728,22 @@ class CategoryStrategyEngine:
                 "walk_forward_min_win_rate_pct": (best or {}).get("walk_forward_min_win_rate_pct"),
                 "walk_forward_median_win_rate_pct": (best or {}).get("walk_forward_median_win_rate_pct"),
                 "walk_forward_profitable_folds": (best or {}).get("walk_forward_profitable_folds"),
+                "historical_target_verified": bool((best or {}).get("historical_target_verified", False)),
+                "historical_60_verified": bool((best or {}).get("historical_60_verified", False)),
                 "historical_70_verified": bool((best or {}).get("historical_70_verified", False)),
                 "leaderboard": (best or {}).get("optimizer_leaderboard", []),
             }
         return {
             "version": self.VERSION,
-            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological validation folds",
+            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological folds; execution target 60% WR / PF 1.20 / WF 60%",
             "final_holdout_used_for_selection": False,
             "walk_forward_folds": WALK_FORWARD_FOLDS,
             "quant_min_pct": 28.0,
             "model_ai_min_pct": 40.0,
-            "historical_validation_target_pct": 70.0,
+            "historical_validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
+            "profit_factor_target": 1.20,
+            "fast_score_min": STANDARD_FAST_SCORE_MIN,
+            "walk_forward_min_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
             "coverage": self.evidence_coverage(),
             "categories": categories,
             "live_money_execution": False,
@@ -1749,14 +1782,17 @@ class CategoryStrategyEngine:
         with self._lock:
             return {
                 "version": self.VERSION,
-                "name": "JASONG V6.9.2 COMPLETE SPECIALIST REAL-TIME TEST INTELLIGENCE",
+                "name": "JASONG V6.9.3 COMPLETE IG DEMO TEST INTELLIGENCE",
                 "enabled": bool(self._state.get("enabled", True)),
                 "confidence_policy": {
                     "quant_min": QUANT_MIN_CONFIDENCE,
                     "quant_min_pct": 28.0,
                     "model_ai_min": MODEL_AI_MIN_CONFIDENCE,
                     "model_ai_min_pct": 40.0,
-                    "historical_validation_target_pct": 70.0,
+                    "historical_validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
+                    "profit_factor_target": 1.20,
+                    "fast_score_min": STANDARD_FAST_SCORE_MIN,
+                    "walk_forward_min_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
                     "optimizer_final_holdout_pct": 30.0,
                     "optimizer_selection_window_pct": 30.0,
                     "walk_forward_folds": WALK_FORWARD_FOLDS,
