@@ -36,15 +36,6 @@ class JasongApp extends StatelessWidget {
           elevation: 0,
           scrolledUnderElevation: 0,
         ),
-        cardTheme: CardThemeData(
-          color: const Color(0xFF0E1A24),
-          elevation: 0,
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(22),
-            side: const BorderSide(color: Color(0xFF17303A)),
-          ),
-        ),
         navigationBarTheme: NavigationBarThemeData(
           backgroundColor: const Color(0xFF0A151E),
           indicatorColor: teal.withValues(alpha: .16),
@@ -87,18 +78,20 @@ class _JasongShellState extends State<JasongShell>
     defaultValue: 'https://jasong-ai-trader-v2.onrender.com',
   );
 
+  final http.Client _client = http.Client();
+
   int selectedTab = 0;
   bool refreshing = false;
   String? error;
+  String? activeEndpoint;
   DateTime? lastUpdated;
   Timer? refreshTimer;
-  final http.Client _client = http.Client();
 
-  Map<String, dynamic> marketStatus = {};
   Map<String, dynamic> portfolioStatus = {};
   Map<String, dynamic> forwardStatus = {};
   Map<String, dynamic> forwardLearning = {};
   Map<String, dynamic> compoundPayload = {};
+  Map<String, dynamic> dataHealth = {};
   List<Map<String, dynamic>> categoryPositions = [];
   List<Map<String, dynamic>> forwardTrades = [];
 
@@ -106,13 +99,12 @@ class _JasongShellState extends State<JasongShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    Future.microtask(refreshAll);
-    // Keep the shell light. The Markets tab has its own focused poller,
-    // so do not run the seven-endpoint shell refresh at the same time.
+    Future.microtask(() => refreshAll());
+
     refreshTimer = Timer.periodic(
       const Duration(seconds: 30),
       (_) {
-        if (selectedTab != 1) {
+        if (selectedTab != 1 && !refreshing) {
           refreshAll(silent: true);
         }
       },
@@ -129,173 +121,223 @@ class _JasongShellState extends State<JasongShell>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.resumed && selectedTab != 1) {
       refreshAll(silent: true);
     }
   }
 
-  bool _isTransientBackendError(Object value) {
-    final text = value.toString().toLowerCase();
-    return value is TimeoutException ||
-        value is SocketException ||
-        value is http.ClientException ||
-        text.contains('http 502') ||
-        text.contains('http 503') ||
-        text.contains('http 504') ||
-        text.contains('connection reset') ||
-        text.contains('connection closed') ||
-        text.contains('timed out') ||
-        text.contains('timeout');
-  }
-
-  String _friendlyBackendError(Object value) {
-    final text = value.toString().toLowerCase();
-    if (text.contains('502')) {
-      return 'Backend temporarily busy (HTTP 502). Keeping the last good data and retrying automatically.';
-    }
-    if (text.contains('503')) {
-      return 'Backend temporarily unavailable (HTTP 503). Keeping the last good data and retrying automatically.';
-    }
-    if (text.contains('504') || value is TimeoutException) {
-      return 'Backend response timed out. Keeping the last good data and retrying automatically.';
-    }
-    if (value is SocketException || value is http.ClientException) {
-      return 'Network connection interrupted. Keeping the last good data and retrying automatically.';
-    }
-    return 'Could not refresh the latest data. The previous snapshot is still being shown.';
-  }
-
   Future<Map<String, dynamic>> _get(
     String path, {
-    int timeoutSeconds = 35,
+    int timeoutSeconds = 20,
   }) async {
     final response = await _client
         .get(
           Uri.parse('$apiBase$path'),
-          headers: const {'Accept': 'application/json'},
+          headers: const {
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache',
+          },
         )
         .timeout(Duration(seconds: timeoutSeconds));
 
     if (response.statusCode != 200) {
-      // Never expose Render's full HTML error document inside the mobile UI.
       throw HttpException('HTTP ${response.statusCode}');
     }
 
-    final contentType = response.headers['content-type'] ?? '';
-    if (!contentType.toLowerCase().contains('json') &&
-        response.body.trimLeft().startsWith('<')) {
-      throw const FormatException('Backend returned HTML instead of JSON');
+    final body = response.body.trim();
+    if (body.startsWith('<')) {
+      throw const FormatException('Backend returned HTML');
     }
 
-    final decoded = jsonDecode(response.body);
+    final decoded = jsonDecode(body);
     if (decoded is! Map) {
-      throw const FormatException('Unexpected backend response');
+      throw const FormatException('Expected JSON object');
     }
     return Map<String, dynamic>.from(decoded);
   }
 
-  Future<Map<String, dynamic>> _safeGet(
+  bool _transient(Object e) {
+    final text = e.toString().toLowerCase();
+    return e is TimeoutException ||
+        e is SocketException ||
+        e is http.ClientException ||
+        text.contains('502') ||
+        text.contains('503') ||
+        text.contains('504') ||
+        text.contains('timeout') ||
+        text.contains('timed out') ||
+        text.contains('connection reset') ||
+        text.contains('connection closed');
+  }
+
+  String _friendlyError(String path, Object e) {
+    final text = e.toString().toLowerCase();
+
+    if (text.contains('502')) {
+      return '$path: Render is temporarily busy (HTTP 502).';
+    }
+    if (text.contains('503')) {
+      return '$path: backend temporarily unavailable (HTTP 503).';
+    }
+    if (text.contains('504') || e is TimeoutException) {
+      return '$path: request timed out.';
+    }
+    if (e is SocketException || e is http.ClientException) {
+      return '$path: network connection interrupted.';
+    }
+    if (e is FormatException) {
+      return '$path: invalid server response.';
+    }
+    return '$path: ${e.runtimeType}.';
+  }
+
+  Future<Map<String, dynamic>> _getRetry(
     String path, {
+    int timeoutSeconds = 20,
     int attempts = 2,
   }) async {
     Object? lastError;
+
     for (var attempt = 1; attempt <= attempts; attempt++) {
       try {
-        return await _get(path);
+        return await _get(
+          path,
+          timeoutSeconds: timeoutSeconds,
+        );
       } catch (e) {
         lastError = e;
-        if (!_isTransientBackendError(e) || attempt >= attempts) {
-          break;
+        if (!_transient(e) || attempt >= attempts) {
+          rethrow;
         }
         await Future.delayed(Duration(seconds: attempt * 2));
       }
     }
-    return <String, dynamic>{
-      '_request_error': _friendlyBackendError(
-        lastError ?? const HttpException('Unknown backend error'),
-      ),
-    };
+
+    throw lastError ?? const HttpException('Unknown request failure');
+  }
+
+  void _markSuccess() {
+    if (!mounted) return;
+    setState(() {
+      lastUpdated = DateTime.now();
+      error = null;
+    });
+  }
+
+  Future<void> _loadStep(
+    String path,
+    void Function(Map<String, dynamic>) apply, {
+    int timeoutSeconds = 20,
+    bool silent = false,
+  }) async {
+    if (!mounted) return;
+
+    setState(() {
+      activeEndpoint = path;
+    });
+
+    try {
+      final payload = await _getRetry(
+        path,
+        timeoutSeconds: timeoutSeconds,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        apply(payload);
+        lastUpdated = DateTime.now();
+        error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      if (!silent) {
+        setState(() {
+          error = _friendlyError(path, e);
+        });
+      }
+    }
+  }
+
+  List<Map<String, dynamic>> _mapList(dynamic value) {
+    if (value is! List) return const [];
+    return value
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
   }
 
   Future<void> refreshAll({bool silent = false}) async {
     if (refreshing) return;
+
     if (mounted) {
       setState(() {
         refreshing = true;
+        activeEndpoint = 'connecting';
         if (!silent) error = null;
       });
     }
 
     try {
-      // Deliberately sequential. The previous V6.9.4 mobile build fired seven
-      // requests at Render at once. Together with the Markets poller this could
-      // create request bursts and surface Render 502 pages.
-      final market = await _safeGet('/market-categories/status');
-      final portfolio = await _safeGet('/category-portfolio/status');
-      final forward = await _safeGet('/forward-validation/status');
-      final learning = await _safeGet('/forward-validation/learning');
-      final compound = await _safeGet('/market-categories/compound-candidates');
-      final positions = await _safeGet('/category-portfolio/positions');
-      final trades = await _safeGet('/forward-validation/trades');
+      // Progressive loading:
+      // each successful response updates the screen immediately.
+      // Heavy/secondary endpoints cannot hold the whole UI at zero.
 
-      if (!mounted) return;
+      await _loadStep(
+        '/category-portfolio/status',
+        (payload) => portfolioStatus = payload,
+        timeoutSeconds: 15,
+        silent: silent,
+      );
 
-      final positionsRaw = positions['positions'];
-      final tradesRaw = trades['trades'];
-      final requestErrors = <String>[
-        for (final payload in [
-          market,
-          portfolio,
-          forward,
-          learning,
-          compound,
-          positions,
-          trades,
-        ])
-          if (payload['_request_error'] != null)
-            '${payload['_request_error']}',
-      ];
+      await _loadStep(
+        '/forward-validation/status',
+        (payload) => forwardStatus = payload,
+        timeoutSeconds: 20,
+        silent: silent,
+      );
 
-      setState(() {
-        if (market.isNotEmpty && market['_request_error'] == null) {
-          marketStatus = market;
-        }
-        if (portfolio.isNotEmpty && portfolio['_request_error'] == null) {
-          portfolioStatus = portfolio;
-        }
-        if (forward.isNotEmpty && forward['_request_error'] == null) {
-          forwardStatus = forward;
-        }
-        if (learning.isNotEmpty && learning['_request_error'] == null) {
-          forwardLearning = learning;
-        }
-        if (compound.isNotEmpty && compound['_request_error'] == null) {
-          compoundPayload = compound;
-        }
-        if (positionsRaw is List) {
-          categoryPositions = positionsRaw
-              .whereType<Map>()
-              .map((row) => Map<String, dynamic>.from(row))
-              .toList();
-        }
-        if (tradesRaw is List) {
-          forwardTrades = tradesRaw
-              .whereType<Map>()
-              .map((row) => Map<String, dynamic>.from(row))
-              .toList();
-        }
-        if (requestErrors.length < 7) {
-          lastUpdated = DateTime.now();
-        }
-        error = !silent && requestErrors.isNotEmpty
-            ? requestErrors.first
-            : null;
-      });
-    } catch (e) {
-      if (!mounted || silent) return;
-      setState(() => error = _friendlyBackendError(e));
+      await _loadStep(
+        '/category-portfolio/positions',
+        (payload) => categoryPositions = _mapList(payload['positions']),
+        timeoutSeconds: 15,
+        silent: silent,
+      );
+
+      await _loadStep(
+        '/forward-validation/trades',
+        (payload) => forwardTrades = _mapList(payload['trades']),
+        timeoutSeconds: 20,
+        silent: silent,
+      );
+
+      await _loadStep(
+        '/forward-validation/learning',
+        (payload) => forwardLearning = payload,
+        timeoutSeconds: 15,
+        silent: silent,
+      );
+
+      await _loadStep(
+        '/market-categories/data-health',
+        (payload) => dataHealth = payload,
+        timeoutSeconds: 15,
+        silent: silent,
+      );
+
+      // Compound candidate generation can be heavier, so load it last.
+      await _loadStep(
+        '/market-categories/compound-candidates',
+        (payload) => compoundPayload = payload,
+        timeoutSeconds: 30,
+        silent: silent,
+      );
     } finally {
-      if (mounted) setState(() => refreshing = false);
+      if (mounted) {
+        setState(() {
+          refreshing = false;
+          activeEndpoint = null;
+        });
+      }
     }
   }
 
@@ -315,19 +357,33 @@ class _JasongShellState extends State<JasongShell>
     return int.tryParse('$value') ?? 0;
   }
 
-  String _money(dynamic value) {
-    final n = _num(value);
-    final sign = n > 0 ? '+' : '';
-    return '$sign${n.toStringAsFixed(2)}';
+  String _displayInt(
+    bool loaded,
+    dynamic value,
+  ) {
+    return loaded ? '${_int(value)}' : '—';
   }
 
   String _timeLabel() {
     final value = lastUpdated;
-    if (value == null) return 'waiting for data';
+    if (value == null) {
+      if (refreshing) return 'connecting…';
+      return 'not connected';
+    }
     final h = value.hour.toString().padLeft(2, '0');
     final m = value.minute.toString().padLeft(2, '0');
     final s = value.second.toString().padLeft(2, '0');
     return 'updated $h:$m:$s';
+  }
+
+  Map<String, dynamic> get _strategyMetrics {
+    final raw = forwardStatus['strategy_metrics'];
+    return raw is Map ? Map<String, dynamic>.from(raw) : {};
+  }
+
+  List<Map<String, dynamic>> get _compoundCandidates {
+    final raw = compoundPayload['candidates'];
+    return _mapList(raw);
   }
 
   List<Map<String, dynamic>> get _openCategoryPositions {
@@ -336,39 +392,38 @@ class _JasongShellState extends State<JasongShell>
     }).toList();
   }
 
-  List<Map<String, dynamic>> get _compoundCandidates {
-    final raw = compoundPayload['candidates'];
-    if (raw is! List) return const [];
-    return raw
-        .whereType<Map>()
-        .map((row) => Map<String, dynamic>.from(row))
-        .toList();
-  }
-
-  Map<String, dynamic> get _strategyMetrics {
-    final raw = forwardStatus['strategy_metrics'];
-    return raw is Map ? Map<String, dynamic>.from(raw) : {};
-  }
-
-  Widget _card({required Widget child, EdgeInsets? padding}) {
+  Widget _card({
+    required Widget child,
+    EdgeInsets? padding,
+  }) {
     return Container(
       width: double.infinity,
       padding: padding ?? const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .04),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: .075)),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: .075),
+        ),
       ),
       child: child,
     );
   }
 
-  Widget _pill(String text, {Color color = _blue}) {
+  Widget _pill(
+    String text, {
+    Color color = _blue,
+  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 5,
+      ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: .11),
-        border: Border.all(color: color.withValues(alpha: .3)),
+        border: Border.all(
+          color: color.withValues(alpha: .30),
+        ),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
@@ -404,14 +459,20 @@ class _JasongShellState extends State<JasongShell>
           Text(
             label,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white38, fontSize: 8.5),
+            style: const TextStyle(
+              color: Colors.white38,
+              fontSize: 8.5,
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _sectionTitle(String title, {String? trailing}) {
+  Widget _sectionTitle(
+    String title, {
+    String? trailing,
+  }) {
     return Row(
       children: [
         Expanded(
@@ -427,7 +488,10 @@ class _JasongShellState extends State<JasongShell>
         if (trailing != null)
           Text(
             trailing,
-            style: const TextStyle(color: Colors.white38, fontSize: 9),
+            style: const TextStyle(
+              color: Colors.white38,
+              fontSize: 9,
+            ),
           ),
       ],
     );
@@ -444,7 +508,10 @@ class _JasongShellState extends State<JasongShell>
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(14),
               gradient: const LinearGradient(
-                colors: [Color(0xFF65E6D3), Color(0xFF6FA8FF)],
+                colors: [
+                  Color(0xFF65E6D3),
+                  Color(0xFF6FA8FF),
+                ],
                 begin: Alignment.bottomLeft,
                 end: Alignment.topRight,
               ),
@@ -468,7 +535,10 @@ class _JasongShellState extends State<JasongShell>
               children: [
                 Text(
                   'Jasong AI Trader',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
                 SizedBox(height: 2),
                 Text(
@@ -476,7 +546,6 @@ class _JasongShellState extends State<JasongShell>
                   style: TextStyle(
                     fontSize: 9.2,
                     color: Colors.white54,
-                    letterSpacing: .15,
                   ),
                 ),
               ],
@@ -488,7 +557,9 @@ class _JasongShellState extends State<JasongShell>
                 ? const SizedBox(
                     width: 18,
                     height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                    ),
                   )
                 : const Icon(Icons.refresh_rounded),
           ),
@@ -497,62 +568,203 @@ class _JasongShellState extends State<JasongShell>
     );
   }
 
+  Widget _connectionBanner() {
+    if (!refreshing && error == null) {
+      return const SizedBox.shrink();
+    }
+
+    final message = error ??
+        'Loading ${activeEndpoint ?? 'backend data'}…';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: _card(
+        child: Row(
+          children: [
+            if (refreshing)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                ),
+              )
+            else
+              const Icon(
+                Icons.warning_amber_rounded,
+                size: 16,
+                color: _amber,
+              ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: TextStyle(
+                  color: error == null
+                      ? Colors.white54
+                      : _amber,
+                  fontSize: 9.5,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _homePage() {
-    final stored = _int(forwardStatus['stored_settled_trades']);
-    final open = _int(portfolioStatus['open_positions']);
-    final closes = _int(portfolioStatus['closes']);
-    final remaining = _int(portfolioStatus['global_remaining_positions']);
-    final liveMoney = forwardStatus['live_money_execution'] == true;
-    final authority = '${forwardStatus['authority'] ?? 'BROKER_SETTLED_FORWARD_ONLY'}';
+    final forwardLoaded = forwardStatus.isNotEmpty;
+    final portfolioLoaded = portfolioStatus.isNotEmpty;
 
     final metrics = _strategyMetrics.values
         .whereType<Map>()
-        .map((row) => Map<String, dynamic>.from(row))
+        .map(
+          (row) => Map<String, dynamic>.from(row),
+        )
         .toList();
+
     final learningStrategies = metrics
-        .where((row) => _int(row['settled_trades']) > 0)
+        .where(
+          (row) => _int(row['settled_trades']) > 0,
+        )
         .length;
+
     final primeStrategies = metrics
-        .where((row) => row['prime_eligible'] == true)
+        .where(
+          (row) => row['prime_eligible'] == true,
+        )
         .length;
+
+    final liveMoney =
+        forwardStatus['live_money_execution'] == true;
+
+    final authority =
+        '${forwardStatus['authority'] ?? 'BROKER_SETTLED_FORWARD_ONLY'}';
+
+    final sourceMap = dataHealth['last_source_by_market'];
+    final sourcesLoaded = sourceMap is Map && sourceMap.isNotEmpty;
+    final sourceSummary = sourcesLoaded
+        ? sourceMap.entries
+            .take(3)
+            .map((e) => '${e.key}: ${e.value}')
+            .join(' • ')
+        : 'market source telemetry loading';
 
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
+        padding: const EdgeInsets.fromLTRB(
+          14,
+          6,
+          14,
+          110,
+        ),
         children: [
-          _sectionTitle('SYSTEM — FORWARD PRIME', trailing: _timeLabel()),
+          _sectionTitle(
+            'SYSTEM — FORWARD PRIME',
+            trailing: _timeLabel(),
+          ),
           const SizedBox(height: 10),
+          _connectionBanner(),
           _card(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 Wrap(
                   spacing: 7,
                   runSpacing: 7,
                   children: [
-                    _pill('IG DEMO ONLY', color: _green),
-                    _pill('FORWARD AUTHORITY', color: _blue),
-                    _pill('HISTORY = INFO', color: _purple),
-                    _pill(liveMoney ? 'LIVE MONEY ON' : 'LIVE MONEY OFF', color: liveMoney ? _red : _green),
+                    _pill(
+                      'IG DEMO ONLY',
+                      color: _green,
+                    ),
+                    _pill(
+                      'FORWARD AUTHORITY',
+                      color: _blue,
+                    ),
+                    _pill(
+                      'HISTORY = INFO',
+                      color: _purple,
+                    ),
+                    _pill(
+                      liveMoney
+                          ? 'LIVE MONEY ON'
+                          : 'LIVE MONEY OFF',
+                      color:
+                          liveMoney ? _red : _green,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 13),
                 Row(
                   children: [
-                    _metric('SETTLED STORE', '$stored'),
-                    _metric('OPEN JSCAT', '$open'),
-                    _metric('JSCAT CLOSED', '$closes'),
-                    _metric('CAPACITY LEFT', '$remaining'),
+                    _metric(
+                      'SETTLED STORE',
+                      _displayInt(
+                        forwardLoaded,
+                        forwardStatus[
+                            'stored_settled_trades'],
+                      ),
+                    ),
+                    _metric(
+                      'OPEN JSCAT',
+                      _displayInt(
+                        portfolioLoaded,
+                        portfolioStatus[
+                            'open_positions'],
+                      ),
+                    ),
+                    _metric(
+                      'JSCAT CLOSED',
+                      _displayInt(
+                        portfolioLoaded,
+                        portfolioStatus['closes'],
+                      ),
+                    ),
+                    _metric(
+                      'CAPACITY LEFT',
+                      _displayInt(
+                        portfolioLoaded,
+                        portfolioStatus[
+                            'global_remaining_positions'],
+                      ),
+                    ),
                   ],
                 ),
-                const Divider(height: 24, color: Colors.white10),
+                const Divider(
+                  height: 24,
+                  color: Colors.white10,
+                ),
                 Row(
                   children: [
-                    _metric('LEARNING STRATS', '$learningStrategies', color: _blue),
-                    _metric('PRIME STRATS', '$primeStrategies', color: primeStrategies > 0 ? _amber : Colors.white54),
-                    _metric('QUANT', '≥28%', color: _green),
-                    _metric('AI / FAST', '40 / 45', color: _green),
+                    _metric(
+                      'LEARNING STRATS',
+                      forwardLoaded
+                          ? '$learningStrategies'
+                          : '—',
+                      color: _blue,
+                    ),
+                    _metric(
+                      'PRIME STRATS',
+                      forwardLoaded
+                          ? '$primeStrategies'
+                          : '—',
+                      color: primeStrategies > 0
+                          ? _amber
+                          : Colors.white54,
+                    ),
+                    _metric(
+                      'QUANT',
+                      '≥28%',
+                      color: _green,
+                    ),
+                    _metric(
+                      'AI / FAST',
+                      '40 / 45',
+                      color: _green,
+                    ),
                   ],
                 ),
               ],
@@ -561,34 +773,84 @@ class _JasongShellState extends State<JasongShell>
           const SizedBox(height: 11),
           _card(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
                 const Text(
                   'PRIME AUTHORITY',
-                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: _teal),
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    color: _teal,
+                  ),
                 ),
                 const SizedBox(height: 7),
                 Text(
                   authority.replaceAll('_', ' '),
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w900),
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
                 const SizedBox(height: 7),
                 const Text(
-                  'STRONG → controlled IG DEMO category learning → broker settlement → strategy forward metrics → PRIME → Compound.',
-                  style: TextStyle(color: Colors.white60, fontSize: 10, height: 1.4),
+                  'STRONG → controlled IG DEMO category learning → '
+                  'broker settlement → strategy forward metrics → '
+                  'PRIME → Compound.',
+                  style: TextStyle(
+                    color: Colors.white60,
+                    fontSize: 10,
+                    height: 1.4,
+                  ),
                 ),
               ],
             ),
           ),
-          if (error != null) ...[
-            const SizedBox(height: 10),
-            _card(
-              child: Text(
-                error!,
-                style: const TextStyle(color: _red, fontSize: 10),
-              ),
+          const SizedBox(height: 11),
+          _card(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'MARKET DATA HEALTH',
+                        style: TextStyle(
+                          color: _teal,
+                          fontSize: 10,
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    _pill(
+                      dataHealth[
+                                  'yahoo_cooldown_active'] ==
+                              true
+                          ? 'YAHOO COOLDOWN'
+                          : 'DATA ROUTER READY',
+                      color: dataHealth[
+                                  'yahoo_cooldown_active'] ==
+                              true
+                          ? _amber
+                          : _green,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  sourceSummary,
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 9,
+                    height: 1.35,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -596,59 +858,62 @@ class _JasongShellState extends State<JasongShell>
 
   Widget _compoundPage() {
     final rows = _compoundCandidates;
-    final rule = '${compoundPayload['rule'] ?? ''}';
+    final loaded = compoundPayload.isNotEmpty;
+    final rule =
+        '${compoundPayload['rule'] ?? ''}';
 
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
+        padding: const EdgeInsets.fromLTRB(
+          14,
+          6,
+          14,
+          110,
+        ),
         children: [
-          _sectionTitle('COMPOUND — PRIME ONLY', trailing: 'V6.9.4-forward'),
+          _sectionTitle(
+            'COMPOUND — PRIME ONLY',
+            trailing: _timeLabel(),
+          ),
           const SizedBox(height: 10),
+          _connectionBanner(),
           _card(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    _metric('CANDIDATES', '${rows.length}', color: rows.isNotEmpty ? _amber : Colors.white54),
-                    _metric('RANK', '#1 / #2'),
-                    _metric('QUANT', '≥28%'),
-                    _metric('AI / FAST', '40 / 45'),
-                  ],
+                _metric(
+                  'CANDIDATES',
+                  loaded ? '${rows.length}' : '—',
+                  color: rows.isNotEmpty
+                      ? _amber
+                      : Colors.white54,
                 ),
-                if (rule.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    rule,
-                    style: const TextStyle(color: Colors.white54, fontSize: 9.5, height: 1.35),
-                  ),
-                ],
+                _metric('RANK', '#1 / #2'),
+                _metric('QUANT', '≥28%'),
+                _metric('AI / FAST', '40 / 45'),
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          if (rows.isEmpty)
-            _card(
-              child: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Column(
-                  children: [
-                    Icon(Icons.hourglass_top_rounded, color: _blue, size: 30),
-                    SizedBox(height: 9),
-                    Text(
-                      'No PRIME Compound candidates yet',
-                      style: TextStyle(fontWeight: FontWeight.w900),
-                    ),
-                    SizedBox(height: 5),
-                    Text(
-                      'This is expected while strategies accumulate at least 12 broker-settled forward trades and pass PF, expectancy, WR, bootstrap and drawdown gates.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white54, fontSize: 10, height: 1.4),
-                    ),
-                  ],
-                ),
+          if (rule.isNotEmpty) ...[
+            const SizedBox(height: 9),
+            Text(
+              rule,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 9,
+                height: 1.35,
               ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          if (!loaded)
+            _emptyMessage(
+              'Compound candidates are still loading.',
+            )
+          else if (rows.isEmpty)
+            _emptyMessage(
+              'No PRIME Compound candidates yet. '
+              'Strategies are still building broker-settled forward evidence.',
             )
           else
             ...rows.map(_compoundCandidateCard),
@@ -657,57 +922,88 @@ class _JasongShellState extends State<JasongShell>
     );
   }
 
-  Widget _compoundCandidateCard(Map<String, dynamic> row) {
-    final market = '${row['market'] ?? row['symbol'] ?? '-'}';
-    final direction = '${row['direction'] ?? '-'}'.toUpperCase();
-    final strategy = '${row['strategy_name'] ?? row['strategy_id'] ?? '-'}';
+  Widget _compoundCandidateCard(
+    Map<String, dynamic> row,
+  ) {
+    final market =
+        '${row['market'] ?? row['symbol'] ?? '-'}';
+    final direction =
+        '${row['direction'] ?? '-'}'.toUpperCase();
+    final strategy =
+        '${row['strategy_name'] ?? row['strategy_id'] ?? '-'}';
     final quant = _pct(row['quant_confidence']);
     final ai = _pct(row['model_ai_confidence']);
-    final fast = _num(row['live_fast_score'] ?? row['smart_fast_score']);
+    final fast = _num(
+      row['live_fast_score'] ??
+          row['smart_fast_score'],
+    );
+
     final forwardRaw = row['forward_validation'];
-    final forward = forwardRaw is Map ? Map<String, dynamic>.from(forwardRaw) : <String, dynamic>{};
-    final settled = _int(forward['settled_trades']);
-    final pf = _num(forward['profit_factor']);
-    final exp = _num(forward['expectancy_r']);
+    final forward = forwardRaw is Map
+        ? Map<String, dynamic>.from(forwardRaw)
+        : <String, dynamic>{};
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 9),
       child: _card(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
           children: [
             Row(
               children: [
                 Expanded(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
                     children: [
-                      Text(market, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w900)),
-                      Text(strategy, style: const TextStyle(color: Colors.white54, fontSize: 9)),
+                      Text(
+                        market,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                      Text(
+                        strategy,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 9,
+                        ),
+                      ),
                     ],
                   ),
                 ),
-                _pill(direction, color: direction == 'BUY' ? _green : _red),
+                _pill(
+                  direction,
+                  color: direction == 'BUY'
+                      ? _green
+                      : _red,
+                ),
                 const SizedBox(width: 6),
                 _pill('PRIME', color: _amber),
               ],
             ),
-            const SizedBox(height: 11),
+            const SizedBox(height: 10),
             Row(
               children: [
-                _metric('QUANT', '${quant.toStringAsFixed(1)}%'),
-                _metric('AI', '${ai.toStringAsFixed(1)}%'),
-                _metric('FAST', fast.toStringAsFixed(0)),
-                _metric('SETTLED', '$settled'),
-              ],
-            ),
-            const SizedBox(height: 9),
-            Row(
-              children: [
-                _metric('PF', pf.toStringAsFixed(2)),
-                _metric('EXP', '${exp >= 0 ? '+' : ''}${exp.toStringAsFixed(2)}R'),
-                _metric('RANK', '#${row['category_rank'] ?? '-'}'),
-                _metric('CATEGORY', '${row['category'] ?? '-'}'),
+                _metric(
+                  'QUANT',
+                  '${quant.toStringAsFixed(1)}%',
+                ),
+                _metric(
+                  'AI',
+                  '${ai.toStringAsFixed(1)}%',
+                ),
+                _metric(
+                  'FAST',
+                  fast.toStringAsFixed(0),
+                ),
+                _metric(
+                  'SETTLED',
+                  '${_int(forward['settled_trades'])}',
+                ),
               ],
             ),
           ],
@@ -716,43 +1012,75 @@ class _JasongShellState extends State<JasongShell>
     );
   }
 
-  String _epochLabel(dynamic value) {
-    final seconds = value is num ? value.toDouble() : double.tryParse('$value');
-    if (seconds == null || seconds <= 0) return '-';
-    final dt = DateTime.fromMillisecondsSinceEpoch(
-      (seconds * 1000).round(),
-      isUtc: true,
-    ).toLocal();
-    final h = dt.hour.toString().padLeft(2, '0');
-    final m = dt.minute.toString().padLeft(2, '0');
-    return '${dt.day}/${dt.month} $h:$m';
-  }
-
   Widget _tradesPage() {
     final openRows = _openCategoryPositions;
-    final wins = forwardTrades.where((row) => '${row['broker_result'] ?? ''}'.toUpperCase() == 'WIN').length;
-    final losses = forwardTrades.where((row) => '${row['broker_result'] ?? ''}'.toUpperCase() == 'LOSS').length;
+    final loaded =
+        forwardTrades.isNotEmpty ||
+        forwardStatus.isNotEmpty;
+
+    final wins = forwardTrades.where((row) {
+      return '${row['broker_result'] ?? ''}'
+              .toUpperCase() ==
+          'WIN';
+    }).length;
+
+    final losses = forwardTrades.where((row) {
+      return '${row['broker_result'] ?? ''}'
+              .toUpperCase() ==
+          'LOSS';
+    }).length;
+
     final total = forwardTrades.length;
-    final wr = total > 0 ? wins * 100 / total : 0.0;
+    final wr = total > 0
+        ? wins * 100.0 / total
+        : 0.0;
 
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
+        padding: const EdgeInsets.fromLTRB(
+          14,
+          6,
+          14,
+          110,
+        ),
         children: [
-          _sectionTitle('TRADES — IG DEMO', trailing: _timeLabel()),
+          _sectionTitle(
+            'TRADES — IG DEMO',
+            trailing: _timeLabel(),
+          ),
           const SizedBox(height: 10),
+          _connectionBanner(),
           _card(
-            child: Column(
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    _metric('OPEN JSCAT', '${openRows.length}', color: _blue),
-                    _metric('SETTLED', '$total'),
-                    _metric('WINS', '$wins', color: _green),
-                    _metric('LOSSES', '$losses', color: _red),
-                    _metric('WR', '${wr.toStringAsFixed(1)}%'),
-                  ],
+                _metric(
+                  'OPEN JSCAT',
+                  categoryPositions.isEmpty &&
+                          portfolioStatus.isEmpty
+                      ? '—'
+                      : '${openRows.length}',
+                  color: _blue,
+                ),
+                _metric(
+                  'SETTLED',
+                  loaded ? '$total' : '—',
+                ),
+                _metric(
+                  'WINS',
+                  loaded ? '$wins' : '—',
+                  color: _green,
+                ),
+                _metric(
+                  'LOSSES',
+                  loaded ? '$losses' : '—',
+                  color: _red,
+                ),
+                _metric(
+                  'WR',
+                  loaded
+                      ? '${wr.toStringAsFixed(1)}%'
+                      : '—',
                 ),
               ],
             ),
@@ -760,36 +1088,52 @@ class _JasongShellState extends State<JasongShell>
           const SizedBox(height: 13),
           const Text(
             'OPEN CATEGORY / LEARNING POSITIONS',
-            style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w900),
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
           ),
           const SizedBox(height: 7),
-          if (openRows.isEmpty)
+          if (categoryPositions.isEmpty &&
+              portfolioStatus.isEmpty)
+            _emptyMessage('Positions loading…')
+          else if (openRows.isEmpty)
             _emptyMessage('No open JSCAT positions')
           else
             ...openRows.take(20).map(_openTradeCard),
           const SizedBox(height: 13),
           const Text(
             'BROKER-SETTLED FORWARD EVIDENCE',
-            style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w900),
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
           ),
           const SizedBox(height: 7),
-          if (forwardTrades.isEmpty)
+          if (!loaded)
+            _emptyMessage('Forward settlements loading…')
+          else if (forwardTrades.isEmpty)
             _emptyMessage('No forward settlements loaded')
           else
-            ...forwardTrades.take(50).map(_settledTradeCard),
+            ...forwardTrades
+                .take(50)
+                .map(_settledTradeCard),
         ],
       ),
     );
   }
 
-  Widget _openTradeCard(Map<String, dynamic> row) {
-    final market = '${row['market'] ?? row['symbol'] ?? '-'}';
-    final direction = '${row['direction'] ?? '-'}'.toUpperCase();
-    final strategy = '${row['strategy_id'] ?? '-'}';
-    final brokerRaw = row['broker'];
-    final broker = brokerRaw is Map ? Map<String, dynamic>.from(brokerRaw) : <String, dynamic>{};
-    final entry = row['entry_level'] ?? broker['level'];
-    final current = direction == 'BUY' ? broker['bid'] : broker['offer'];
+  Widget _openTradeCard(
+    Map<String, dynamic> row,
+  ) {
+    final market =
+        '${row['market'] ?? row['symbol'] ?? '-'}';
+    final direction =
+        '${row['direction'] ?? '-'}'.toUpperCase();
+    final strategy =
+        '${row['strategy_id'] ?? '-'}';
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -799,24 +1143,35 @@ class _JasongShellState extends State<JasongShell>
             Expanded(
               flex: 4,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
                 children: [
-                  Text(market, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
-                  const SizedBox(height: 2),
-                  Text(strategy, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white38, fontSize: 8.5)),
+                  Text(
+                    market,
+                    style: const TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 12,
+                    ),
+                  ),
+                  Text(
+                    strategy,
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white38,
+                      fontSize: 8.5,
+                    ),
+                  ),
                 ],
               ),
             ),
-            Expanded(child: _pill(direction, color: direction == 'BUY' ? _green : _red)),
-            Expanded(
-              flex: 2,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text('${entry ?? '-'}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 10)),
-                  Text('now ${current ?? '-'}', style: const TextStyle(color: Colors.white38, fontSize: 8)),
-                ],
-              ),
+            _pill(
+              direction,
+              color: direction == 'BUY'
+                  ? _green
+                  : _red,
             ),
           ],
         ),
@@ -824,15 +1179,22 @@ class _JasongShellState extends State<JasongShell>
     );
   }
 
-  Widget _settledTradeCard(Map<String, dynamic> row) {
-    final market = '${row['market'] ?? row['symbol'] ?? '-'}';
-    final direction = '${row['direction'] ?? '-'}'.toUpperCase();
-    final result = '${row['broker_result'] ?? 'CLOSED'}'.toUpperCase();
-    final strategy = '${row['strategy_id'] ?? 'UNKNOWN'}';
+  Widget _settledTradeCard(
+    Map<String, dynamic> row,
+  ) {
+    final market =
+        '${row['market'] ?? row['symbol'] ?? '-'}';
+    final result =
+        '${row['broker_result'] ?? 'CLOSED'}'
+            .toUpperCase();
+    final strategy =
+        '${row['strategy_id'] ?? 'UNKNOWN'}';
     final r = _num(row['r_multiple']);
-    final pnl = row['broker_pnl'];
-    final source = '${row['r_source'] ?? '-'}';
-    final resultColor = result == 'WIN' ? _green : result == 'LOSS' ? _red : Colors.white54;
+    final color = result == 'WIN'
+        ? _green
+        : result == 'LOSS'
+            ? _red
+            : Colors.white54;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -840,37 +1202,40 @@ class _JasongShellState extends State<JasongShell>
         child: Row(
           children: [
             Expanded(
-              flex: 4,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(market, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12)),
-                  const SizedBox(height: 2),
-                  Text(strategy, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white38, fontSize: 8.3)),
-                ],
-              ),
-            ),
-            Expanded(
-              flex: 2,
-              child: Column(
-                children: [
-                  Text(direction, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w800)),
-                  Text(result, style: TextStyle(color: resultColor, fontSize: 9, fontWeight: FontWeight.w900)),
-                ],
-              ),
-            ),
-            Expanded(
-              flex: 2,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
                 children: [
                   Text(
-                    pnl != null ? _money(pnl) : '${r >= 0 ? '+' : ''}${r.toStringAsFixed(2)}R',
-                    style: TextStyle(color: resultColor, fontWeight: FontWeight.w900, fontSize: 10),
+                    market,
+                    style: const TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                    ),
                   ),
-                  Text(source, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white30, fontSize: 7.3)),
-                  Text(_epochLabel(row['closed_at']), style: const TextStyle(color: Colors.white38, fontSize: 7.8)),
+                  Text(
+                    strategy,
+                    style: const TextStyle(
+                      color: Colors.white38,
+                      fontSize: 8.5,
+                    ),
+                  ),
                 ],
+              ),
+            ),
+            Text(
+              result,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              '${r >= 0 ? '+' : ''}${r.toStringAsFixed(2)}R',
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w900,
               ),
             ),
           ],
@@ -880,153 +1245,199 @@ class _JasongShellState extends State<JasongShell>
   }
 
   Widget _aiPage() {
-    final metrics = _strategyMetrics.entries.toList()
+    final entries = _strategyMetrics.entries.toList()
       ..sort((a, b) {
-        final am = a.value is Map ? Map<String, dynamic>.from(a.value as Map) : <String, dynamic>{};
-        final bm = b.value is Map ? Map<String, dynamic>.from(b.value as Map) : <String, dynamic>{};
-        return _int(bm['settled_trades']).compareTo(_int(am['settled_trades']));
+        final am = a.value is Map
+            ? Map<String, dynamic>.from(
+                a.value as Map,
+              )
+            : <String, dynamic>{};
+        final bm = b.value is Map
+            ? Map<String, dynamic>.from(
+                b.value as Map,
+              )
+            : <String, dynamic>{};
+        return _int(bm['settled_trades'])
+            .compareTo(
+          _int(am['settled_trades']),
+        );
       });
 
-    final findingsRaw = forwardLearning['findings'];
-    final findings = findingsRaw is List
-        ? findingsRaw.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList()
-        : <Map<String, dynamic>>[];
+    final findings = _mapList(
+      forwardLearning['findings'],
+    );
 
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
+        padding: const EdgeInsets.fromLTRB(
+          14,
+          6,
+          14,
+          110,
+        ),
         children: [
-          _sectionTitle('AI — FORWARD STRATEGY LEARNING', trailing: 'no auto rewrite'),
+          _sectionTitle(
+            'AI — FORWARD LEARNING',
+            trailing: _timeLabel(),
+          ),
           const SizedBox(height: 10),
-          _card(
-            child: Row(
-              children: [
-                _metric('STORE', '${forwardStatus['stored_settled_trades'] ?? 0}'),
-                _metric('LOSSES ANALYSED', '${forwardLearning['losses_analyzed'] ?? 0}'),
-                _metric('MIN PATTERN', '${forwardLearning['minimum_occurrences'] ?? 3}'),
-                _metric('FINDINGS', '${findings.length}', color: findings.isEmpty ? Colors.white54 : _amber),
-              ],
-            ),
-          ),
-          const SizedBox(height: 13),
-          const Text(
-            'STRATEGY FORWARD METRICS',
-            style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w900),
-          ),
-          const SizedBox(height: 7),
-          if (metrics.isEmpty)
-            _emptyMessage('No strategy metrics loaded')
+          _connectionBanner(),
+          if (forwardStatus.isEmpty)
+            _emptyMessage(
+              'Forward strategy metrics loading…',
+            )
+          else if (entries.isEmpty)
+            _emptyMessage(
+              'No strategy forward metrics yet.',
+            )
           else
-            ...metrics.map((entry) {
-              final data = entry.value is Map
-                  ? Map<String, dynamic>.from(entry.value as Map)
+            ...entries.map((entry) {
+              final row = entry.value is Map
+                  ? Map<String, dynamic>.from(
+                      entry.value as Map,
+                    )
                   : <String, dynamic>{};
-              return _strategyCard(entry.key, data);
+
+              return Padding(
+                padding:
+                    const EdgeInsets.only(bottom: 8),
+                child: _card(
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              entry.key,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontWeight:
+                                    FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          _pill(
+                            '${row['state'] ?? 'BOOTSTRAP'}',
+                            color:
+                                row['prime_eligible'] ==
+                                        true
+                                    ? _amber
+                                    : _blue,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 9),
+                      Row(
+                        children: [
+                          _metric(
+                            'SETTLED',
+                            '${_int(row['settled_trades'])}',
+                          ),
+                          _metric(
+                            'WR',
+                            '${_pct(row['win_rate']).toStringAsFixed(1)}%',
+                          ),
+                          _metric(
+                            'PF',
+                            _num(row['profit_factor'])
+                                .toStringAsFixed(2),
+                          ),
+                          _metric(
+                            'EXP R',
+                            _num(row['expectancy_r'])
+                                .toStringAsFixed(2),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
             }),
-          const SizedBox(height: 13),
+          const SizedBox(height: 10),
           const Text(
             'RECURRING LEARNING FINDINGS',
-            style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w900),
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+            ),
           ),
           const SizedBox(height: 7),
-          if (findings.isEmpty)
-            _emptyMessage('No recurring mistake has reached the minimum occurrence threshold yet')
+          if (forwardLearning.isEmpty)
+            _emptyMessage('Learning report loading…')
+          else if (findings.isEmpty)
+            _emptyMessage(
+              'No repeated strategy mistake has crossed the minimum occurrence threshold.',
+            )
           else
-            ...findings.map(_findingCard),
+            ...findings.map((row) {
+              final name =
+                  '${row['finding'] ?? row['name'] ?? 'Finding'}';
+              final count =
+                  _int(row['occurrences'] ?? row['count']);
+              final recommendation =
+                  '${row['recommendation'] ?? row['message'] ?? ''}';
+
+              return Padding(
+                padding:
+                    const EdgeInsets.only(bottom: 8),
+                child: _card(
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              name,
+                              style: const TextStyle(
+                                fontWeight:
+                                    FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          _pill(
+                            '$count OCCURRENCES',
+                            color: _amber,
+                          ),
+                        ],
+                      ),
+                      if (recommendation.isNotEmpty) ...[
+                        const SizedBox(height: 7),
+                        Text(
+                          recommendation,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 9.5,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }),
         ],
       ),
     );
   }
 
-  Widget _strategyCard(String strategyId, Map<String, dynamic> row) {
-    final settled = _int(row['settled_trades']);
-    final wins = _int(row['wins']);
-    final losses = _int(row['losses']);
-    final wr = _num(row['win_rate_pct']);
-    final pf = _num(row['profit_factor']);
-    final exp = _num(row['expectancy_r']);
-    final dd = _num(row['max_drawdown_r']);
-    final bootstrap = _num(row['bootstrap_probability_positive_expectancy_pct']);
-    final prime = row['prime_eligible'] == true;
-    final state = '${row['state'] ?? 'BOOTSTRAP'}';
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: _card(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    strategyId,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900),
-                  ),
-                ),
-                _pill(state, color: prime ? _amber : settled > 0 ? _blue : Colors.white38),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                _metric('SETTLED', '$settled / 12'),
-                _metric('W/L', '$wins / $losses'),
-                _metric('WR', '${wr.toStringAsFixed(1)}%'),
-                _metric('PF', pf.toStringAsFixed(2)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                _metric('EXP', '${exp >= 0 ? '+' : ''}${exp.toStringAsFixed(2)}R'),
-                _metric('DD', '${dd.toStringAsFixed(2)}R'),
-                _metric('BOOT', '${bootstrap.toStringAsFixed(1)}%'),
-                _metric('PRIME', prime ? 'YES' : 'NO', color: prime ? _amber : Colors.white54),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _findingCard(Map<String, dynamic> row) {
-    final name = '${row['finding'] ?? row['code'] ?? row['type'] ?? 'LEARNING'}';
-    final count = row['occurrences'] ?? row['count'] ?? '-';
-    final recommendation = '${row['recommendation'] ?? row['message'] ?? ''}';
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: _card(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(child: Text(name, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 11))),
-                _pill('$count OCCURRENCES', color: _amber),
-              ],
-            ),
-            if (recommendation.isNotEmpty) ...[
-              const SizedBox(height: 7),
-              Text(recommendation, style: const TextStyle(color: Colors.white54, fontSize: 9.5, height: 1.4)),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _settingsPage() {
-    final thresholdsRaw = forwardStatus['thresholds'];
+    final thresholdsRaw =
+        forwardStatus['thresholds'];
     final thresholds = thresholdsRaw is Map
-        ? Map<String, dynamic>.from(thresholdsRaw)
+        ? Map<String, dynamic>.from(
+            thresholdsRaw,
+          )
         : <String, dynamic>{};
-    final historyRaw = forwardStatus['historical_validation'];
+
+    final historyRaw =
+        forwardStatus['historical_validation'];
     final history = historyRaw is Map
         ? Map<String, dynamic>.from(historyRaw)
         : <String, dynamic>{};
@@ -1034,24 +1445,54 @@ class _JasongShellState extends State<JasongShell>
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
+        padding: const EdgeInsets.fromLTRB(
+          14,
+          6,
+          14,
+          110,
+        ),
         children: [
-          _sectionTitle('SETTINGS — RUNTIME VIEW', trailing: 'read-only mobile'),
+          _sectionTitle(
+            'SETTINGS — RUNTIME VIEW',
+            trailing: 'read-only mobile',
+          ),
           const SizedBox(height: 10),
+          _connectionBanner(),
           _card(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
-                const Text('BACKEND', style: TextStyle(color: _teal, fontSize: 9, fontWeight: FontWeight.w900)),
+                const Text(
+                  'BACKEND',
+                  style: TextStyle(
+                    color: _teal,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
                 const SizedBox(height: 6),
-                SelectableText(apiBase, style: const TextStyle(color: Colors.white70, fontSize: 10)),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    _pill('V6.9.4-forward', color: _blue),
-                    const SizedBox(width: 6),
-                    _pill('IG DEMO ONLY', color: _green),
-                  ],
+                SelectableText(
+                  apiBase,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 10,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _settingRow(
+                  'Connection',
+                  lastUpdated == null
+                      ? 'WAITING'
+                      : 'CONNECTED',
+                ),
+                _settingRow(
+                  'Last update',
+                  _timeLabel(),
+                ),
+                _settingRow(
+                  'Data cache',
+                  '${dataHealth['memory_entries'] ?? '—'} markets',
                 ),
               ],
             ),
@@ -1059,38 +1500,69 @@ class _JasongShellState extends State<JasongShell>
           const SizedBox(height: 10),
           _card(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
-                const Text('FORWARD PRIME THRESHOLDS', style: TextStyle(color: _teal, fontSize: 9, fontWeight: FontWeight.w900)),
-                const SizedBox(height: 10),
-                _settingRow('Minimum settled trades', '${thresholds['min_settled_trades_for_prime'] ?? 12}'),
-                _settingRow('Profit factor', '≥ ${_num(thresholds['min_profit_factor'] ?? 1.2).toStringAsFixed(2)}'),
-                _settingRow('Expectancy', '≥ +${_num(thresholds['min_expectancy_r'] ?? .05).toStringAsFixed(2)}R'),
-                _settingRow('Win rate', '≥ ${_pct(thresholds['min_win_rate'] ?? .45).toStringAsFixed(0)}%'),
-                _settingRow('Bootstrap positive expectancy', '≥ ${_pct(thresholds['min_bootstrap_prob_positive_expectancy'] ?? .75).toStringAsFixed(0)}%'),
-                _settingRow('Maximum drawdown', '≤ ${_num(thresholds['max_drawdown_r'] ?? 6).toStringAsFixed(1)}R'),
+                const Text(
+                  'FORWARD PRIME THRESHOLDS',
+                  style: TextStyle(
+                    color: _teal,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _settingRow(
+                  'Minimum settled trades',
+                  '${thresholds['min_settled_trades_for_prime'] ?? 12}',
+                ),
+                _settingRow(
+                  'Profit factor',
+                  '≥ ${_num(thresholds['min_profit_factor'] ?? 1.2).toStringAsFixed(2)}',
+                ),
+                _settingRow(
+                  'Expectancy',
+                  '≥ +${_num(thresholds['min_expectancy_r'] ?? .05).toStringAsFixed(2)}R',
+                ),
+                _settingRow(
+                  'Win rate',
+                  '≥ ${_pct(thresholds['min_win_rate'] ?? .45).toStringAsFixed(0)}%',
+                ),
+                _settingRow(
+                  'Bootstrap',
+                  '≥ ${_pct(thresholds['min_bootstrap_prob_positive_expectancy'] ?? .75).toStringAsFixed(0)}%',
+                ),
+                _settingRow(
+                  'Max drawdown',
+                  '≤ ${_num(thresholds['max_drawdown_r'] ?? 6).toStringAsFixed(1)}R',
+                ),
               ],
             ),
           ),
           const SizedBox(height: 10),
           _card(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
               children: [
-                const Text('HISTORICAL VALIDATION', style: TextStyle(color: _teal, fontSize: 9, fontWeight: FontWeight.w900)),
+                const Text(
+                  'HISTORICAL VALIDATION',
+                  style: TextStyle(
+                    color: _teal,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
                 const SizedBox(height: 8),
-                _settingRow('Mode', '${history['mode'] ?? 'INFORMATIONAL_ONLY'}'),
-                _settingRow('Execution veto', '${history['execution_veto'] ?? false}'),
+                _settingRow(
+                  'Mode',
+                  '${history['mode'] ?? 'INFORMATIONAL_ONLY'}',
+                ),
+                _settingRow(
+                  'Execution veto',
+                  '${history['execution_veto'] ?? false}',
+                ),
               ],
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: 46,
-            child: FilledButton.icon(
-              onPressed: refreshing ? null : () => refreshAll(),
-              icon: const Icon(Icons.refresh_rounded),
-              label: const Text('REFRESH ALL FORWARD DATA'),
             ),
           ),
         ],
@@ -1098,14 +1570,35 @@ class _JasongShellState extends State<JasongShell>
     );
   }
 
-  Widget _settingRow(String label, String value) {
+  Widget _settingRow(
+    String label,
+    String value,
+  ) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding:
+          const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
-          Expanded(child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 9.5))),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 9.5,
+              ),
+            ),
+          ),
           const SizedBox(width: 10),
-          Flexible(child: Text(value, textAlign: TextAlign.right, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900))),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: 9.5,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1114,11 +1607,17 @@ class _JasongShellState extends State<JasongShell>
   Widget _emptyMessage(String text) {
     return _card(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 20),
+        padding: const EdgeInsets.symmetric(
+          vertical: 20,
+        ),
         child: Text(
           text,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.white38, fontSize: 10),
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 10,
+            height: 1.35,
+          ),
         ),
       ),
     );
@@ -1128,7 +1627,9 @@ class _JasongShellState extends State<JasongShell>
   Widget build(BuildContext context) {
     final pages = <Widget>[
       _homePage(),
-      MarketCategoriesPage(apiBase: apiBase),
+      MarketCategoriesPage(
+        apiBase: apiBase,
+      ),
       _compoundPage(),
       _tradesPage(),
       _aiPage(),
@@ -1152,16 +1653,45 @@ class _JasongShellState extends State<JasongShell>
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedTab,
         onDestinationSelected: (index) {
-          setState(() => selectedTab = index);
-          if (index != 1) refreshAll(silent: true);
+          setState(() {
+            selectedTab = index;
+          });
+
+          if (index != 1 && !refreshing) {
+            refreshAll(silent: true);
+          }
         },
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
-          NavigationDestination(icon: Icon(Icons.grid_view_outlined), selectedIcon: Icon(Icons.grid_view_rounded), label: 'Compound'),
-          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
-          NavigationDestination(icon: Icon(Icons.psychology_outlined), selectedIcon: Icon(Icons.psychology_rounded), label: 'AI'),
-          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings_rounded), label: 'Settings'),
+          NavigationDestination(
+            icon: Icon(Icons.home_outlined),
+            selectedIcon: Icon(Icons.home_rounded),
+            label: 'Home',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.radar_outlined),
+            selectedIcon: Icon(Icons.radar_rounded),
+            label: 'Markets',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.grid_view_outlined),
+            selectedIcon: Icon(Icons.grid_view_rounded),
+            label: 'Compound',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.receipt_long_outlined),
+            selectedIcon: Icon(Icons.receipt_long_rounded),
+            label: 'Trades',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.psychology_outlined),
+            selectedIcon: Icon(Icons.psychology_rounded),
+            label: 'AI',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings_rounded),
+            label: 'Settings',
+          ),
         ],
       ),
     );
