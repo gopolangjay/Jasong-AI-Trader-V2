@@ -13,6 +13,8 @@ from category_strategy_engine import (
     QUANT_MIN_CONFIDENCE,
 )
 
+from chatgpt_mcp import install_chatgpt_mcp
+
 
 def _position_identity(row: Dict[str, Any]) -> tuple[str, str]:
     return (
@@ -198,15 +200,22 @@ def install_specialist_market_system(
     # gated so the current V6.8.x Compound implementation can be tuned without
     # replacing compound_engine.py or disturbing its reconciliation/accounting.
     for attr, value in {
-        "fast_score_min": 60.0,
-        "prime_fast_score_min": 60.0,
-        "global_fast_score_min": 60.0,
-        "compound_fast_score_min": 60.0,
+        "fast_score_min": 45.0,
+        "prime_fast_score_min": 45.0,
+        "global_fast_score_min": 45.0,
+        "compound_fast_score_min": 45.0,
         "prime_min_historical_wr": 0.60,
         "prime_min_historical_win_rate": 0.60,
         "prime_min_historical_pf": 1.20,
         "prime_min_profit_factor": 1.20,
         "min_profit_factor": 1.20,
+        "prime_min_historical_trades": 10,
+        "min_historical_trades": 10,
+        "historical_min_trades": 10,
+        "walk_forward_min_win_rate": 0.40,
+        "walk_forward_min_fold_win_rate": 0.40,
+        "walk_forward_min_median_win_rate": 0.40,
+        "walk_forward_min_pct": 40.0,
     }.items():
         if hasattr(compound_engine, attr):
             setattr(compound_engine, attr, value)
@@ -224,6 +233,58 @@ def install_specialist_market_system(
         state_path=portfolio_state_path,
     )
     portfolio.start_thread()
+
+    # Keep Swagger/OpenAPI metadata aligned with the specialist runtime even
+    # though the legacy main.py creates the FastAPI object earlier.
+    app.title = "Jasong AI Trader V6.9.3 API"
+    app.version = "6.9.3"
+    app.description = (
+        "Jasong AI Trader V6.9.3 — specialist market intelligence, "
+        "IG DEMO execution, adaptive 80/20 compound, and authenticated "
+        "read-only ChatGPT MCP diagnostics."
+    )
+    app.openapi_schema = None
+
+    # Install the authenticated read-only MCP bridge. Failure to initialise the
+    # optional assistant bridge must never stop the trading backend itself.
+    try:
+        forward_evidence_source = next(
+            (
+                component
+                for component in (ownership_components or [])
+                if component is not None
+                and hasattr(component, "status")
+                and hasattr(component, "execution_guard_snapshot")
+            ),
+            None,
+        )
+        install_chatgpt_mcp(
+            app,
+            intelligence=intelligence,
+            portfolio=portfolio,
+            compound_engine=compound_engine,
+            broker=broker,
+            evidence_source=forward_evidence_source,
+        )
+    except Exception as exc:
+        mcp_error = f"{type(exc).__name__}: {exc}"
+        app.state.jasong_mcp_install_error = mcp_error
+        if not any(getattr(route, "path", "") == "/chatgpt-mcp/status" for route in app.routes):
+            app.add_api_route(
+                "/chatgpt-mcp/status",
+                lambda: {
+                    "version": "6.9.3",
+                    "enabled": True,
+                    "installed": False,
+                    "runtime_ready": False,
+                    "error": mcp_error,
+                    "read_only": True,
+                    "trade_write_tools_exposed": False,
+                    "live_money_execution": False,
+                },
+                methods=["GET"],
+                name="jasong_mcp_status_install_error",
+            )
 
     # FastAPI route registration is done programmatically to avoid a large,
     # fragile replacement of the current backend/main.py.
@@ -246,8 +307,8 @@ def install_specialist_market_system(
                 "model_ai_min_pct": 40.0,
                 "historical_validation_target_pct": 60.0,
                 "profit_factor_target": 1.20,
-                "fast_score_min": 60.0,
-                "walk_forward_min_pct": 60.0,
+                "fast_score_min": 45.0,
+                "walk_forward_min_pct": 40.0,
             },
             "live_money_execution": False,
         }
@@ -316,7 +377,7 @@ def install_specialist_market_system(
             "version": "6.9.3",
             "count": len(rows),
             "candidates": rows,
-            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + holdout WR 60% + PF 1.20 + minimum 30 holdout trades + each qualifying WF fold >=60% + Fast 60 + IG gates",
+            "rule": "Only current-schema category ranks #1/#2 that pass 28/40 + stable selection + holdout WR 60% + PF 1.20 + minimum 10 holdout trades + each qualifying WF fold >=40% + Fast 45 + IG gates",
             "live_money_execution": False,
         }
 
