@@ -21,6 +21,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -915,26 +916,44 @@ def install_chatgpt_mcp(
     protected_mcp = ProtectedMCPApp(mcp_asgi, auth_store)
     app.mount("/mcp", protected_mcp, name="jasong_chatgpt_mcp")
 
-    async def mcp_startup() -> None:
-        try:
-            cm = mcp.session_manager.run()
-            await cm.__aenter__()
-            app.state.jasong_mcp_lifespan_cm = cm
-            app.state.jasong_mcp_start_error = None
-        except Exception as exc:
-            # The assistant bridge is optional. A transport startup problem must
-            # never take the IG DEMO trading API offline.
-            app.state.jasong_mcp_lifespan_cm = None
-            app.state.jasong_mcp_start_error = f"{type(exc).__name__}: {exc}"
+    # Starlette 1.6 removed add_event_handler()/on_event().
+    # Compose the MCP session-manager lifecycle into the existing FastAPI
+    # router lifespan instead. This preserves any lifespan already installed
+    # by the application and keeps MCP failure isolated from IG DEMO trading.
+    previous_lifespan = app.router.lifespan_context
 
-    async def mcp_shutdown() -> None:
-        cm = getattr(app.state, "jasong_mcp_lifespan_cm", None)
-        if cm is not None:
-            await cm.__aexit__(None, None, None)
-            app.state.jasong_mcp_lifespan_cm = None
+    @asynccontextmanager
+    async def jasong_mcp_lifespan(app_instance: Any):
+        async with previous_lifespan(app_instance) as previous_state:
+            cm = None
+            try:
+                cm = mcp.session_manager.run()
+                await cm.__aenter__()
+                app.state.jasong_mcp_lifespan_cm = cm
+                app.state.jasong_mcp_start_error = None
+            except Exception as exc:
+                # The assistant bridge is optional. A transport startup problem
+                # must never take the IG DEMO trading API offline.
+                app.state.jasong_mcp_lifespan_cm = None
+                app.state.jasong_mcp_start_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                cm = None
 
-    app.add_event_handler("startup", mcp_startup)
-    app.add_event_handler("shutdown", mcp_shutdown)
+            try:
+                yield previous_state
+            finally:
+                if cm is not None:
+                    try:
+                        await cm.__aexit__(None, None, None)
+                    except Exception as exc:
+                        app.state.jasong_mcp_start_error = (
+                            f"shutdown {type(exc).__name__}: {exc}"
+                        )
+                    finally:
+                        app.state.jasong_mcp_lifespan_cm = None
+
+    app.router.lifespan_context = jasong_mcp_lifespan
 
     async def oauth_server_metadata() -> JSONResponse:
         base = _public_base_url()
