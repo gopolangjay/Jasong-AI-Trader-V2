@@ -22,7 +22,7 @@ class JasongApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF07111A),
+        scaffoldBackgroundColor: const Color(0xFF06131B),
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF65E6D3),
           brightness: Brightness.dark,
@@ -51,7 +51,7 @@ class JasongApp extends StatelessWidget {
           indicatorColor: const Color(0xFF65E6D3).withValues(alpha: .16),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             return TextStyle(
-              fontSize: 11,
+              fontSize: 9.5,
               fontWeight: states.contains(WidgetState.selected)
                   ? FontWeight.w800
                   : FontWeight.w500,
@@ -108,6 +108,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String risk = 'Balanced';
 
   int selectedTab = 0;
+  String marketView = 'ALL';
+  String tradeView = 'CLOSED';
 
   final String apiBase =
       const String.fromEnvironment(
@@ -158,15 +160,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
-  // V6.8.19 global multi-market + adaptive strategy intelligence.
+  // V6.8.1 global multi-market intelligence.
   Map<String, dynamic>? globalMarketsStatus;
   List<Map<String, dynamic>> globalMarketCandidates = [];
   bool globalMarketsBusy = false;
-
-  Map<String, dynamic>? compoundStatusDirect;
-  Map<String, dynamic>? forwardRegime;
-  Map<String, dynamic>? strategyIntelligence;
-  Map<String, dynamic>? opportunityBoard;
 
   Timer? watcherPollTimer;
   Timer? autoDashboardPollTimer;
@@ -1532,7 +1529,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         timeoutSeconds: 60,
       );
       final candidates = await getJson(
-        Uri.parse('$apiBase/global-markets/opportunity-board').replace(
+        Uri.parse('$apiBase/global-markets/candidates').replace(
           queryParameters: {'limit': '60'},
         ),
         timeoutSeconds: 60,
@@ -1540,62 +1537,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         globalMarketsStatus = status;
-        final raw = candidates['opportunities'] ?? candidates['candidates'];
+        final raw = candidates['candidates'];
         globalMarketCandidates = raw is List
             ? raw.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList()
             : [];
       });
     } catch (_) {
       // Supplemental dashboard. Keep last known snapshot on one failed poll.
-    }
-  }
-
-  Future<void> loadV6819Architecture() async {
-    try {
-      final compoundFuture = getJson(
-        Uri.parse('$apiBase/compound/status'),
-        timeoutSeconds: 45,
-      );
-      final regimeFuture = getJson(
-        Uri.parse('$apiBase/forward-evidence/regime'),
-        timeoutSeconds: 45,
-      );
-      final strategyFuture = getJson(
-        Uri.parse('$apiBase/compound/strategy-intelligence'),
-        timeoutSeconds: 45,
-      );
-      final boardFuture = getJson(
-        Uri.parse('$apiBase/global-markets/opportunity-board').replace(
-          queryParameters: {'limit': '60'},
-        ),
-        timeoutSeconds: 45,
-      );
-
-      final results = await Future.wait([
-        compoundFuture,
-        regimeFuture,
-        strategyFuture,
-        boardFuture,
-      ]);
-
-      if (!mounted) return;
-
-      setState(() {
-        compoundStatusDirect = results[0];
-        forwardRegime = results[1];
-        strategyIntelligence = results[2];
-        opportunityBoard = results[3];
-
-        final raw = results[3]['opportunities'];
-        if (raw is List) {
-          globalMarketCandidates = raw
-              .whereType<Map>()
-              .map((item) => Map<String, dynamic>.from(item))
-              .toList();
-        }
-      });
-    } catch (_) {
-      // Keep last known V6.8.19 architecture snapshot.
     }
   }
 
@@ -2190,7 +2138,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     autoDashboardPollTimer =
         Timer.periodic(
       const Duration(
-        seconds: 15,
+        seconds: 20,
       ),
       (_) {
         loadAutoDashboard();
@@ -2198,7 +2146,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         loadAiLearningStatus();
         loadOvernightDemoStatus();
         loadGlobalMarkets();
-        loadV6819Architecture();
       },
     );
 
@@ -2220,10 +2167,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     Future.microtask(
       loadGlobalMarkets,
-    );
-
-    Future.microtask(
-      loadV6819Architecture,
     );
   }
 
@@ -3423,10 +3366,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       loadAutoDashboard,
     );
 
-    Future.microtask(
-      loadV6819Architecture,
-    );
-
     startAutoDashboardPolling();
   }
 
@@ -3443,7 +3382,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       Future.microtask(loadAiLearningStatus);
       Future.microtask(loadSystemOverview);
       Future.microtask(loadGlobalMarkets);
-      Future.microtask(loadV6819Architecture);
     }
   }
 
@@ -4054,13 +3992,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final summary = dashboard['summary'] is Map
         ? Map<String, dynamic>.from(dashboard['summary'] as Map)
         : <String, dynamic>{};
-    final dashboardCompound = dashboard['compound'] is Map
+    final compound = dashboard['compound'] is Map
         ? Map<String, dynamic>.from(dashboard['compound'] as Map)
         : <String, dynamic>{};
-    final compound = compoundStatusDirect != null &&
-            compoundStatusDirect!.isNotEmpty
-        ? Map<String, dynamic>.from(compoundStatusDirect!)
-        : dashboardCompound;
     final compoundStatus =
         compound['status']?.toString().toUpperCase() ?? 'STOPPED';
     final compoundEnabled = compound['enabled'] == true;
@@ -4102,39 +4036,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final compoundBridgeState =
         compound['intelligence_bridge_state']?.toString().toUpperCase() ??
             'IDLE';
-
-    final targetOptimizerHome = compound['target_optimizer'] is Map
-        ? Map<String, dynamic>.from(compound['target_optimizer'] as Map)
-        : <String, dynamic>{};
-    final homeTargetMultiple = double.tryParse(
-          '${targetOptimizerHome['selected_target_multiple'] ?? compoundCurrent['target_multiple'] ?? 1.5}',
-        ) ??
-        1.5;
-    final homeTargetPct = double.tryParse(
-          '${targetOptimizerHome['selected_profit_target_pct'] ?? 50}',
-        ) ??
-        50.0;
-    final requiredPrimeMarkets = int.tryParse(
-          '${compound['required_basket_positions'] ?? 5}',
-        ) ??
-        5;
-    final basketAssemblyHome = compound['basket_assembly'] is Map
-        ? Map<String, dynamic>.from(compound['basket_assembly'] as Map)
-        : <String, dynamic>{};
-    final primeQueueNow = int.tryParse(
-          '${basketAssemblyHome['eligible_now'] ?? 0}',
-        ) ??
-        0;
-    final regimeHome = forwardRegime ?? <String, dynamic>{};
-    final regimeModeHome =
-        regimeHome['mode']?.toString().toUpperCase() ?? 'UNKNOWN';
-    final recentRegimeHome = regimeHome['recent'] is Map
-        ? Map<String, dynamic>.from(regimeHome['recent'] as Map)
-        : <String, dynamic>{};
-    final recentBrokerWrHome = double.tryParse(
-          '${recentRegimeHome['win_rate_pct'] ?? 0}',
-        ) ??
-        0.0;
 
     final integrity = integrityStatus ??
         (dashboard['integrity'] is Map
@@ -4674,7 +4575,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                igBalance != null ? 'IG funds' : 'Model reference',
+                igBalance != null ? 'IG funds' : 'Reference balance',
                 igBalance != null
                     ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}'
                     : '$paperBalance',
@@ -4750,7 +4651,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'JASONG ADAPTIVE COMPOUND',
+                            'JASONG ELITE COMPOUND',
                             style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w900,
@@ -4758,7 +4659,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            'Adaptive 1.2× / 1.3× / 1.5× • exactly 5 PRIME markets • AI ≥40% • Quant 30% / 28% conditional',
+                            '+50% basket • 20% harvest • AI ≥40% • best 1–5 markets',
                             style: TextStyle(
                               color: Colors.white.withValues(alpha: .52),
                               fontSize: 11,
@@ -4807,8 +4708,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   children: [
                     Expanded(
                       child: _midnightValue(
-                        'Compound PRIME',
-                        '$compoundOpen / $requiredPrimeMarkets',
+                        'Compound',
+                        '$compoundOpen / $compoundMax',
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -4852,56 +4753,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _midnightValue(
-                        'Adaptive target',
-                        '${homeTargetMultiple.toStringAsFixed(1)}× (+${homeTargetPct.toStringAsFixed(0)}%)',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _midnightValue(
-                        'PRIME queue',
-                        '$primeQueueNow / $requiredPrimeMarkets',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _midnightValue(
-                        'Regime guard',
-                        regimeModeHome,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _midnightValue(
-                        'Recent broker WR',
-                        '${recentBrokerWrHome.toStringAsFixed(1)}%',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: _MidnightValue(
-                        'Assessment',
-                        '15 sec',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: _MidnightValue(
-                        'Execution',
-                        'PRIME',
-                      ),
-                    ),
-                  ],
-                ),
                 const SizedBox(height: 9),
                 Container(
                   width: double.infinity,
@@ -4923,7 +4774,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       const SizedBox(width: 7),
                       Expanded(
                         child: Text(
-                          'V6.8.19 Strategy ↔ Compound: '
+                          'Live Intelligence ↔ Compound: '
                           '${compoundBridgeState.replaceAll('_', ' ')}'
                           '${compoundPending > 0 ? ' • $compoundPending Elite ready' : ''}',
                           style: const TextStyle(
@@ -4942,7 +4793,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: FilledButton.icon(
                     onPressed: openCompoundDashboard,
                     icon: const Icon(Icons.dashboard_customize_rounded),
-                    label: const Text('Open Adaptive Compound'),
+                    label: const Text('Open Compound Strategy'),
                   ),
                 ),
               ],
@@ -5070,19 +4921,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: watcherCard(w),
                 )),
           const SizedBox(height: 10),
-          sectionTitle('V6.8.19 execution policy'),
+          sectionTitle('V6.5 learning policy'),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('AI directional gate', '≥ 40%', 'Required before broker execution'),
+                _MidnightRuleRow('Normal forward path', '≥ 30%', 'Verified + live direction agrees'),
                 Divider(height: 24),
-                _MidnightRuleRow('Quant normal gate', '≥ 30%', 'Normal PRIME path'),
+                _MidnightRuleRow('AI forward path', '≥ 40%', 'AI approves + direction agrees'),
                 Divider(height: 24),
-                _MidnightRuleRow('Quant conditional gate', '28–29.99%', 'Exceptional strategy evidence required'),
-                Divider(height: 24),
-                _MidnightRuleRow('Execution quality', 'PRIME', 'A/A+ + regime + history + forward guard'),
-                Divider(height: 24),
-                _MidnightRuleRow('Broker execution', 'IG DEMO', 'No paper execution'),
+                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
               ],
             ),
           ),
@@ -5607,20 +5454,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           const SizedBox(height: 20),
           sectionTitle(
-            'Model observation evidence',
+            'Model forward evidence',
             subtitle:
-                'Non-broker model observations • genuine execution evidence is tracked separately by IG DEMO',
+                'V6 AI-learning entries • open trades count immediately; W/L only after settlement',
           ),
           Row(
             children: [
               statTile(
-                'Observations',
+                'Model entries',
                 '$forwardTrades',
                 Icons.receipt_long_outlined,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Open observations',
+                'Open model',
                 '$modelOpen',
                 Icons.hourglass_top_rounded,
               ),
@@ -5630,13 +5477,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Settled observations',
+                'Settled model',
                 '$modelSettled',
                 Icons.fact_check_outlined,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Observation W / L',
+                'Model W / L',
                 '$modelWins / $modelLosses',
                 Icons.insights_rounded,
               ),
@@ -5646,13 +5493,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Observation WR',
+                'Model WR',
                 '${formatNumber(forwardWr, decimals: 1)}%',
                 Icons.percent_rounded,
               ),
               const SizedBox(width: 10),
               statTile(
-                'Matched to IG',
+                'Broker matched',
                 '$modelBrokerMatched',
                 Icons.link_rounded,
               ),
@@ -5662,7 +5509,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           Row(
             children: [
               statTile(
-                'Observation P&L',
+                'Model P&L',
                 formatMoney(totalPnl),
                 Icons.analytics_outlined,
                 valueColor:
@@ -6698,7 +6545,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 const Text(
-                  'IG DEMO forward evidence stays active alongside Adaptive Compound. Compound waits for exactly 5 PRIME markets, applies regime-specific strategy validation, uses an adaptive 1.2× / 1.3× / 1.5× target, and retains the -15% basket stop.',
+                  'IG DEMO forward learning stays active alongside Compound. Compound selects up to 5 broker positions, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
@@ -6711,7 +6558,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: OutlinedButton.icon(
                     onPressed: openCompoundDashboard,
                     icon: const Icon(Icons.open_in_new_rounded),
-                    label: const Text('Open Adaptive Compound'),
+                    label: const Text('Open Elite Compound'),
                   ),
                 ),
               ],
@@ -7280,12 +7127,792 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
+
+    // =========================================================
+    // V6.9.3 TEMPLATE UI
+    // Visual contract follows the supplied six-screen reference:
+    // Home • Markets • Compound • Trades • AI • Settings.
+    // All values below remain live API-backed; no demo values are fabricated.
+    // =========================================================
+
+    const templateTeal = Color(0xFF63E6D0);
+    const templateGreen = Color(0xFF64E9B4);
+    const templateRed = Color(0xFFFF6C7C);
+    const templateAmber = Color(0xFFFFCE55);
+    const templateBlue = Color(0xFF66B9FF);
+    const templatePanel = Color(0xFF0C1A24);
+    const templateBorder = Color(0xFF24414A);
+
+    Widget templateCard({
+      required Widget child,
+      EdgeInsets padding = const EdgeInsets.all(16),
+      Color? borderColor,
+      double radius = 18,
+    }) {
+      return Container(
+        padding: padding,
+        decoration: BoxDecoration(
+          color: templatePanel,
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(
+            color: (borderColor ?? templateBorder).withValues(alpha: .92),
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x22000000),
+              blurRadius: 18,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
+      );
+    }
+
+    Widget templateMetric({
+      required String label,
+      required String value,
+      required IconData icon,
+      Color color = templateTeal,
+    }) {
+      return Expanded(
+        child: templateCard(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 18, color: color),
+              const SizedBox(height: 13),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color == templateTeal ? Colors.white : color,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget templateTinyPill(
+      String text, {
+      Color color = templateTeal,
+      IconData? icon,
+    }) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .11),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: color.withValues(alpha: .34)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 12, color: color),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              text,
+              style: TextStyle(
+                color: color,
+                fontSize: 9.5,
+                fontWeight: FontWeight.w900,
+                letterSpacing: .2,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    String templatePercent(dynamic value) {
+      if (value == null) return '--';
+      final n = value is num ? value.toDouble() : double.tryParse('$value');
+      if (n == null) return '--';
+      final pct = n.abs() <= 1.0 ? n * 100.0 : n;
+      return '${pct.toStringAsFixed(1)}%';
+    }
+
+    String templateMoney(dynamic value, {String fallback = '--'}) {
+      if (value == null) return fallback;
+      final n = value is num ? value.toDouble() : double.tryParse('$value');
+      if (n == null) return fallback;
+      final sign = n >= 0 ? '+' : '-';
+      return '$sign${n.abs().toStringAsFixed(2)}';
+    }
+
+    Color templateStateColor(String state) {
+      final value = state.toUpperCase();
+      if (value.contains('PRIME') || value.contains('STRONG') || value.contains('BUY') || value.contains('WIN') || value.contains('OPEN')) {
+        return templateGreen;
+      }
+      if (value.contains('SELL') || value.contains('LOSS') || value.contains('REJECT')) {
+        return templateRed;
+      }
+      if (value.contains('WAIT') || value.contains('WATCH')) {
+        return templateAmber;
+      }
+      return templateTeal;
+    }
+
+    String templateRegimeLabel(String raw) {
+      final r = raw.toUpperCase();
+      if (r.contains('BREAK')) return 'BREAKOUT';
+      if (r.contains('TREND') || r.contains('MOMENTUM')) return 'TRENDING';
+      if (r.contains('RANGE') || r.contains('REVERSION') || r.contains('SIDEWAYS')) return 'RANGING';
+      if (r.contains('NORMAL')) return 'RANGING';
+      return r.length > 9 ? r.substring(0, 9) : r;
+    }
+
+    IconData templateAssetIcon(String raw) {
+      final a = raw.toUpperCase();
+      if (a.contains('FX') || a.contains('FOREX')) return Icons.currency_exchange_rounded;
+      if (a.contains('CRYPTO')) return Icons.currency_exchange_rounded;
+      if (a.contains('INDEX')) return Icons.show_chart_rounded;
+      if (a.contains('SHARE')) return Icons.business_center_outlined;
+      if (a.contains('COMMOD') || a.contains('METAL') || a.contains('ENERGY')) return Icons.water_drop_outlined;
+      return Icons.insights_rounded;
+    }
+
+    String templateMarketState(Map<String, dynamic> row) {
+      if (row['compound_eligible'] == true || row['prime_qualified'] == true) return 'PRIME';
+      final fast = double.tryParse('${row['smart_fast_score'] ?? row['fast_score'] ?? 0}') ?? 0;
+      final q = double.tryParse('${row['quant_confidence'] ?? row['quant'] ?? 0}') ?? 0;
+      final ai = double.tryParse('${row['model_ai_confidence'] ?? row['ai_up'] ?? row['combined_up_probability'] ?? 0}') ?? 0;
+      final qPct = q.abs() <= 1 ? q * 100 : q;
+      final aiPct = ai.abs() <= 1 ? ai * 100 : ai;
+      if (fast >= 60 && qPct >= 28 && aiPct >= 40) return 'STRONG';
+      return 'WATCH';
+    }
+
+    Widget templateHomePage() {
+      final systemGood = autoOn && (systemOverview != null || autoDashboard != null);
+      final phaseText = '$igAccepted / $igPhaseTarget';
+      final primeQueue = compoundPending;
+      final progressValue = progress <= 0 && autoOn ? 85.0 : progress.clamp(0, 100);
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          templateCard(
+            borderColor: templateTeal,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text('SYSTEM STATUS', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .5)),
+                    const SizedBox(width: 7),
+                    templateTinyPill(systemGood ? 'ALL SYSTEMS GO' : 'CHECKING', color: systemGood ? templateGreen : templateAmber),
+                    const Spacer(),
+                    const Text('V6.9.3', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  autoOn ? 'ADAPTIVE STRATEGY ACTIVE' : 'ADAPTIVE STRATEGY PAUSED',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: .2),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '15s opportunity assessment cycle',
+                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                ),
+                const SizedBox(height: 16),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(99),
+                  child: LinearProgressIndicator(
+                    value: progressValue / 100,
+                    minHeight: 6,
+                    backgroundColor: Colors.white12,
+                    color: templateTeal,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Row(
+                  children: [
+                    Text('Next assessment: ${formatEpochTime(summary['next_scan_at'])}', style: const TextStyle(color: Colors.white54, fontSize: 9.5)),
+                    const Spacer(),
+                    Text('${progressValue.round()}%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(children: [
+            templateMetric(label: 'IG DEMO BALANCE', value: igBalance != null ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}' : '--', icon: Icons.account_balance_wallet_outlined),
+            const SizedBox(width: 9),
+            templateMetric(label: 'BROKER POSITIONS', value: '$brokerCapacityOpen / $brokerCapacityMax', icon: Icons.swap_horiz_rounded),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(label: 'ACTIVE WATCHERS', value: '$activeWatchers / $targetWatchers', icon: Icons.visibility_outlined),
+            const SizedBox(width: 9),
+            templateMetric(label: 'LEARNING PHASE', value: phaseText, icon: Icons.flag_outlined),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(label: 'COMPOUND STATUS', value: compoundStatus.replaceAll('_', ' '), icon: Icons.autorenew_rounded, color: compoundEnabled ? templateGreen : templateAmber),
+            const SizedBox(width: 9),
+            templateMetric(label: 'PRIME QUEUE', value: '$primeQueue / 5', icon: Icons.stars_outlined),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(
+              label: 'ADAPTIVE TARGET',
+              value: '${compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier'] ?? '--'}${(compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier']) != null ? '×' : ''}',
+              icon: Icons.track_changes_rounded,
+              color: templateGreen,
+            ),
+            const SizedBox(width: 9),
+            templateMetric(
+              label: 'RECENT BROKER WR',
+              value: templatePercent(igLifetimeWinRate),
+              icon: Icons.query_stats_rounded,
+              color: templateTeal,
+            ),
+          ]),
+          const SizedBox(height: 11),
+          templateCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            borderColor: templateTeal,
+            child: Row(
+              children: [
+                const Icon(Icons.schedule_rounded, color: templateTeal, size: 19),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('15-SECOND ASSESSMENT ENGINE', style: TextStyle(color: templateTeal, fontSize: 10, fontWeight: FontWeight.w900)),
+                      SizedBox(height: 2),
+                      Text('Markets re-evaluated every 15 seconds', style: TextStyle(color: Colors.white60, fontSize: 10)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget templateMarketsPage() {
+      final rows = globalMarketCandidates.map((e) => Map<String, dynamic>.from(e)).toList();
+      List<Map<String, dynamic>> filtered(String view) {
+        if (view == 'ALL') return rows;
+        return rows.where((row) => templateMarketState(row) == view).toList();
+      }
+      final visible = filtered(marketView);
+      Widget filterButton(String label) {
+        final selected = marketView == label;
+        final count = label == 'ALL' ? rows.length : filtered(label).length;
+        return Expanded(
+          child: InkWell(
+            onTap: () => setState(() => marketView = label),
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                color: selected ? templateTeal.withValues(alpha: .13) : Colors.transparent,
+                borderRadius: BorderRadius.circular(10),
+                border: Border(bottom: BorderSide(color: selected ? templateTeal : Colors.transparent, width: 2)),
+              ),
+              child: Text('$label ($count)', textAlign: TextAlign.center, style: TextStyle(color: selected ? templateTeal : Colors.white54, fontSize: 9.5, fontWeight: FontWeight.w900)),
+            ),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          Row(children: const [
+            Expanded(child: Text('GLOBAL OPPORTUNITIES', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900))),
+            Text('V6.9.3', style: TextStyle(color: Colors.white54, fontSize: 9)),
+          ]),
+          const SizedBox(height: 3),
+          const Text('Live market intelligence • Assessed every 15s', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 12),
+          templateCard(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+              children: [
+                Row(children: [filterButton('ALL'), filterButton('PRIME'), filterButton('STRONG'), filterButton('WATCH')]),
+                const Divider(height: 14, color: Colors.white10),
+                Row(children: const [
+                  Expanded(flex: 24, child: Text('MARKET', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 18, child: Text('REGIME', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 12, child: Text('AI UP', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 12, child: Text('QUANT', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 10, child: Text('FAST', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 16, child: Text('STATE', textAlign: TextAlign.right, style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                ]),
+                const SizedBox(height: 4),
+                if (visible.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 28),
+                    child: Text('No markets in this state yet', style: TextStyle(color: Colors.white54, fontSize: 11)),
+                  )
+                else
+                  ...visible.take(45).map((row) {
+                    final name = row['market']?.toString() ?? row['name']?.toString() ?? row['symbol']?.toString() ?? '-';
+                    final asset = row['asset_class']?.toString() ?? row['category']?.toString() ?? '';
+                    final rawRegime = row['regime']?.toString().toUpperCase() ?? 'UNKNOWN';
+                    final regime = templateRegimeLabel(rawRegime);
+                    final state = templateMarketState(row);
+                    final ai = row['model_ai_confidence'] ?? row['ai_up'] ?? row['combined_up_probability'];
+                    final quant = row['quant_confidence'] ?? row['quant'];
+                    final fast = row['smart_fast_score'] ?? row['fast_score'] ?? 0;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0x151FFFFFFF)))),
+                      child: Row(children: [
+                        Expanded(flex: 24, child: Row(children: [
+                          Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(color: templateTeal.withValues(alpha: .10), borderRadius: BorderRadius.circular(8)),
+                            child: Icon(templateAssetIcon(asset), size: 12, color: templateTeal),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900)),
+                            Text(asset, style: const TextStyle(color: Colors.white38, fontSize: 7.2)),
+                          ])),
+                        ])),
+                        Expanded(flex: 18, child: templateTinyPill(regime, color: regime.contains('BREAK') ? templateRed : (regime.contains('TREND') ? templateGreen : templateAmber))),
+                        Expanded(flex: 12, child: Text(templatePercent(ai), style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 12, child: Text(templatePercent(quant), style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 10, child: Text('${double.tryParse('$fast')?.toStringAsFixed(0) ?? '--'}', style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 16, child: Align(alignment: Alignment.centerRight, child: templateTinyPill(state, color: templateStateColor(state)))),
+                      ]),
+                    );
+                  }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(children: const [
+            Icon(Icons.stars_rounded, color: templateGreen, size: 14),
+            SizedBox(width: 7),
+            Expanded(child: Text('TEST PRIME: Quant ≥28% • AI ≥40% • Fast ≥60 • Holdout ≥60% • PF ≥1.20 • Sample ≥30 • each WF fold ≥60%', style: TextStyle(color: Colors.white60, fontSize: 9.5, height: 1.35))),
+          ]),
+        ],
+      );
+    }
+
+    Map<String, dynamic> templateTargetEvidence(double target) {
+      final optimizer = compound['target_optimizer'] is Map
+          ? Map<String, dynamic>.from(compound['target_optimizer'] as Map)
+          : compound['adaptive_target_optimizer'] is Map
+              ? Map<String, dynamic>.from(compound['adaptive_target_optimizer'] as Map)
+              : <String, dynamic>{};
+      final options = optimizer['options'] is List
+          ? optimizer['options'] as List
+          : optimizer['targets'] is List
+              ? optimizer['targets'] as List
+              : const [];
+      for (final raw in options) {
+        if (raw is! Map) continue;
+        final row = Map<String, dynamic>.from(raw);
+        final mult = double.tryParse('${row['multiplier'] ?? row['target'] ?? 0}') ?? 0;
+        if ((mult - target).abs() < .01) return row;
+      }
+      return <String, dynamic>{};
+    }
+
+    Widget templateMiniMetric(String label, String value, IconData icon, {Color color = templateTeal}) {
+      return Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0A1720),
+            borderRadius: BorderRadius.circular(13),
+            border: Border.all(color: templateBorder),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(height: 8),
+            Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: color == templateTeal ? Colors.white : color, fontSize: 13.5, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 2),
+            Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 7.8)),
+          ]),
+        ),
+      );
+    }
+
+    Widget templateCompoundPage() {
+      final selectedRaw = compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier'] ?? compound['adaptive_target'];
+      final selectedTarget = double.tryParse('${selectedRaw ?? 0}') ?? 0;
+      Widget targetBox(double target, String gain) {
+        final ev = templateTargetEvidence(target);
+        final selected = (selectedTarget - target).abs() < .01;
+        final score = ev['score'] ?? ev['composite_score'];
+        final wr = ev['win_rate_pct'] ?? ev['win_rate'];
+        return Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+            decoration: BoxDecoration(
+              color: selected ? templateGreen.withValues(alpha: .08) : const Color(0xFF0A1720),
+              borderRadius: BorderRadius.circular(13),
+              border: Border.all(color: selected ? templateGreen : templateBorder),
+            ),
+            child: Column(children: [
+              Text('${target.toStringAsFixed(1)}×', style: TextStyle(color: target == 1.2 ? templateRed : target == 1.3 ? templateAmber : templateGreen, fontSize: 16, fontWeight: FontWeight.w900)),
+              Text(gain, style: const TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 5),
+              Text(score == null ? 'Score --' : 'Score ${formatNumber(score, decimals: 2)}', style: const TextStyle(color: Colors.white60, fontSize: 8.5)),
+              Text(wr == null ? 'WR --' : 'WR ${templatePercent(wr)}', style: TextStyle(color: selected ? templateGreen : Colors.white54, fontSize: 8.5, fontWeight: FontWeight.w800)),
+            ]),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          templateCard(
+            borderColor: templateTeal,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Icon(Icons.autorenew_rounded, color: templateTeal),
+                const SizedBox(width: 9),
+                const Expanded(child: Text('ELITE 80/20 COMPOUND', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900))),
+                const Text('V6.9.3', style: TextStyle(color: Colors.white54, fontSize: 9)),
+              ]),
+              const SizedBox(height: 8),
+              templateTinyPill(compoundStatus.replaceAll('_', ' '), color: compoundEnabled ? templateGreen : templateAmber),
+              const SizedBox(height: 8),
+              const Text('• Exactly 5 PRIME markets  • 15s assessment\n• Adaptive target  • 20% harvest  • IG DEMO only\n• AI ≥40%  • Quant ≥28%  • Fast ≥60\n• Holdout ≥60%  • PF ≥1.20  • Sample ≥30  • each WF fold ≥60%', style: TextStyle(color: Colors.white60, fontSize: 9.5, height: 1.55)),
+              const SizedBox(height: 13),
+              Row(children: [
+                templateMiniMetric('Cycle', '#$compoundCycle', Icons.refresh_rounded),
+                const SizedBox(width: 7),
+                templateMiniMetric('Current Capital', compoundCapital == null ? '--' : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(compoundCapital)}', Icons.account_balance_wallet_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Reserve', '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(compoundReserve)}', Icons.savings_outlined),
+              ]),
+              const SizedBox(height: 8),
+              Row(children: [
+                templateMiniMetric('Basket (PRIME)', '$compoundOpen / $compoundMax', Icons.grid_view_rounded),
+                const SizedBox(width: 7),
+                templateMiniMetric('Basket P&L', templateMoney(compoundPnl, fallback: '0.00'), Icons.show_chart_rounded, color: (double.tryParse('$compoundPnl') ?? 0) >= 0 ? templateGreen : templateRed),
+                const SizedBox(width: 7),
+                templateMiniMetric('Environment', 'IG DEMO', Icons.cloud_outlined),
+              ]),
+              const SizedBox(height: 8),
+              Row(children: [
+                templateMiniMetric('Broker Capacity', '$brokerCapacityOpen / $brokerCapacityMax', Icons.hub_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Compound Capacity', '$compoundOpen / $compoundMax', Icons.layers_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Available Slots', '${(brokerCapacityMax - brokerCapacityOpen).clamp(0, brokerCapacityMax)}', Icons.add_circle_outline_rounded),
+              ]),
+              const SizedBox(height: 15),
+              const Text('ADAPTIVE TARGET OPTIMIZER', style: TextStyle(color: templateTeal, fontSize: 10, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 3),
+              const Text('Mode: ADAPTIVE • Evidence: Genuine IG DEMO cycles', style: TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 10),
+              Row(children: [targetBox(1.2, '+20%'), const SizedBox(width: 7), targetBox(1.3, '+30%'), const SizedBox(width: 7), targetBox(1.5, '+50%')]),
+              const SizedBox(height: 9),
+              Text(selectedTarget > 0 ? 'Selected target: ${selectedTarget.toStringAsFixed(1)}× from current optimizer evidence.' : 'Selected target: waiting for sufficient optimizer evidence.', style: const TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 12),
+              const Divider(color: Colors.white10),
+              Row(children: [
+                const Icon(Icons.psychology_alt_outlined, color: templateTeal, size: 17),
+                const SizedBox(width: 8),
+                Expanded(child: Text('STRATEGY INTELLIGENCE • ${compoundBridgeState.replaceAll('_', ' ')}', style: const TextStyle(color: templateTeal, fontSize: 9.5, fontWeight: FontWeight.w900))),
+              ]),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: openCompoundDashboard,
+                  style: FilledButton.styleFrom(backgroundColor: templateTeal, foregroundColor: const Color(0xFF041014), padding: const EdgeInsets.symmetric(vertical: 13)),
+                  icon: const Icon(Icons.dashboard_customize_rounded, size: 18),
+                  label: const Text('Open Compound Strategy', style: TextStyle(fontWeight: FontWeight.w900)),
+                ),
+              ),
+            ]),
+          ),
+        ],
+      );
+    }
+
+    Widget templateTradesPage() {
+      final all = paperTrades.map((e) => Map<String, dynamic>.from(e)).toList();
+      final openRows = all.where((r) => '${r['status']}'.toUpperCase() == 'OPEN').toList();
+      final closedRows = all.where((r) {
+        final st = '${r['status']}'.toUpperCase();
+        return st == 'WIN' || st == 'LOSS' || st == 'CLOSED';
+      }).toList();
+      final rows = tradeView == 'OPEN' ? openRows : closedRows;
+      Widget tab(String name, int count) {
+        final selected = tradeView == name;
+        return Expanded(
+          child: InkWell(
+            onTap: () => setState(() => tradeView = name),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(border: Border(bottom: BorderSide(color: selected ? templateTeal : Colors.transparent, width: 2))),
+              child: Text('$name ($count)', textAlign: TextAlign.center, style: TextStyle(color: selected ? templateTeal : Colors.white54, fontSize: 9.5, fontWeight: FontWeight.w900)),
+            ),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text('TRADES — IG DEMO ALL TRADES', style: TextStyle(color: templateTeal, fontSize: 15, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          const Text('Genuine IG DEMO executed trades', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 10),
+          templateCard(
+            padding: const EdgeInsets.all(10),
+            child: Column(children: [
+              Row(children: [tab('OPEN', openRows.length), tab('CLOSED', closedRows.length), const Expanded(child: Center(child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.filter_list_rounded, size: 13, color: Colors.white54), SizedBox(width: 4), Text('FILTER', style: TextStyle(color: Colors.white54, fontSize: 9, fontWeight: FontWeight.w900))])))]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: Column(children: [Text('$igLifetimeSettled', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Total Trades', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text('$igLifetimeWins', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Wins', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text('$igLifetimeLosses', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Losses', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(templatePercent(igLifetimeWinRate), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Win Rate', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(templateMoney(igRunningPnl, fallback: '0.00'), style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: (double.tryParse('$igRunningPnl') ?? 0) >= 0 ? templateGreen : templateRed)), const Text('P&L', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+              ]),
+              const Divider(height: 18, color: Colors.white10),
+              Row(children: const [
+                Expanded(flex: 23, child: Text('MARKET', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 15, child: Text('DIRECTION', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 15, child: Text('RESULT', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 22, child: Text('P&L', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 25, child: Text('CLOSED AT', textAlign: TextAlign.right, style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+              ]),
+              if (rows.isEmpty)
+                const Padding(padding: EdgeInsets.symmetric(vertical: 26), child: Text('No trades in this view yet', style: TextStyle(color: Colors.white54, fontSize: 10)))
+              else
+                ...rows.take(30).map((row) {
+                  final market = row['market']?.toString() ?? row['symbol']?.toString() ?? '-';
+                  final direction = row['direction']?.toString().toUpperCase() ?? '-';
+                  final result = row['status']?.toString().toUpperCase() ?? '-';
+                  final pnl = row['pnl'] ?? row['realized_pnl'] ?? row['profit_loss'];
+                  final closedAt = row['closed_at_iso']?.toString() ?? row['settled_at_iso']?.toString() ?? row['close_time_iso']?.toString() ?? '-';
+                  final c = templateStateColor(result);
+                  return Container(
+                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0x151FFFFFFF)))),
+                    child: Row(children: [
+                      Expanded(flex: 23, child: Text(market, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 15, child: Text(direction, style: TextStyle(color: sideColor(direction), fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 15, child: Text(result, style: TextStyle(color: c, fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 22, child: Text(pnl == null ? '--' : templateMoney(pnl), style: TextStyle(color: (double.tryParse('$pnl') ?? 0) >= 0 ? templateGreen : templateRed, fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 25, child: Text(closedAt.length > 16 ? closedAt.substring(5, 16).replaceFirst('T', ' ') : closedAt, textAlign: TextAlign.right, style: const TextStyle(color: Colors.white54, fontSize: 8.5))),
+                    ]),
+                  );
+                }),
+            ]),
+          ),
+        ],
+      );
+    }
+
+    Widget templateAiPage() {
+      final top = globalMarketCandidates.isNotEmpty ? Map<String, dynamic>.from(globalMarketCandidates.first) : <String, dynamic>{};
+      final aiMarket = top['market']?.toString() ?? top['name']?.toString() ?? symbol.text.trim();
+      final aiDirection = top['direction']?.toString().toUpperCase() ?? liveDecision;
+      final aiValue = top['model_ai_confidence'] ?? unifiedLive['model_ai_confidence'] ?? sig?['combined_up_probability'];
+      final quantValue = top['quant_confidence'] ?? sig?['confidence'];
+      final fastValue = top['smart_fast_score'] ?? top['fast_score'] ?? 0;
+      final holdout = top['historical_win_rate'] ?? 0;
+      final pf = top['historical_profit_factor'] ?? 0;
+      final wf = top['walk_forward_min_win_rate_pct'] ?? 0;
+      final regime = top['regime']?.toString().toUpperCase() ?? 'UNKNOWN';
+      Widget gate(String label, String requirement, dynamic current, bool pass, {IconData icon = Icons.check_circle_outline_rounded}) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          child: Row(children: [
+            Icon(icon, size: 17, color: pass ? templateGreen : templateRed),
+            const SizedBox(width: 8),
+            Expanded(child: Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
+            Text(requirement, style: const TextStyle(color: Colors.white54, fontSize: 9)),
+            const SizedBox(width: 8),
+            Text('$current', style: TextStyle(color: pass ? templateGreen : templateRed, fontSize: 9, fontWeight: FontWeight.w900)),
+          ]),
+        );
+      }
+      final aiNum = double.tryParse('${aiValue ?? 0}') ?? 0;
+      final aiPct = aiNum.abs() <= 1 ? aiNum * 100 : aiNum;
+      final qNum = double.tryParse('${quantValue ?? 0}') ?? 0;
+      final qPct = qNum.abs() <= 1 ? qNum * 100 : qNum;
+      final fastNum = double.tryParse('$fastValue') ?? 0;
+      final holdNum = double.tryParse('$holdout') ?? 0;
+      final holdPct = holdNum.abs() <= 1 ? holdNum * 100 : holdNum;
+      final pfNum = double.tryParse('$pf') ?? 0;
+      final wfNum = double.tryParse('$wf') ?? 0;
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text('AI INTELLIGENCE', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          const Text('Strategy Intelligence & Live Signals', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 12),
+          templateCard(
+            borderColor: const Color(0xFF7349A2),
+            child: Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('CURRENT REGIME', style: TextStyle(color: Color(0xFFCE8CFF), fontSize: 9, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 6),
+                Text('Market structure: ${regime.replaceAll('_', ' ')}', style: const TextStyle(color: Colors.white60, fontSize: 9.5)),
+                const SizedBox(height: 3),
+                Text('Adaptive strategy: ${top['strategy_name'] ?? 'Regime Adaptive'}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Color(0xFFCE8CFF), fontSize: 9.5, fontWeight: FontWeight.w800)),
+              ])),
+              const SizedBox(width: 6),
+              const SizedBox(width: 10),
+              const Icon(Icons.show_chart_rounded, color: Color(0xFFCE8CFF), size: 36),
+            ]),
+          ),
+          const SizedBox(height: 10),
+          templateCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('LIVE SIGNAL (TOP)', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(child: Text('$aiMarket  $aiDirection', style: TextStyle(color: templateStateColor(aiDirection), fontSize: 18, fontWeight: FontWeight.w900))),
+                templateTinyPill(templateMarketState(top), color: templateStateColor(templateMarketState(top))),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: Column(children: [Text('${aiPct.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)), const Text('AI directional', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text('${qPct.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)), const Text('Quant', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(fastNum.toStringAsFixed(0), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)), const Text('Fast', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(formatNumber(top['rsi'] ?? sig?['rsi'], decimals: 1), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)), const Text('RSI', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+              ]),
+            ]),
+          ),
+          const SizedBox(height: 10),
+          templateCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('AI GATES (V6.9.3 TEST POLICY)', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 4),
+              gate('AI directional gate', '≥ 40%', '${aiPct.toStringAsFixed(1)}%', aiPct >= 40),
+              gate('Quant normal gate', '≥ 28%', '${qPct.toStringAsFixed(1)}%', qPct >= 28, icon: Icons.analytics_outlined),
+              gate('Fast execution quality', '≥ 60', fastNum.toStringAsFixed(0), fastNum >= 60, icon: Icons.speed_rounded),
+              gate('Final holdout WR', '≥ 60%', '${holdPct.toStringAsFixed(1)}%', holdPct >= 60, icon: Icons.fact_check_outlined),
+              gate('Profit factor', '≥ 1.20', pfNum.toStringAsFixed(2), pfNum >= 1.20, icon: Icons.show_chart_rounded),
+              gate('Walk-forward floor', '≥ 60%', '${wfNum.toStringAsFixed(1)}%', wfNum >= 60, icon: Icons.timeline_rounded),
+              const Divider(height: 18, color: Colors.white10),
+              Row(children: [
+                const Icon(Icons.cloud_done_outlined, color: templateGreen, size: 17),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('Broker execution', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800))),
+                const Text('IG DEMO', style: TextStyle(color: templateGreen, fontSize: 9.5, fontWeight: FontWeight.w900)),
+              ]),
+            ]),
+          ),
+          if (aiLearningWatchers.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            const Text('AI learning watchers', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            ...aiLearningWatchers.take(6).map((w) => Padding(padding: const EdgeInsets.only(bottom: 8), child: watcherCard(w))),
+          ],
+        ],
+      );
+    }
+
+    Widget templateSettingsPage() {
+      final providerHealth = systemOverview?['market_data'] is Map
+          ? Map<String, dynamic>.from(systemOverview!['market_data'] as Map)
+          : <String, dynamic>{};
+      final providerCount = providerHealth['healthy_providers'] ?? providerHealth['providers_healthy'] ?? providerHealth['providers'] ?? '--';
+      Widget healthBox(IconData icon, String title, String value, Color color) {
+        return Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFF0A1720), borderRadius: BorderRadius.circular(13), border: Border.all(color: templateBorder)),
+            child: Column(children: [
+              Icon(icon, color: color, size: 18),
+              const SizedBox(height: 8),
+              Text(value, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 2),
+              Text(title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54, fontSize: 8)),
+            ]),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text('SETTINGS & SYSTEM', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          const Text('Configuration & Diagnostics', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 12),
+          templateCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Text('SYSTEM HEALTH', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+                const Spacer(),
+                templateTinyPill((systemOverview != null || autoDashboard != null) ? 'HEALTHY' : 'CHECKING', color: (systemOverview != null || autoDashboard != null) ? templateGreen : templateAmber),
+              ]),
+              const SizedBox(height: 12),
+              Row(children: [
+                healthBox(Icons.cloud_done_outlined, 'Data Providers', '$providerCount', templateGreen),
+                const SizedBox(width: 7),
+                healthBox(Icons.verified_user_outlined, 'IG DEMO API', 'Connected', templateGreen),
+                const SizedBox(width: 7),
+                healthBox(Icons.bolt_rounded, 'Auto Manager', autoOn ? 'ON' : 'OFF', autoOn ? templateGreen : templateAmber),
+                const SizedBox(width: 7),
+                healthBox(Icons.timer_outlined, '15s Engine', 'Active', templateGreen),
+              ]),
+              const SizedBox(height: 15),
+              const Text('SYSTEM INFO', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              const _MidnightSystemRow('Version', 'V6.9.3'),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Environment', 'DEMO ONLY'),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Execution Mode', 'Direct IG DEMO Execution'),
+              const Divider(height: 18, color: Colors.white10),
+              _MidnightSystemRow('Last System Check', DateTime.now().toIso8601String().substring(0, 19).replaceFirst('T', ' ')),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Qualification', '28Q / 40AI / 60Fast / 60WR / 1.20PF / 30 trades / each WF fold 60'),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: systemDiagnosticBusy ? null : runSystemDiagnostic,
+                  style: FilledButton.styleFrom(backgroundColor: templateTeal, foregroundColor: const Color(0xFF041014), padding: const EdgeInsets.symmetric(vertical: 13)),
+                  icon: systemDiagnosticBusy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.shield_outlined),
+                  label: Text(systemDiagnosticBusy ? 'Running diagnostic...' : 'Run Full System Diagnostic', style: const TextStyle(fontWeight: FontWeight.w900)),
+                ),
+              ),
+            ]),
+          ),
+        ],
+      );
+    }
+
     final pages = <Widget>[
-      dashboardPage(),
-      marketsPage(),
-      tradesPage(),
-      aiPage(),
-      settingsPage(),
+      templateHomePage(),
+      templateMarketsPage(),
+      templateCompoundPage(),
+      templateTradesPage(),
+      templateAiPage(),
+      templateSettingsPage(),
     ];
 
     return Scaffold(
@@ -7311,7 +7938,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.8.19 • Adaptive Strategy Intelligence • IG DEMO', style: TextStyle(fontSize: 10, color: Colors.white54, letterSpacing: .35)),
+                  Text('V6.9.3 • Adaptive Strategy Intelligence • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
                 ],
               ),
             ),
@@ -7326,7 +7953,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               await loadAiLearningStatus();
               await loadOvernightDemoStatus();
               await loadGlobalMarkets();
-              await loadV6819Architecture();
               await refreshServerWatchers();
             },
             icon: const Icon(Icons.refresh_rounded),
@@ -7341,7 +7967,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           await loadAiLearningStatus();
           await loadOvernightDemoStatus();
           await loadGlobalMarkets();
-          await loadV6819Architecture();
           await refreshServerWatchers();
           if (selectedTab == 0) {
             await refreshSignal();
@@ -7357,11 +7982,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         selectedIndex: selectedTab,
         onDestinationSelected: (index) => setState(() => selectedTab = index),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard_rounded), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'Home'),
           NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
+          NavigationDestination(icon: Icon(Icons.dashboard_customize_outlined), selectedIcon: Icon(Icons.dashboard_customize_rounded), label: 'Compound'),
           NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
           NavigationDestination(icon: Icon(Icons.psychology_alt_outlined), selectedIcon: Icon(Icons.psychology_alt_rounded), label: 'AI'),
-          NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune_rounded), label: 'Settings'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings_rounded), label: 'Settings'),
         ],
       ),
     );
@@ -7632,7 +8258,7 @@ class _CompoundDashboardScreenState
                 'Close compound basket?',
               ),
               content: const Text(
-                'This closes only JASONG Adaptive Compound IG DEMO positions. '
+                'This closes only JASONG Elite Compound IG DEMO positions. '
                 'The completed cycle will be recorded using the realised broker result.',
               ),
               actions: [
@@ -7815,28 +8441,6 @@ class _CompoundDashboardScreenState
           )
         : <String, dynamic>{};
 
-    final targetOptimizer = data['target_optimizer'] is Map
-        ? Map<String, dynamic>.from(data['target_optimizer'] as Map)
-        : <String, dynamic>{};
-    final selectedTargetMultiple = _number(
-      current['target_multiple'] ??
-          targetOptimizer['selected_target_multiple'] ??
-          1.5,
-      fallback: 1.5,
-    );
-    final selectedTargetPct = _number(
-      targetOptimizer['selected_profit_target_pct'] ??
-          ((selectedTargetMultiple - 1.0) * 100.0),
-      fallback: 50.0,
-    );
-    final targetSelectionState =
-        targetOptimizer['selection_state']?.toString().toUpperCase() ??
-            'ADAPTIVE';
-    final requiredBasketPositions = int.tryParse(
-          '${data['required_basket_positions'] ?? 5}',
-        ) ??
-        5;
-
     final positions = data['compound_broker_positions'] is List
         ? (data['compound_broker_positions'] as List)
             .whereType<Map>()
@@ -7916,7 +8520,8 @@ class _CompoundDashboardScreenState
     final cycleNumber = data['cycle_number'] ?? 0;
     final runningPnl = current['running_pnl'] ?? 0;
     final targetProfit = current['target_profit'] ??
-        (_number(currentCapital) * (selectedTargetPct / 100.0));
+        (_number(currentCapital) *
+            _number(rules['profit_target_pct'], fallback: .50));
     final stopAmount = current['stop_loss_amount'] ??
         (_number(currentCapital) *
             _number(rules['stop_loss_pct'], fallback: .15));
@@ -7935,18 +8540,18 @@ class _CompoundDashboardScreenState
 
     return Scaffold(
       appBar: AppBar(
-        title: Column(
+        title: const Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Adaptive Compound',
+            Text(
+              'Elite Compound',
               style: TextStyle(
                 fontWeight: FontWeight.w900,
               ),
             ),
             Text(
-              'V${data['version'] ?? '6.8.19'} • IG DEMO ONLY',
-              style: const TextStyle(
+              'V6.7.2 • IG DEMO ONLY',
+              style: TextStyle(
                 fontSize: 10,
                 color: Colors.white54,
               ),
@@ -7986,7 +8591,7 @@ class _CompoundDashboardScreenState
                     children: [
                       Expanded(
                         child: Text(
-                          'JASONG ADAPTIVE 80/20 COMPOUND',
+                          'JASONG ELITE 80/20 COMPOUND',
                           style: const TextStyle(
                             fontSize: 17,
                             fontWeight:
@@ -8021,7 +8626,7 @@ class _CompoundDashboardScreenState
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Exactly 5 PRIME markets • 15-second assessment • adaptive regime strategy • live-money execution OFF',
+                    'Best available 1–5 markets • no forced filler trades • live-money execution hard OFF',
                     style: TextStyle(
                       color: Colors.white54,
                       fontSize: 11,
@@ -8103,7 +8708,7 @@ class _CompoundDashboardScreenState
                   if (pendingElite.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Text(
-                      '${pendingElite.length} PRIME setup(s) are ready. '
+                      '${pendingElite.length} Elite setup(s) are ready. '
                       '${blockers.isNotEmpty ? 'Execution is queued until the broker is clean.' : 'Compound can execute immediately after final broker preflight.'}',
                       style: const TextStyle(
                         color: Color(0xFF67F0C1),
@@ -8170,8 +8775,8 @@ class _CompoundDashboardScreenState
                 ),
                 const SizedBox(width: 8),
                 _metric(
-                  'Compound PRIME',
-                  '${positions.length} / $requiredBasketPositions',
+                  'Open elite',
+                  '${positions.length} / ${rules['max_positions'] ?? 5}',
                 ),
               ],
             ),
@@ -8188,7 +8793,7 @@ class _CompoundDashboardScreenState
                 ),
                 const SizedBox(width: 8),
                 _metric(
-                  'Target ${selectedTargetMultiple.toStringAsFixed(1)}×',
+                  'Target',
                   '+${currency.isNotEmpty ? '$currency ' : ''}${_money(targetProfit)}',
                 ),
               ],
@@ -8219,9 +8824,9 @@ class _CompoundDashboardScreenState
                 children: [
                   Row(
                     children: [
-                      Text(
-                        '+${selectedTargetPct.toStringAsFixed(0)}% target progress • $targetSelectionState',
-                        style: const TextStyle(
+                      const Text(
+                        '+50% target progress',
+                        style: TextStyle(
                           fontWeight:
                               FontWeight.w800,
                           fontSize: 11,
@@ -8420,12 +9025,8 @@ class _CompoundDashboardScreenState
               child: Column(
                 children: [
                   _ruleRow(
-                    'Adaptive target',
-                    '${selectedTargetMultiple.toStringAsFixed(1)}× (+${selectedTargetPct.toStringAsFixed(0)}%)',
-                  ),
-                  _ruleRow(
-                    'Target mode',
-                    targetSelectionState,
+                    'Basket take-profit',
+                    '+${_percent01(rules['profit_target_pct'] ?? .50)}',
                   ),
                   _ruleRow(
                     'Basket stop',
@@ -8439,13 +9040,26 @@ class _CompoundDashboardScreenState
                     'Profit compounded',
                     _percent01(rules['profit_compound_pct'] ?? .80),
                   ),
-                  _ruleRow('AI minimum', '40%'),
-                  _ruleRow('Quant normal', '30%'),
-                  _ruleRow('Quant conditional', '28–29.99%'),
-                  _ruleRow('FX Fast minimum', '90+'),
-                  _ruleRow('Global Fast minimum', '70+'),
-                  _ruleRow('Execution quality', 'PRIME • A / A+'),
-                  _ruleRow('Required basket', 'Exactly $requiredBasketPositions'),
+                  _ruleRow(
+                    'Model-AI minimum',
+                    _percent01(rules['model_ai_min_confidence'] ?? .40),
+                  ),
+                  _ruleRow(
+                    'Quant minimum',
+                    _percent01(rules['quant_min_confidence'] ?? .30),
+                  ),
+                  _ruleRow(
+                    'Fast score minimum',
+                    '${_number(rules['fast_score_min'], fallback: 90).toStringAsFixed(0)}+',
+                  ),
+                  _ruleRow(
+                    'Quality',
+                    'A / A+',
+                  ),
+                  _ruleRow(
+                    'Maximum positions',
+                    '${rules['max_positions'] ?? 5}',
+                  ),
                   _ruleRow(
                     'Reserve reused',
                     'NO',
@@ -8459,27 +9073,7 @@ class _CompoundDashboardScreenState
             ),
             const SizedBox(height: 20),
             const Text(
-              'Adaptive strategy intelligence',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-            const SizedBox(height: 9),
-            _card(
-              child: Column(
-                children: [
-                  _ruleRow('TRENDING', 'MULTI-TIMEFRAME MOMENTUM'),
-                  _ruleRow('RANGING', 'MEAN REVERSION'),
-                  _ruleRow('BREAKOUT', 'VOLATILITY BREAKOUT'),
-                  _ruleRow('HIGH-VOL REVERSAL', 'REVERSAL CONFIRMATION'),
-                  _ruleRow('UNCERTAIN', 'NO TRADE'),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            const Text(
-              'Current PRIME basket',
+              'Current Elite basket',
               style: TextStyle(
                 fontSize: 17,
                 fontWeight: FontWeight.w900,
@@ -8489,7 +9083,7 @@ class _CompoundDashboardScreenState
             if (positions.isEmpty)
               _card(
                 child: const Text(
-                  'No PRIME Compound positions are open. The engine reassesses opportunities every 15 seconds and waits for five PRIME, diversified, broker-accepted IG DEMO markets before starting the adaptive cycle.',
+                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
                   style: TextStyle(
                     color: Colors.white54,
                     fontSize: 11,
