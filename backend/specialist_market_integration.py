@@ -14,6 +14,7 @@ from category_strategy_engine import (
 )
 
 from chatgpt_mcp import install_chatgpt_mcp
+from chatgpt_actions import install_chatgpt_actions
 
 
 def _position_identity(row: Dict[str, Any]) -> tuple[str, str]:
@@ -285,6 +286,21 @@ def install_specialist_market_system(
                 methods=["GET"],
                 name="jasong_mcp_status_install_error",
             )
+
+    # Install the Plus-compatible GPT Actions gateway. It supports both reads
+    # and controlled IG DEMO writes. A gateway failure must never take the
+    # trading backend offline.
+    try:
+        install_chatgpt_actions(
+            app,
+            intelligence=intelligence,
+            portfolio=portfolio,
+            compound_engine=compound_engine,
+            broker=broker,
+            evidence_source=forward_evidence_source,
+        )
+    except Exception as exc:
+        app.state.jasong_actions_install_error = f"{type(exc).__name__}: {exc}"
 
     # FastAPI route registration is done programmatically to avoid a large,
     # fragile replacement of the current backend/main.py.
