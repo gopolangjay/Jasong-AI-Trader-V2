@@ -330,11 +330,6 @@ def build_actions_openapi() -> Dict[str, Any]:
             "x-openai-isConsequential": True,
         }
 
-    confirm_prop = {
-        "type": "boolean",
-        "description": "Set true only after the user explicitly asked to perform this write.",
-    }
-
     return {
         "openapi": "3.1.0",
         "info": {
@@ -354,7 +349,105 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "in": "header",
                     "name": HEADER_NAME,
                 }
-            }
+            },
+            "schemas": {
+                "ConfirmRequest": {
+                    "type": "object",
+                    "required": ["confirm"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user explicitly asked "
+                                "to perform this write."
+                            ),
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+                "RunScanRequest": {
+                    "type": "object",
+                    "required": ["confirm"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user explicitly asked "
+                                "to perform this write."
+                            ),
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "FOREX",
+                                "INDICES",
+                                "CRYPTO",
+                                "METALS",
+                                "ENERGY",
+                                "SHARES",
+                            ],
+                            "description": (
+                                "Optional market category. Omit to scan all "
+                                "categories."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "CategoryAutotradeRequest": {
+                    "type": "object",
+                    "required": ["confirm", "enabled"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user explicitly asked "
+                                "to perform this write."
+                            ),
+                        },
+                        "enabled": {"type": "boolean"},
+                    },
+                    "additionalProperties": False,
+                },
+                "SymbolWriteRequest": {
+                    "type": "object",
+                    "required": ["confirm", "symbol"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user explicitly asked "
+                                "to perform this write."
+                            ),
+                        },
+                        "symbol": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 80,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                "ClosePositionRequest": {
+                    "type": "object",
+                    "required": ["confirm", "deal_id"],
+                    "properties": {
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user explicitly asked "
+                                "to perform this write."
+                            ),
+                        },
+                        "deal_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 120,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
         },
         "paths": {
             "/assistant/status": {
@@ -461,18 +554,7 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "runMarketScan",
                     "Run market scan now",
                     "Runs the specialist intelligence scan. This can change rankings and may subsequently allow normal Category autotrading to act.",
-                    {
-                        "type": "object",
-                        "required": ["confirm"],
-                        "properties": {
-                            "confirm": confirm_prop,
-                            "category": {
-                                "type": "string",
-                                "description": "Optional category: FOREX, INDICES, CRYPTO, METALS, ENERGY, SHARES. Omit for all categories.",
-                            },
-                        },
-                        "additionalProperties": False,
-                    },
+                    {"$ref": "#/components/schemas/RunScanRequest"},
                 )
             },
             "/assistant/write/full-refresh": {
@@ -480,12 +562,7 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "forceFullRefresh",
                     "Force full 40-market refresh",
                     "Starts a FORCE_ALL optimization/evidence refresh across all 40 markets.",
-                    {
-                        "type": "object",
-                        "required": ["confirm"],
-                        "properties": {"confirm": confirm_prop},
-                        "additionalProperties": False,
-                    },
+                    {"$ref": "#/components/schemas/ConfirmRequest"},
                 )
             },
             "/assistant/write/category-autotrade": {
@@ -493,15 +570,7 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "setCategoryAutotrade",
                     "Enable or disable Category autotrading",
                     "Changes Category autotrading for the current running process only. Render environment settings remain restart-time authority.",
-                    {
-                        "type": "object",
-                        "required": ["confirm", "enabled"],
-                        "properties": {
-                            "confirm": confirm_prop,
-                            "enabled": {"type": "boolean"},
-                        },
-                        "additionalProperties": False,
-                    },
+                    {"$ref": "#/components/schemas/CategoryAutotradeRequest"},
                 )
             },
             "/assistant/write/open-qualified": {
@@ -509,15 +578,7 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "openQualifiedCategoryPosition",
                     "Open a currently qualified Category position",
                     "Opens only a market that is currently standard-eligible and still passes Category portfolio/global exposure controls. The caller cannot provide EPIC, direction, size, or bypass flags.",
-                    {
-                        "type": "object",
-                        "required": ["confirm", "symbol"],
-                        "properties": {
-                            "confirm": confirm_prop,
-                            "symbol": {"type": "string", "minLength": 1, "maxLength": 80},
-                        },
-                        "additionalProperties": False,
-                    },
+                    {"$ref": "#/components/schemas/SymbolWriteRequest"},
                 )
             },
             "/assistant/write/close-category-position": {
@@ -525,15 +586,7 @@ def build_actions_openapi() -> Dict[str, Any]:
                     "closeCategoryPosition",
                     "Close a Category IG DEMO position",
                     "Closes only an open JSCAT-owned Category position by deal ID. It cannot close manual, Compound, learning or live-money positions.",
-                    {
-                        "type": "object",
-                        "required": ["confirm", "deal_id"],
-                        "properties": {
-                            "confirm": confirm_prop,
-                            "deal_id": {"type": "string", "minLength": 1, "maxLength": 120},
-                        },
-                        "additionalProperties": False,
-                    },
+                    {"$ref": "#/components/schemas/ClosePositionRequest"},
                 )
             },
         },
