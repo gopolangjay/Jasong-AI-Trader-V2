@@ -18,6 +18,13 @@ class MarketCategoriesPage extends StatefulWidget {
 }
 
 class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
+  static const _teal = Color(0xFF65E6D3);
+  static const _green = Color(0xFF67F0C1);
+  static const _red = Color(0xFFFF7E8B);
+  static const _amber = Color(0xFFFFD75E);
+  static const _blue = Color(0xFF6FA8FF);
+  static const _purple = Color(0xFFB899FF);
+
   static const categories = <String>[
     'FOREX',
     'INDICES',
@@ -30,22 +37,26 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   String selected = 'FOREX';
   Map<String, dynamic>? systemStatus;
   Map<String, dynamic>? portfolioStatus;
-  Map<String, dynamic>? optimizerStatus;
-  Map<String, dynamic>? fullRefreshStatus;
+  Map<String, dynamic>? forwardStatus;
   List<Map<String, dynamic>> selections = const [];
+
   bool busy = false;
   String? error;
-  Timer? fullRefreshPollTimer;
+  Timer? livePollTimer;
 
   @override
   void initState() {
     super.initState();
     refreshAll();
+    livePollTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => refreshAll(silent: true),
+    );
   }
 
   @override
   void dispose() {
-    fullRefreshPollTimer?.cancel();
+    livePollTimer?.cancel();
     super.dispose();
   }
 
@@ -53,12 +64,17 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     final response = await http
         .get(
           Uri.parse('${widget.apiBase}$path'),
-          headers: const {'Accept': 'application/json'},
+          headers: const {
+            'Accept': 'application/json',
+            'Connection': 'close',
+          },
         )
-        .timeout(const Duration(seconds: 45));
+        .timeout(const Duration(seconds: 60));
+
     if (response.statusCode != 200) {
       throw HttpException('HTTP ${response.statusCode}: ${response.body}');
     }
+
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
       throw const FormatException('Unexpected backend response');
@@ -73,13 +89,16 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
           headers: const {
             'Accept': 'application/json',
             'Content-Type': 'application/json',
+            'Connection': 'close',
           },
           body: '{}',
         )
-        .timeout(const Duration(seconds: 120));
+        .timeout(const Duration(seconds: 180));
+
     if (response.statusCode != 200) {
       throw HttpException('HTTP ${response.statusCode}: ${response.body}');
     }
+
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
       throw const FormatException('Unexpected backend response');
@@ -95,40 +114,49 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
         .toList();
   }
 
+  double _num(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse('$value') ?? 0.0;
+  }
+
+  double _pct(dynamic value) {
+    final n = _num(value);
+    return n.abs() <= 1.0 ? n * 100.0 : n;
+  }
+
   Future<void> refreshAll({bool silent = false}) async {
     if (busy && !silent) return;
+
     if (!silent && mounted) {
       setState(() {
         busy = true;
         error = null;
       });
     }
+
     try {
-      final results = await Future.wait([
+      final results = await Future.wait<Map<String, dynamic>>([
         _get('/market-categories/status'),
         _get('/market-categories/$selected'),
         _get('/category-portfolio/status'),
-        _get('/market-categories/optimizer'),
-        _get('/market-categories/full-refresh'),
+        _get('/forward-validation/status'),
       ]);
+
       if (!mounted) return;
       setState(() {
         systemStatus = results[0];
         selections = _mapList(results[1]['selections']);
         portfolioStatus = results[2];
-        optimizerStatus = results[3];
-        fullRefreshStatus = results[4];
+        forwardStatus = results[3];
         error = null;
       });
-      final refreshState = '${results[4]['status'] ?? ''}'.toUpperCase();
-      if (refreshState != 'RUNNING') {
-        fullRefreshPollTimer?.cancel();
-      }
     } catch (e) {
       if (!mounted || silent) return;
       setState(() => error = e.toString());
     } finally {
-      if (!silent && mounted) setState(() => busy = false);
+      if (!silent && mounted) {
+        setState(() => busy = false);
+      }
     }
   }
 
@@ -141,13 +169,14 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     await refreshAll();
   }
 
-  Future<void> scanSelected() async {
+  Future<void> _run(String path) async {
+    if (busy) return;
     setState(() {
       busy = true;
       error = null;
     });
     try {
-      await _post('/market-categories/$selected/run-now');
+      await _post(path);
       await refreshAll(silent: true);
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
@@ -156,75 +185,19 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     }
   }
 
-  Future<void> scanAll() async {
-    setState(() {
-      busy = true;
-      error = null;
-    });
-    try {
-      await _post('/market-categories/run-now');
-      await refreshAll(silent: true);
-    } catch (e) {
-      if (mounted) setState(() => error = e.toString());
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  Future<void> optimiseAll40() async {
-    setState(() {
-      busy = true;
-      error = null;
-    });
-    try {
-      await _post('/market-categories/full-refresh');
-      await refreshAll(silent: true);
-      fullRefreshPollTimer?.cancel();
-      fullRefreshPollTimer = Timer.periodic(
-        const Duration(seconds: 8),
-        (_) => refreshAll(silent: true),
-      );
-    } catch (e) {
-      if (mounted) setState(() => error = e.toString());
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  Future<void> runPortfolio() async {
-    setState(() {
-      busy = true;
-      error = null;
-    });
-    try {
-      await _post('/category-portfolio/run-now');
-      await refreshAll(silent: true);
-    } catch (e) {
-      if (mounted) setState(() => error = e.toString());
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
-  double _num(dynamic value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse('$value') ?? 0.0;
-  }
-
-  Widget _pill(String text, {Color? color}) {
-    final c = color ?? const Color(0xFF6FA8FF);
+  Widget _pill(String text, {Color color = _blue}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       decoration: BoxDecoration(
-        color: c.withValues(alpha: .12),
-        border: Border.all(color: c.withValues(alpha: .35)),
+        color: color.withValues(alpha: .11),
+        border: Border.all(color: color.withValues(alpha: .32)),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         text,
         style: TextStyle(
-          color: c,
-          fontSize: 10,
+          color: color,
+          fontSize: 9.5,
           fontWeight: FontWeight.w800,
         ),
       ),
@@ -232,33 +205,64 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   }
 
   Color _directionColor(String direction) {
-    if (direction == 'BUY') return const Color(0xFF67F0C1);
-    if (direction == 'SELL') return const Color(0xFFFF7E8B);
-    return const Color(0xFFFFD75E);
+    if (direction == 'BUY') return _green;
+    if (direction == 'SELL') return _red;
+    return _amber;
+  }
+
+  Map<String, dynamic> _forward(Map<String, dynamic> item) {
+    final raw = item['forward_validation'];
+    return raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{};
+  }
+
+  Map<String, dynamic> _provenance(Map<String, dynamic> item) {
+    final raw = item['provenance'];
+    return raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{};
   }
 
   Widget _summaryCard() {
-    final categoriesData = systemStatus?['categories'];
-    final categoryData = categoriesData is Map ? categoriesData[selected] : null;
-    final data = categoryData is Map
-        ? Map<String, dynamic>.from(categoryData)
-        : <String, dynamic>{};
-    final standardReady = data['standard_ready'] ?? 0;
-    final compoundReady = data['compound_ready'] ?? 0;
-    final strategy = '${data['strategy'] ?? '-'}';
+    final strongCount = selections.where((item) {
+      return item['strong_qualified'] == true ||
+          '${item['trade_class'] ?? ''}'.toUpperCase() == 'STRONG';
+    }).length;
+
+    final primeCount = selections.where((item) {
+      final forward = _forward(item);
+      return item['prime_qualified'] == true ||
+          item['compound_eligible'] == true ||
+          forward['prime_eligible'] == true;
+    }).length;
+
     final openByCategory = portfolioStatus?['open_by_category'];
     final open = openByCategory is Map ? (openByCategory[selected] ?? 0) : 0;
-    final evidence = systemStatus?['evidence_hygiene'];
-    final evidenceMap = evidence is Map
-        ? Map<String, dynamic>.from(evidence)
+
+    final firstForward = selections.isNotEmpty
+        ? _forward(selections.first)
         : <String, dynamic>{};
-    final optimised = evidenceMap['markets_optimised'] ?? 0;
-    final pending = evidenceMap['markets_pending_optimisation'] ?? 40;
-    final refreshState = '${fullRefreshStatus?['status'] ?? 'PENDING'}';
+    final settled = firstForward['settled_trades'] ?? 0;
+    final forwardState = '${firstForward['state'] ?? 'BOOTSTRAP'}';
+
+    final thresholdsRaw = forwardStatus?['thresholds'];
+    final thresholds = thresholdsRaw is Map
+        ? Map<String, dynamic>.from(thresholdsRaw)
+        : <String, dynamic>{};
+
+    final minTrades = thresholds['min_settled_trades_for_prime'] ?? 12;
+    final minPf = _num(thresholds['min_profit_factor'] ?? 1.2);
+    final minExp = _num(thresholds['min_expectancy_r'] ?? 0.05);
+    final minWr = _pct(thresholds['min_win_rate'] ?? .45);
+    final minBootstrap = _pct(
+      thresholds['min_bootstrap_prob_positive_expectancy'] ?? .75,
+    );
+    final maxDd = _num(thresholds['max_drawdown_r'] ?? 6.0);
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .045),
         borderRadius: BorderRadius.circular(20),
@@ -274,36 +278,75 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '$selected AI',
+                      '$selected FORWARD INTELLIGENCE',
                       style: const TextStyle(
-                        fontSize: 18,
+                        fontSize: 16,
                         fontWeight: FontWeight.w900,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      strategy,
-                      style: const TextStyle(color: Colors.white60, fontSize: 11),
+                    const SizedBox(height: 3),
+                    const Text(
+                      'Broker-settled evidence is PRIME authority',
+                      style: TextStyle(color: Colors.white54, fontSize: 10),
                     ),
                   ],
                 ),
               ),
-              _pill('28 / 40 AI', color: const Color(0xFF65E6D3)),
+              _pill('28 / 40 / 45', color: _teal),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 12),
           Wrap(
-            spacing: 8,
-            runSpacing: 8,
+            spacing: 7,
+            runSpacing: 7,
             children: [
-              _pill('$standardReady standard ready'),
-              _pill('$compoundReady compound ready', color: const Color(0xFFFFD75E)),
-              _pill('$open open', color: const Color(0xFFB899FF)),
-              _pill('$optimised / 40 optimised', color: const Color(0xFF67F0C1)),
-              _pill('$pending pending', color: pending == 0 ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-              _pill('refresh $refreshState', color: const Color(0xFFB899FF)),
-              _pill('60% + 3-fold WF evidence', color: const Color(0xFF67F0C1)),
+              _pill('$strongCount STRONG', color: _green),
+              _pill('$primeCount PRIME', color: primeCount > 0 ? _amber : Colors.white54),
+              _pill('$open OPEN', color: _purple),
+              _pill('$settled / $minTrades FORWARD', color: _blue),
+              _pill(forwardState, color: forwardState == 'PRIME' ? _amber : _blue),
             ],
+          ),
+          const SizedBox(height: 11),
+          Text(
+            'PRIME: ≥$minTrades settled • PF ≥${minPf.toStringAsFixed(2)} • '
+            'Exp ≥+${minExp.toStringAsFixed(2)}R • WR ≥${minWr.toStringAsFixed(0)}% • '
+            'Bootstrap ≥${minBootstrap.toStringAsFixed(0)}% • DD ≤${maxDd.toStringAsFixed(1)}R',
+            style: const TextStyle(
+              color: Colors.white60,
+              fontSize: 9.5,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Historical holdout / walk-forward evidence is informational only and cannot veto execution.',
+            style: TextStyle(color: Colors.white38, fontSize: 8.8, height: 1.3),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _metric(String label, String value, {Color color = Colors.white}) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white38, fontSize: 8.5),
           ),
         ],
       ),
@@ -311,36 +354,72 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
   }
 
   Widget _selectionCard(Map<String, dynamic> item) {
-    final rank = item['category_rank'] ?? '-';
-    final symbol = '${item['market'] ?? item['symbol'] ?? '-'}';
+    final rank = item['category_rank'] ?? item['rank'] ?? '-';
+    final symbol = '${item['market'] ?? item['name'] ?? item['symbol'] ?? '-'}';
     final direction = '${item['direction'] ?? 'WAIT'}'.toUpperCase();
-    final quant = _num(item['quant_confidence_pct']);
-    final ai = _num(item['model_ai_directional_confidence_pct']);
-    final wr = _num(item['historical_win_rate_pct']);
-    final pf = _num(item['historical_profit_factor']);
-    final fast = _num(item['smart_fast_score']);
-    final standard = item['standard_eligible'] == true;
-    final compoundSlot = item['compound_slot_candidate'] == true;
-    final compound = item['compound_eligible'] == true;
-    final verified70 = item['historical_60_verified'] == true || item['historical_target_verified'] == true;
-    final optimizerComplete = item['optimizer_complete'] == true;
-    final selectionStable = item['optimizer_selection_stable'] == true;
-    final walkForward = item['walk_forward_pass'] == true;
-    final wfMedian = _num(item['walk_forward_median_win_rate_pct']);
-    final tradeable = item['ig_tradeable'] == true;
-    final regime = '${item['regime'] ?? '-'}'.replaceAll('_', ' ');
-    final strategy = '${item['strategy_name'] ?? '-'}';
+    final strategy = '${item['strategy_name'] ?? item['strategy_id'] ?? '-'}';
+    final regime = '${item['market_regime'] ?? item['regime'] ?? '-'}'
+        .replaceAll('_', ' ');
+
+    final quant = item['quant_confidence_pct'] != null
+        ? _num(item['quant_confidence_pct'])
+        : _pct(item['quant_confidence']);
+    final ai = item['model_ai_directional_confidence_pct'] != null
+        ? _num(item['model_ai_directional_confidence_pct'])
+        : _pct(item['model_ai_confidence']);
+    final fast = _num(item['live_fast_score'] ?? item['smart_fast_score']);
+    final spread = _num(item['ig_spread_bps'] ?? item['spread_bps']);
+
+    final strong = item['strong_qualified'] == true ||
+        '${item['trade_class'] ?? ''}'.toUpperCase() == 'STRONG';
+    final learning = item['ig_demo_learning_eligible'] == true ||
+        item['learning_eligible'] == true;
+
+    final forward = _forward(item);
+    final prime = item['prime_qualified'] == true ||
+        item['compound_eligible'] == true ||
+        forward['prime_eligible'] == true;
+    final settled = forward['settled_trades'] ?? 0;
+    final wins = forward['wins'] ?? 0;
+    final losses = forward['losses'] ?? 0;
+    final wr = _num(forward['win_rate_pct']);
+    final pf = _num(forward['profit_factor']);
+    final expR = _num(forward['expectancy_r']);
+    final ddR = _num(forward['max_drawdown_r']);
+    final bootstrap = _num(
+      forward['bootstrap_probability_positive_expectancy_pct'],
+    );
+    final forwardState = '${forward['state'] ?? 'BOOTSTRAP'}';
+
+    final provenance = _provenance(item);
+    final analysisSource = '${item['analysis_price_source'] ?? provenance['analysis_price_source'] ?? 'UNKNOWN'}';
+    final quoteSource = '${item['broker_quote_source'] ?? provenance['broker_quote_source'] ?? 'UNKNOWN'}';
+    final fresh = provenance['fresh'] == true;
+
+    final rejectionRaw = item['rejection_reasons'];
+    final rejectionReasons = rejectionRaw is List
+        ? rejectionRaw.map((e) => '$e').toList()
+        : const <String>[];
+
+    final stateColor = prime
+        ? _amber
+        : strong
+            ? _green
+            : Colors.white54;
+    final stateLabel = prime
+        ? 'PRIME'
+        : strong
+            ? 'STRONG'
+            : 'WATCH';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(15),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .04),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: compound
-              ? const Color(0xFFFFD75E).withValues(alpha: .38)
-              : Colors.white.withValues(alpha: .07),
+          color: stateColor.withValues(alpha: prime ? .42 : .18),
         ),
       ),
       child: Column(
@@ -361,73 +440,101 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
                   style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 9),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       symbol,
-                      style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15),
+                      style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14.5),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       '$regime • $strategy',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white54, fontSize: 10),
+                      style: const TextStyle(color: Colors.white54, fontSize: 9.5),
                     ),
                   ],
                 ),
               ),
               _pill(direction, color: _directionColor(direction)),
+              const SizedBox(width: 5),
+              _pill(stateLabel, color: stateColor),
             ],
           ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 7,
-            runSpacing: 7,
-            children: [
-              _pill('28 AI ${quant.toStringAsFixed(1)}%', color: quant >= 28 ? const Color(0xFF67F0C1) : const Color(0xFFFF7E8B)),
-              _pill('40 AI ${ai.toStringAsFixed(1)}%', color: ai >= 40 ? const Color(0xFF67F0C1) : const Color(0xFFFF7E8B)),
-              _pill('WR ${wr.toStringAsFixed(1)}%', color: verified70 ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-              _pill('PF ${pf.toStringAsFixed(2)}'),
-              _pill('Fast ${fast.toStringAsFixed(0)}'),
-              _pill(optimizerComplete ? 'OPTIMISED' : 'PENDING OPT', color: optimizerComplete ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-              _pill(selectionStable ? 'SELECTION STABLE' : 'SELECTION UNSTABLE', color: selectionStable ? const Color(0xFF67F0C1) : const Color(0xFFFF7E8B)),
-              _pill('WF median ${wfMedian.toStringAsFixed(1)}%', color: walkForward ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
-            ],
-          ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 11),
           Row(
             children: [
-              Expanded(
-                child: Text(
-                  standard ? 'STANDARD: TRADE' : 'STANDARD: NO TRADE',
-                  style: TextStyle(
-                    color: standard ? const Color(0xFF67F0C1) : Colors.white38,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              if (compoundSlot)
-                Text(
-                  compound ? '⚡ COMPOUND' : '⚡ SLOT / NOT QUALIFIED',
-                  style: TextStyle(
-                    color: compound ? const Color(0xFFFFD75E) : Colors.white38,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
+              _metric('QUANT', '${quant.toStringAsFixed(1)}%', color: quant >= 28 ? _green : _red),
+              _metric('AI', '${ai.toStringAsFixed(1)}%', color: ai >= 40 ? _green : _red),
+              _metric('FAST', fast.toStringAsFixed(0), color: fast >= 45 ? _green : _red),
+              _metric('SPREAD', '${spread.toStringAsFixed(2)} bps'),
             ],
           ),
-          const SizedBox(height: 5),
-          Text(
-            '${tradeable ? 'IG DEMO tradeable' : 'IG DEMO not resolved/tradeable'} • ${walkForward ? 'walk-forward PASS' : 'walk-forward not passed'}',
-            style: const TextStyle(color: Colors.white38, fontSize: 9),
+          const Divider(height: 20, color: Colors.white10),
+          Row(
+            children: [
+              _metric('SETTLED', '$settled / 12', color: settled >= 12 ? _green : _blue),
+              _metric('W/L', '$wins / $losses'),
+              _metric('WR', '${wr.toStringAsFixed(1)}%'),
+              _metric('PF', pf.toStringAsFixed(2)),
+            ],
           ),
+          const SizedBox(height: 9),
+          Row(
+            children: [
+              _metric('EXPECTANCY', '${expR >= 0 ? '+' : ''}${expR.toStringAsFixed(2)}R'),
+              _metric('DRAWDOWN', '${ddR.toStringAsFixed(2)}R'),
+              _metric('BOOTSTRAP', '${bootstrap.toStringAsFixed(1)}%'),
+              _metric('FORWARD', forwardState, color: prime ? _amber : _blue),
+            ],
+          ),
+          const SizedBox(height: 11),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _pill('ANALYSIS $analysisSource', color: _blue),
+              _pill('QUOTE $quoteSource', color: _purple),
+              _pill(fresh ? 'FRESH' : 'STALE', color: fresh ? _green : _red),
+              if (learning) _pill('IG DEMO LEARNING', color: _green),
+              if (prime) _pill('COMPOUND ELIGIBLE', color: _amber),
+            ],
+          ),
+          if (rejectionReasons.isNotEmpty) ...[
+            const SizedBox(height: 9),
+            Text(
+              rejectionReasons.join(' • '),
+              style: const TextStyle(color: Colors.white38, fontSize: 8.8, height: 1.3),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required String label,
+    required IconData icon,
+    required VoidCallback? onPressed,
+    bool primary = false,
+  }) {
+    return Expanded(
+      child: SizedBox(
+        height: 42,
+        child: primary
+            ? FilledButton.icon(
+                onPressed: onPressed,
+                icon: Icon(icon, size: 17),
+                label: Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+              )
+            : OutlinedButton.icon(
+                onPressed: onPressed,
+                icon: Icon(icon, size: 17),
+                label: Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800)),
+              ),
       ),
     );
   }
@@ -437,126 +544,136 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     return RefreshIndicator(
       onRefresh: refreshAll,
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 110),
         children: [
-          const Text(
-            'V6.9.3 SPECIALIST REAL-TIME TESTING',
-            style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900),
+          Row(
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'FORWARD MARKET INTELLIGENCE',
+                      style: TextStyle(color: _teal, fontSize: 16, fontWeight: FontWeight.w900),
+                    ),
+                    SizedBox(height: 3),
+                    Text(
+                      'V6.9.4-forward • live categories • IG DEMO',
+                      style: TextStyle(color: Colors.white54, fontSize: 9.5),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: busy ? null : () => refreshAll(),
+                icon: busy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_rounded),
+              ),
+            ],
           ),
-          const SizedBox(height: 4),
-          const Text(
-            'All 40 markets must complete current-schema optimisation and 3-fold chronological validation before Standard/Compound eligibility',
-            style: TextStyle(color: Colors.white54, fontSize: 11, height: 1.35),
-          ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 11),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
-              children: categories
-                  .map(
-                    (category) => Padding(
-                      padding: const EdgeInsets.only(right: 7),
-                      child: ChoiceChip(
-                        selected: selected == category,
-                        label: Text(category),
-                        onSelected: (_) => selectCategory(category),
-                      ),
+              children: categories.map((category) {
+                final active = selected == category;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 7),
+                  child: ChoiceChip(
+                    selected: active,
+                    label: Text(category),
+                    onSelected: (_) => selectCategory(category),
+                    labelStyle: TextStyle(
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                      color: active ? Colors.black : Colors.white70,
                     ),
-                  )
-                  .toList(),
+                    selectedColor: _teal,
+                    backgroundColor: Colors.white.withValues(alpha: .04),
+                    side: BorderSide(color: Colors.white.withValues(alpha: .09)),
+                  ),
+                );
+              }).toList(),
             ),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 11),
           _summaryCard(),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              _actionButton(
+                label: 'SCAN $selected',
+                icon: Icons.radar_rounded,
+                onPressed: busy ? null : () => _run('/market-categories/$selected/run-now'),
+                primary: true,
+              ),
+              const SizedBox(width: 7),
+              _actionButton(
+                label: 'SCAN ALL',
+                icon: Icons.public_rounded,
+                onPressed: busy ? null : () => _run('/market-categories/run-now'),
+              ),
+              const SizedBox(width: 7),
+              _actionButton(
+                label: 'PORTFOLIO',
+                icon: Icons.play_arrow_rounded,
+                onPressed: busy ? null : () => _run('/category-portfolio/run-now'),
+              ),
+            ],
+          ),
+          if (error != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: _red.withValues(alpha: .10),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _red.withValues(alpha: .25)),
+              ),
+              child: Text(
+                error!,
+                style: const TextStyle(color: _red, fontSize: 9.5),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
-                child: FilledButton.icon(
-                  onPressed: busy ? null : scanSelected,
-                  icon: const Icon(Icons.radar_rounded),
-                  label: Text('Scan $selected'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: busy ? null : scanAll,
-                  icon: const Icon(Icons.public_rounded),
-                  label: const Text('Scan Batch'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.tonalIcon(
-              onPressed: busy ? null : optimiseAll40,
-              icon: const Icon(Icons.model_training_rounded),
-              label: const Text('Optimise / Refresh All 40 Markets'),
-            ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: busy ? null : runPortfolio,
-              icon: const Icon(Icons.play_circle_outline_rounded),
-              label: const Text('Run IG DEMO Category Portfolio Now'),
-            ),
-          ),
-          if (busy) ...[
-            const SizedBox(height: 12),
-            const LinearProgressIndicator(),
-          ],
-          if (error != null) ...[
-            const SizedBox(height: 12),
-            Text(
-              error!,
-              style: const TextStyle(color: Color(0xFFFF7E8B), fontSize: 11),
-            ),
-          ],
-          const SizedBox(height: 18),
-          Row(
-            children: [
-              const Expanded(
                 child: Text(
-                  'TOP SELECTIONS',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+                  '$selected RANKINGS',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Colors.white70),
                 ),
               ),
-              _pill('${selections.length} / 5'),
+              Text(
+                '${selections.length} markets',
+                style: const TextStyle(color: Colors.white38, fontSize: 9),
+              ),
             ],
           ),
-          const SizedBox(height: 10),
-          if (selections.isEmpty && !busy)
+          const SizedBox(height: 8),
+          if (selections.isEmpty)
             Container(
-              padding: const EdgeInsets.all(18),
+              padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 18),
+              alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: .035),
-                borderRadius: BorderRadius.circular(16),
+                color: Colors.white.withValues(alpha: .025),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.white.withValues(alpha: .06)),
               ),
               child: const Text(
-                'No fresh ranked selections yet. Run the category scan; the engine will not invent filler trades.',
-                style: TextStyle(color: Colors.white54, fontSize: 11),
+                'No current category selections. Pull to refresh or run a category scan.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white38, fontSize: 10),
               ),
             )
           else
             ...selections.map(_selectionCard),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: const Color(0xFF65E6D3).withValues(alpha: .06),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFF65E6D3).withValues(alpha: .16)),
-            ),
-            child: const Text(
-              'Testing policy: 28% Quant and 40% directional Model-AI remain live gates. A strategy must also pass stable variant selection, final holdout WR ≥60%, PF ≥1.20, Fast ≥60 and three chronological walk-forward folds each starting at 60% before Standard/Compound execution. Real-time IG DEMO testing is enabled; live-money execution remains off.',
-              style: TextStyle(color: Colors.white60, fontSize: 10, height: 1.45),
-            ),
-          ),
         ],
       ),
     );
