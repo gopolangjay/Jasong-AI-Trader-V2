@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 import pandas as pd
 
 # ---------------------------------------------------------------------------
-# JASONG AI TRADER V6.9.3 - COMPLETE IG DEMO TESTING / 60% WALK-FORWARD POLICY
+# JASONG AI TRADER V6.9.3 - COMPLETE IG DEMO TESTING / 40% WALK-FORWARD POLICY
 # ---------------------------------------------------------------------------
 # Design contract
 #   * six independent specialist categories;
@@ -21,7 +21,7 @@ import pandas as pd
 #   * each category ranks at most five selections;
 #   * ranks #1 and #2 are Compound slot candidates only when every gate passes;
 #   * finite strategy variants are selected BEFORE the untouched final holdout;
-#   * final 60% validation is allowed only when selection-window stability and 3-fold WF also pass;
+#   * final 60% validation is allowed only when selection-window stability and 3-fold WF (40% floor) also pass;
 #   * execution remains IG DEMO only; this module contains no production URL.
 # ---------------------------------------------------------------------------
 
@@ -30,17 +30,17 @@ QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
 HISTORICAL_WIN_RATE_TARGET = 0.60
 HISTORICAL_PROFIT_FACTOR_TARGET = 1.20
-HISTORICAL_MIN_TRADES = 30
-STANDARD_FAST_SCORE_MIN = 60.0
-COMPOUND_FAST_SCORE_MIN = 60.0
+HISTORICAL_MIN_TRADES = 10
+STANDARD_FAST_SCORE_MIN = 45.0
+COMPOUND_FAST_SCORE_MIN = 45.0
 TOP_N_PER_CATEGORY = 5
 COMPOUND_SLOTS_PER_CATEGORY = 2
 EVIDENCE_SCHEMA_VERSION = 3
 WALK_FORWARD_FOLDS = 3
 WALK_FORWARD_MIN_FOLD_TRADES = 5
 WALK_FORWARD_MIN_FOLDS = 2
-WALK_FORWARD_MIN_FOLD_WIN_RATE = 0.60
-WALK_FORWARD_MIN_MEDIAN_WIN_RATE = 0.60
+WALK_FORWARD_MIN_FOLD_WIN_RATE = 0.40
+WALK_FORWARD_MIN_MEDIAN_WIN_RATE = 0.40
 WALK_FORWARD_MIN_PROFITABLE_FOLDS = 2
 
 CATEGORY_ORDER = ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES")
@@ -745,7 +745,7 @@ _SIGNAL_FUNC: Dict[str, Callable[[pd.Series], StrategySignal]] = {
 
 
 def _historical_grade(trades: int, win_rate: float, profit_factor: float, max_dd: float) -> tuple[str, str, bool]:
-    # V6.9.3 hotfix: keep the existing 30-trade evidence floor explicit.
+    # V6.9.3 testing policy: minimum final-holdout evidence sample is 10 trades.
     # The user-selected execution targets remain 60% WR and PF >= 1.20.
     validated_target = (
         trades >= HISTORICAL_MIN_TRADES
@@ -1256,9 +1256,9 @@ class CategoryStrategyEngine:
         if not checks["holdout_dd_ok"]:
             rejection_reasons.append("WF_HOLDOUT_DRAWDOWN_FAIL")
         if not checks["min_fold_wr_ok"]:
-            rejection_reasons.append("WF_MIN_FOLD_WR_BELOW_60")
+            rejection_reasons.append("WF_MIN_FOLD_WR_BELOW_40")
         if not checks["median_fold_wr_ok"]:
-            rejection_reasons.append("WF_MEDIAN_WR_BELOW_60")
+            rejection_reasons.append("WF_MEDIAN_WR_BELOW_40")
         if not checks["profitable_folds_ok"]:
             rejection_reasons.append("WF_PROFITABLE_FOLDS_BELOW_2")
         if not checks["fold_drawdown_ok"]:
@@ -1321,7 +1321,7 @@ class CategoryStrategyEngine:
         validated_target = bool(raw_verified_target and selection_stable and walk_forward["passed"])
         if validated_target:
             quality = raw_quality
-            category_validation_status = "CATEGORY_VERIFIED_60_WALK_FORWARD"
+            category_validation_status = "CATEGORY_VERIFIED_60_HOLDOUT_40_WF"
         elif (
             selection_stable
             and trades >= 20
@@ -1445,7 +1445,7 @@ class CategoryStrategyEngine:
             "holding_bars": holding,
             "validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
             "holdout_fraction_pct": 30.0,
-            "analysis_source": "CATEGORY_SPECIALIST_V693_60WF_PLUS_JASONG_MODEL_3_FOLD_HOLDOUT",
+            "analysis_source": "CATEGORY_SPECIALIST_V693_40WF_PLUS_JASONG_MODEL_3_FOLD_HOLDOUT",
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"].dropna().tail(160).tolist()
@@ -1498,7 +1498,7 @@ class CategoryStrategyEngine:
         if not ai_pass:
             rejection_reasons.append("MODEL_AI_BELOW_40")
         if fast_score < STANDARD_FAST_SCORE_MIN:
-            rejection_reasons.append("FAST_BELOW_60")
+            rejection_reasons.append("FAST_BELOW_45")
         if not selection_stable:
             rejection_reasons.append("SELECTION_UNSTABLE")
         if trades < HISTORICAL_MIN_TRADES:
@@ -1508,7 +1508,7 @@ class CategoryStrategyEngine:
         if profit_factor < HISTORICAL_PROFIT_FACTOR_TARGET:
             rejection_reasons.append("PROFIT_FACTOR_BELOW_1_20")
         if not walk_forward["passed"]:
-            rejection_reasons.append("WALK_FORWARD_BELOW_60")
+            rejection_reasons.append("WALK_FORWARD_BELOW_40")
             rejection_reasons.extend(
                 reason for reason in (walk_forward.get("rejection_reasons") or [])
                 if reason not in rejection_reasons
@@ -1722,7 +1722,7 @@ class CategoryStrategyEngine:
                     row["elite_state"] = "ELITE_A"
                 else:
                     row["elite_state"] = "OBSERVE"
-                row["execution_basis"] = "CATEGORY_TOP2_VALIDATED_60_WF" if row["compound_eligible"] else "NOT_QUALIFIED"
+                row["execution_basis"] = "CATEGORY_TOP2_VALIDATED_60_HOLDOUT_40_WF" if row["compound_eligible"] else "NOT_QUALIFIED"
                 row["rejection_reasons"] = [] if row["compound_eligible"] else list(row.get("rejection_reasons") or [])
                 ranked.append(row)
             output[cat] = ranked
@@ -1854,7 +1854,7 @@ class CategoryStrategyEngine:
             }
         return {
             "version": self.VERSION,
-            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological folds; execution target 60% WR / PF 1.20 / each qualifying WF fold >=60%",
+            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological folds; execution target 60% WR / PF 1.20 / each qualifying WF fold >=40%",
             "final_holdout_used_for_selection": False,
             "walk_forward_folds": WALK_FORWARD_FOLDS,
             "quant_min_pct": 28.0,
@@ -1923,7 +1923,9 @@ class CategoryStrategyEngine:
                     "historical_min_trades": HISTORICAL_MIN_TRADES,
                     "fast_score_min": STANDARD_FAST_SCORE_MIN,
                     "walk_forward_min_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
-                    "walk_forward_all_qualifying_folds_must_meet_60": True,
+                    "walk_forward_all_qualifying_folds_must_meet_min": True,
+                    "walk_forward_all_qualifying_folds_must_meet_40": True,
+                    "walk_forward_all_qualifying_folds_must_meet_60": False,
                     "walk_forward_median_min_pct": WALK_FORWARD_MIN_MEDIAN_WIN_RATE * 100.0,
                     "walk_forward_min_profitable_folds": WALK_FORWARD_MIN_PROFITABLE_FOLDS,
                     "walk_forward_min_trades_per_fold": WALK_FORWARD_MIN_FOLD_TRADES,
