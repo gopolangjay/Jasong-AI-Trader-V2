@@ -16,7 +16,6 @@ class JasongApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const teal = Color(0xFF65E6D3);
     return MaterialApp(
       title: 'Jasong AI Trader',
       debugShowCheckedModeBanner: false,
@@ -25,9 +24,9 @@ class JasongApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF06131B),
         colorScheme: ColorScheme.fromSeed(
-          seedColor: teal,
+          seedColor: const Color(0xFF65E6D3),
           brightness: Brightness.dark,
-          primary: teal,
+          primary: const Color(0xFF65E6D3),
           secondary: const Color(0xFF6FA8FF),
           surface: const Color(0xFF0E1A24),
         ),
@@ -36,9 +35,20 @@ class JasongApp extends StatelessWidget {
           elevation: 0,
           scrolledUnderElevation: 0,
         ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF0E1A24),
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+            side: const BorderSide(
+              color: Color(0xFF17303A),
+            ),
+          ),
+        ),
         navigationBarTheme: NavigationBarThemeData(
           backgroundColor: const Color(0xFF0A151E),
-          indicatorColor: teal.withValues(alpha: .16),
+          indicatorColor: const Color(0xFF65E6D3).withValues(alpha: .16),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             return TextStyle(
               fontSize: 9.5,
@@ -46,906 +56,3759 @@ class JasongApp extends StatelessWidget {
                   ? FontWeight.w800
                   : FontWeight.w500,
               color: states.contains(WidgetState.selected)
-                  ? teal
+                  ? const Color(0xFF65E6D3)
                   : Colors.white54,
             );
           }),
         ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF0B1720),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF24404B)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF24404B)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: Color(0xFF65E6D3)),
+          ),
+        ),
       ),
-      home: const JasongShell(),
+      home: const HomePage(),
     );
   }
 }
 
-class JasongShell extends StatefulWidget {
-  const JasongShell({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<JasongShell> createState() => _JasongShellState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _JasongShellState extends State<JasongShell>
-    with WidgetsBindingObserver {
-  static const _teal = Color(0xFF65E6D3);
-  static const _green = Color(0xFF67F0C1);
-  static const _red = Color(0xFFFF7E8B);
-  static const _amber = Color(0xFFFFD75E);
-  static const _blue = Color(0xFF6FA8FF);
-  static const _purple = Color(0xFFB899FF);
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  // =========================================================
+  // USER SETTINGS
+  // =========================================================
 
-  final String apiBase = const String.fromEnvironment(
-    'API_BASE_URL',
-    defaultValue: 'https://jasong-ai-trader-v2.onrender.com',
+  final TextEditingController symbol =
+      TextEditingController(
+    text: 'EURUSD=X',
   );
 
-  final http.Client _client = http.Client();
+  final TextEditingController balance =
+      TextEditingController(
+    text: '10000',
+  );
+
+  String risk = 'Balanced';
 
   int selectedTab = 0;
-  bool refreshing = false;
-  String? error;
-  String? activeEndpoint;
-  DateTime? lastUpdated;
-  Timer? refreshTimer;
+  String marketView = 'ALL';
+  String tradeView = 'CLOSED';
 
-  Map<String, dynamic> portfolioStatus = {};
-  Map<String, dynamic> forwardStatus = {};
-  Map<String, dynamic> forwardLearning = {};
-  Map<String, dynamic> compoundPayload = {};
-  Map<String, dynamic> dataHealth = {};
-  List<Map<String, dynamic>> categoryPositions = [];
-  List<Map<String, dynamic>> forwardTrades = [];
+  final String apiBase =
+      const String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue:
+        'https://jasong-ai-trader-v2.onrender.com',
+  );
+
+  // =========================================================
+  // DATA
+  // =========================================================
+
+  Map<String, dynamic>? sig;
+  Map<String, dynamic>? bt;
+  Map<String, dynamic>? fastScan;
+  Map<String, dynamic>? verifiedTrade;
+
+  Map<String, dynamic>? liveEntryAssessment;
+
+  Map<String, dynamic>? serverWatcher;
+  List<Map<String, dynamic>> serverWatchers = [];
+  Map<String, dynamic>? forwardStats;
+  Map<String, dynamic>? v66ForwardIntelligence;
+
+  List<Map<String, dynamic>> paperTrades = [];
+
+  // IG DEMO forward-learning monitor.
+  Map<String, dynamic>? aiLearningStatus;
+  Map<String, dynamic>? aiLearningSnapshot;
+  List<Map<String, dynamic>> aiLearningWatchers = [];
+  Map<String, dynamic>? aiLearningLastRun;
+  bool aiLearningBusy = false;
+
+  // V6.6.4 mobile control plane for server-side IG DEMO overnight runs.
+  Map<String, dynamic>? overnightDemoStatus;
+  Map<String, dynamic>? igDemoPerformance;
+  bool overnightDemoBusy = false;
+
+  final TextEditingController copilotController = TextEditingController();
+  bool copilotBusy = false;
+  String copilotAnswer = '';
+
+  Map<String, dynamic>? systemOverview;
+  Map<String, dynamic>? systemDiagnostic;
+  bool systemDiagnosticBusy = false;
+
+  Map<String, dynamic>? autoDashboard;
+  Map<String, dynamic>? integrityStatus;
+  Map<String, dynamic>? autoManagerJob;
+
+  // V6.8.1 / V6.9.4 market intelligence bridge.
+  // The original mobile surface is preserved. These fields only add the
+  // broker-settled forward/category views exposed by the V6.9.4 backend.
+  Map<String, dynamic>? globalMarketsStatus;
+  List<Map<String, dynamic>> globalMarketCandidates = [];
+  bool globalMarketsBusy = false;
+
+  Map<String, dynamic>? forwardPrimeStatus;
+  Map<String, dynamic>? categoryPortfolioStatus;
+  Map<String, dynamic>? marketDataHealth;
+  List<Map<String, dynamic>> categoryPortfolioPositions = [];
+  List<Map<String, dynamic>> forwardPrimeTrades = [];
+  bool autoDashboardRefreshBusy = false;
+
+  Timer? watcherPollTimer;
+  Timer? autoDashboardPollTimer;
+
+  bool watcherBusy = false;
+  bool autoManagerBusy = false;
+
+  List<Map<String, dynamic>>
+      validationHistory = [];
+
+  // =========================================================
+  // APP STATE
+  // =========================================================
+
+  bool busy = false;
+  bool scanningMarkets = false;
+  bool findingVerifiedTrade = false;
+
+  String? currentValidationMarket;
+  String? networkStatus;
+  String? error;
+
+  int currentAttempt = 0;
+  int maximumAttempts = 3;
+
+  // =========================================================
+  // GENERIC GET
+  // =========================================================
+
+  Future<Map<String, dynamic>> getJson(
+    Uri uri, {
+    int timeoutSeconds = 120,
+  }) async {
+    final client = http.Client();
+
+    try {
+      final response = await client
+          .get(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Connection': 'close',
+            },
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final bodyText = response.body.trim();
+      if (bodyText.startsWith('<')) {
+        throw const FormatException(
+          'Backend returned HTML instead of JSON',
+        );
+      }
+
+      final decoded = jsonDecode(
+        bodyText,
+      );
+
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected JSON response',
+        );
+      }
+
+      return Map<String, dynamic>.from(
+        decoded,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  // =========================================================
+  // CHECK WHETHER ERROR IS NETWORK RELATED
+  // =========================================================
+
+  bool isNetworkError(
+    Object error,
+  ) {
+    if (error is SocketException) {
+      return true;
+    }
+
+    if (error is TimeoutException) {
+      return true;
+    }
+
+    if (error is http.ClientException) {
+      return true;
+    }
+
+    final text =
+        error.toString().toLowerCase();
+
+    return text.contains(
+          'socketexception',
+        ) ||
+        text.contains(
+          'clientexception',
+        ) ||
+        text.contains(
+          'failed host lookup',
+        ) ||
+        text.contains(
+          'connection abort',
+        ) ||
+        text.contains(
+          'connection reset',
+        ) ||
+        text.contains(
+          'connection closed',
+        ) ||
+        text.contains(
+          'timed out',
+        ) ||
+        text.contains(
+          'timeout',
+        ) ||
+        text.contains(
+          'http 502',
+        ) ||
+        text.contains(
+          'http 503',
+        ) ||
+        text.contains(
+          'http 504',
+        );
+  }
+
+  // =========================================================
+  // HEALTH CHECK
+  // =========================================================
+
+  Future<bool> checkBackendHealth() async {
+    final uri = Uri.parse(
+      '$apiBase/health',
+    );
+
+    try {
+      final client = http.Client();
+
+      try {
+        final response = await client
+            .get(
+              uri,
+              headers: {
+                'Accept':
+                    'application/json',
+                'Connection':
+                    'close',
+              },
+            )
+            .timeout(
+              const Duration(
+                seconds: 35,
+              ),
+            );
+
+        return response.statusCode == 200;
+      } finally {
+        client.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // =========================================================
+  // WAIT FOR BACKEND TO RECOVER
+  // =========================================================
+
+  Future<bool> waitForBackendRecovery(
+    String market,
+    int attempt,
+  ) async {
+    const delays = [
+      8,
+      12,
+      18,
+    ];
+
+    final delayIndex =
+        (attempt - 1).clamp(
+      0,
+      delays.length - 1,
+    );
+
+    final delay =
+        delays[delayIndex];
+
+    if (mounted) {
+      setState(() {
+        currentValidationMarket =
+            'Connection interrupted';
+
+        networkStatus =
+            'Waiting ${delay}s before '
+            'retrying $market...';
+      });
+    }
+
+    await Future.delayed(
+      Duration(
+        seconds: delay,
+      ),
+    );
+
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Checking Jasong AI '
+            'Trader server...';
+      });
+    }
+
+    bool healthy =
+        await checkBackendHealth();
+
+    if (healthy) {
+      if (mounted) {
+        setState(() {
+          networkStatus =
+              'Server online. '
+              'Retrying $market...';
+        });
+      }
+
+      await Future.delayed(
+        const Duration(
+          seconds: 2,
+        ),
+      );
+
+      return true;
+    }
+
+    // Give Render one more chance to wake.
+    if (mounted) {
+      setState(() {
+        networkStatus =
+            'Server still waking. '
+            'Checking again...';
+      });
+    }
+
+    await Future.delayed(
+      const Duration(
+        seconds: 10,
+      ),
+    );
+
+    healthy =
+        await checkBackendHealth();
+
+    return healthy;
+  }
+
+  // =========================================================
+  // RESILIENT POST
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      postJsonOnce(
+    Uri uri,
+    dynamic body, {
+    int timeoutSeconds = 240,
+  }) async {
+    final client = http.Client();
+
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: {
+              'Accept':
+                  'application/json',
+              'Content-Type':
+                  'application/json',
+              'Connection':
+                  'close',
+            },
+            body: jsonEncode(
+              body,
+            ),
+          )
+          .timeout(
+            Duration(
+              seconds: timeoutSeconds,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final bodyText = response.body.trim();
+      if (bodyText.startsWith('<')) {
+        throw const FormatException(
+          'Backend returned HTML instead of JSON',
+        );
+      }
+
+      final decoded = jsonDecode(
+        bodyText,
+      );
+
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Backend returned an '
+          'unexpected JSON response',
+        );
+      }
+
+      return Map<String, dynamic>.from(
+        decoded,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  // =========================================================
+  // V4.8 ASYNC DEEP VALIDATION JOB
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      deepValidateWithRecovery(
+    Map<String, dynamic> candidate,
+  ) async {
+    final market =
+        candidate['market']
+                ?.toString() ??
+            'UNKNOWN';
+
+    final createUri = Uri.parse(
+      '$apiBase/deep-validation-job',
+    ).replace(
+      queryParameters: {
+        'risk_mode':
+            risk,
+        'starting_balance':
+            balance.text.trim(),
+        'payout':
+            '0.8',
+      },
+    );
+
+    // V4.8 job endpoint accepts ONE candidate object,
+    // not the old one-item list used by /deep-validate.
+    final body = {
+      'market':
+          candidate['market'],
+      'symbol':
+          candidate['symbol'],
+      'fast_score':
+          candidate['fast_score'] ??
+              candidate['score'] ??
+              0.0,
+      'direction':
+          candidate['direction'] ??
+              'WAIT',
+      'status':
+          candidate['status'] ??
+              'UNKNOWN',
+    };
+
+    Object? lastError;
+    String? jobId;
+
+    // ---------------------------------------------------------
+    // 1. CREATE THE BACKGROUND JOB
+    // ---------------------------------------------------------
+
+    for (
+      int attempt = 1;
+      attempt <= maximumAttempts;
+      attempt++
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
+        );
+      }
+
+      setState(() {
+        currentAttempt =
+            attempt;
+
+        currentValidationMarket =
+            'Starting deep validation for $market';
+
+        networkStatus =
+            'Creating validation job '
+            '(attempt $attempt/$maximumAttempts)...';
+      });
+
+      try {
+        final created =
+            await postJsonOnce(
+          createUri,
+          body,
+          timeoutSeconds: 60,
+        );
+
+        jobId =
+            created['job_id']
+                ?.toString();
+
+        if (jobId == null ||
+            jobId.isEmpty) {
+          throw const FormatException(
+            'Validation server did not return a job_id',
+          );
+        }
+
+        if (mounted) {
+          setState(() {
+            currentAttempt = 0;
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                'Validation job queued. '
+                'Waiting for the server...';
+          });
+        }
+
+        break;
+      } catch (e) {
+        lastError = e;
+
+        if (!isNetworkError(e)) {
+          rethrow;
+        }
+
+        if (attempt >=
+            maximumAttempts) {
+          break;
+        }
+
+        await waitForBackendRecovery(
+          market,
+          attempt,
+        );
+      }
+    }
+
+    if (jobId == null ||
+        jobId.isEmpty) {
+      throw NetworkValidationException(
+        market: market,
+        message:
+            lastError?.toString() ??
+                'Could not create validation job',
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 2. POLL THE JOB
+    //
+    // Deep validation can take several minutes. Each GET is
+    // short; a temporary network failure does NOT reject the
+    // candidate and does NOT create a second validation job.
+    // ---------------------------------------------------------
+
+    final pollUri = Uri.parse(
+      '$apiBase/deep-validation-job/$jobId',
+    );
+
+    const pollDelay =
+        Duration(seconds: 5);
+
+    const maxPollingTime =
+        Duration(minutes: 12);
+
+    final stopwatch =
+        Stopwatch()..start();
+
+    int consecutiveNetworkErrors = 0;
+
+    while (
+      stopwatch.elapsed <
+          maxPollingTime
+    ) {
+      if (!mounted) {
+        throw Exception(
+          'App closed during validation',
+        );
+      }
+
+      try {
+        final job =
+            await getJson(
+          pollUri,
+          timeoutSeconds: 45,
+        );
+
+        consecutiveNetworkErrors = 0;
+
+        final status =
+            job['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                'UNKNOWN';
+
+        if (status == 'COMPLETED') {
+          stopwatch.stop();
+
+          final rawResult =
+              job['result'];
+
+          if (rawResult is! Map) {
+            throw const FormatException(
+              'Completed validation job '
+              'did not contain a result',
+            );
+          }
+
+          final result =
+              Map<String, dynamic>.from(
+            rawResult,
+          );
+
+          if (mounted) {
+            setState(() {
+              currentValidationMarket =
+                  '$market validation complete';
+
+              networkStatus =
+                  'Deep validation result received';
+            });
+          }
+
+          return result;
+        }
+
+        if (status == 'FAILED' ||
+            status == 'ERROR') {
+          stopwatch.stop();
+
+          final jobError =
+              job['error']
+                      ?.toString() ??
+                  'Deep validation job failed';
+
+          throw Exception(
+            jobError,
+          );
+        }
+
+        final elapsedSeconds =
+            stopwatch.elapsed.inSeconds;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                '$status • '
+                '${elapsedSeconds}s elapsed • '
+                'checking again in '
+                '${pollDelay.inSeconds}s';
+          });
+        }
+
+        await Future.delayed(
+          pollDelay,
+        );
+      } catch (e) {
+        if (!isNetworkError(e)) {
+          rethrow;
+        }
+
+        consecutiveNetworkErrors++;
+
+        if (mounted) {
+          setState(() {
+            currentValidationMarket =
+                'Deep validating $market';
+
+            networkStatus =
+                'Connection interrupted while '
+                'checking the job. '
+                'The server job is still running. '
+                'Retrying...';
+          });
+        }
+
+        // Keep the SAME job_id. Never restart the validation
+        // merely because one polling request lost connection.
+        final retryDelay =
+            Duration(
+          seconds:
+              consecutiveNetworkErrors >= 3
+                  ? 15
+                  : 8,
+        );
+
+        await Future.delayed(
+          retryDelay,
+        );
+      }
+    }
+
+    stopwatch.stop();
+
+    throw NetworkValidationException(
+      market: market,
+      message:
+          'Validation job $jobId did not finish '
+          'within ${maxPollingTime.inMinutes} minutes. '
+          'The job may still be running on the server.',
+    );
+  }
+
+
+  // =========================================================
+  // REFRESH LIVE SIGNAL
+  // =========================================================
+
+  Future<void> refreshSignal() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/signal',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'risk_mode':
+              risk,
+          'balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        sig = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // BACKTEST
+  // =========================================================
+
+  Future<void> runBacktest() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/backtest',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'risk_mode':
+              risk,
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 180,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        bt = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // FAST SCAN REQUEST
+  // =========================================================
+
+  Future<Map<String, dynamic>>
+      runFastScanRequest() async {
+    final uri = Uri.parse(
+      '$apiBase/fast-scan',
+    ).replace(
+      queryParameters: {
+        'period': '5d',
+        'interval': '15m',
+        'top_n': '9',
+      },
+    );
+
+    return getJson(
+      uri,
+      timeoutSeconds: 180,
+    );
+  }
+
+  // =========================================================
+  // FAST SCAN BUTTON
+  // =========================================================
+
+  Future<void> scanAllMarkets() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      scanningMarkets = true;
+      error = null;
+    });
+
+    try {
+      final result =
+          await runFastScanRequest();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        fastScan = result;
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Fast scan failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          scanningMarkets = false;
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // FIND VERIFIED TRADE
+  // =========================================================
+
+  Future<void> findVerifiedTrade() async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+
+      scanningMarkets = true;
+
+      findingVerifiedTrade = true;
+
+      verifiedTrade = null;
+
+      liveEntryAssessment = null;
+      serverWatcher = null;
+      serverWatchers = [];
+      forwardStats = null;
+      watcherPollTimer?.cancel();
+
+      validationHistory = [];
+
+      error = null;
+
+      networkStatus = null;
+
+      currentAttempt = 0;
+
+      currentValidationMarket =
+          'Scanning all markets...';
+    });
+
+    try {
+      // =====================================================
+      // 1. FAST SCAN
+      // =====================================================
+
+      final scanResult =
+          await runFastScanRequest();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        fastScan = scanResult;
+        scanningMarkets = false;
+      });
+
+      final rawCandidates =
+          scanResult[
+                  'top_candidates']
+              as List?;
+
+      if (rawCandidates == null ||
+          rawCandidates.isEmpty) {
+        throw Exception(
+          'Fast scanner returned '
+          'no candidates',
+        );
+      }
+
+      final candidates = <
+          Map<String, dynamic>>[];
+
+      for (final item
+          in rawCandidates) {
+        if (item is Map) {
+          candidates.add(
+            Map<String, dynamic>.from(
+              item,
+            ),
+          );
+        }
+      }
+
+      if (candidates.isEmpty) {
+        throw Exception(
+          'No valid candidate '
+          'records received',
+        );
+      }
+
+      final count =
+          candidates.length > 3
+              ? 3
+              : candidates.length;
+
+      // =====================================================
+      // 2. DEEP VALIDATE EACH MARKET
+      // =====================================================
+
+      for (
+        int index = 0;
+        index < count;
+        index++
+      ) {
+        final candidate =
+            candidates[index];
+
+        final market =
+            candidate['market']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          currentValidationMarket =
+              'Deep validating '
+              '#${index + 1} $market';
+
+          networkStatus =
+              'Preparing validation...';
+        });
+
+        Map<String, dynamic> deep;
+
+        try {
+          deep =
+              await deepValidateWithRecovery(
+            candidate,
+          );
+        } on NetworkValidationException catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'NETWORK_ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.message,
+            });
+
+            currentValidationMarket =
+                '$market validation '
+                'could not complete';
+
+            networkStatus =
+                'Network connection failed '
+                'after $maximumAttempts attempts.';
+          });
+
+          // IMPORTANT:
+          // Do NOT move to candidate #2 after a
+          // network failure.
+          throw NetworkValidationException(
+            market:
+                market,
+            message:
+                e.message,
+          );
+        } catch (e) {
+          if (!mounted) {
+            return;
+          }
+
+          setState(() {
+            validationHistory.add({
+              'position':
+                  index + 1,
+
+              'market':
+                  market,
+
+              'symbol':
+                  candidate[
+                      'symbol'],
+
+              'fast_score':
+                  candidate[
+                      'fast_score'],
+
+              'fast_direction':
+                  candidate[
+                      'direction'],
+
+              'deep_status':
+                  'ERROR',
+
+              'verified':
+                  false,
+
+              'error':
+                  e.toString(),
+            });
+          });
+
+          // Non-network backend error:
+          // stop rather than falsely treating the
+          // candidate as rejected.
+          break;
+        }
+
+        // ===================================================
+        // PARSE V4.6 RESPONSE
+        // ===================================================
+
+        final finalStatus =
+            deep['final_status']
+                    ?.toString() ??
+                'UNKNOWN';
+
+        Map<String, dynamic>?
+            finalMarket;
+
+        final rawFinalMarket =
+            deep['final_market'];
+
+        if (rawFinalMarket is Map) {
+          finalMarket =
+              Map<String, dynamic>.from(
+            rawFinalMarket,
+          );
+        }
+
+        final verified =
+            finalMarket?[
+                        'verified'] ==
+                    true ||
+                finalStatus ==
+                    'VERIFIED_TRADE';
+
+        final deepStatus =
+            finalMarket?[
+                        'status']
+                    ?.toString() ??
+                finalStatus;
+
+        final history = <
+            String, dynamic>{
+          'position':
+              index + 1,
+
+          'market':
+              market,
+
+          'symbol':
+              candidate[
+                  'symbol'],
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              candidate[
+                  'direction'],
+
+          'deep_status':
+              deepStatus,
+
+          'verified':
+              verified,
+
+          'deep_score':
+              finalMarket?[
+                  'deep_score'],
+
+          'trades':
+              finalMarket?[
+                  'trades'],
+
+          'wins':
+              finalMarket?[
+                  'wins'],
+
+          'losses':
+              finalMarket?[
+                  'losses'],
+
+          'win_rate':
+              finalMarket?[
+                  'win_rate'],
+
+          'profit_factor':
+              finalMarket?[
+                  'profit_factor'],
+
+          'return_pct':
+              finalMarket?[
+                  'return_pct'],
+
+          'max_drawdown':
+              finalMarket?[
+                  'max_drawdown'],
+
+          'interval':
+              finalMarket?[
+                  'interval'],
+
+          'period':
+              finalMarket?[
+                  'period'],
+
+          'threshold_pct':
+              finalMarket?[
+                  'threshold_pct'],
+
+          'holding_candles':
+              finalMarket?[
+                  'holding_candles'],
+
+          'sample_reliability_pct':
+              finalMarket?[
+                  'sample_reliability_pct'],
+
+          'wilson_lower_win_rate_pct':
+              finalMarket?[
+                  'wilson_lower_win_rate_pct'],
+
+          'reliability_adjusted_score':
+              finalMarket?[
+                  'reliability_adjusted_score'],
+
+          'near_verified':
+              finalMarket?[
+                  'near_verified'] == true,
+
+          'primary_reason':
+              finalMarket?[
+                  'primary_reason'],
+
+          'rejection_reasons':
+              finalMarket?[
+                  'rejection_reasons'],
+
+          'explanation':
+              finalMarket?[
+                  'explanation'],
+        };
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          validationHistory.add(
+            history,
+          );
+
+          networkStatus =
+              '$market validation complete';
+        });
+
+        // ===================================================
+        // NOT VERIFIED
+        // ===================================================
+
+        if (!verified ||
+            finalMarket == null) {
+          continue;
+        }
+
+        // ===================================================
+        // DIRECTION AGREEMENT
+        // ===================================================
+
+        final fastDirection =
+            candidate[
+                    'direction']
+                ?.toString();
+
+        final deepDirection =
+            finalMarket[
+                    'direction']
+                ?.toString();
+
+        if (fastDirection !=
+            deepDirection) {
+          setState(() {
+            validationHistory.last[
+                    'verified'] =
+                false;
+
+            validationHistory.last[
+                    'deep_status'] =
+                'DIRECTION_MISMATCH';
+          });
+
+          continue;
+        }
+
+        // ===================================================
+        // VERIFIED
+        // ===================================================
+
+        final result = <
+            String, dynamic>{
+          ...finalMarket,
+
+          'fast_rank':
+              index + 1,
+
+          'fast_score':
+              candidate[
+                  'fast_score'],
+
+          'fast_direction':
+              fastDirection,
+
+          'direction_agreement':
+              true,
+        };
+
+        setState(() {
+          verifiedTrade ??=
+              result;
+
+          currentValidationMarket =
+              '$market VERIFIED';
+
+          networkStatus =
+              'Deep validation passed • '
+              'adding candidate to V5.4 watch portfolio';
+        });
+
+        await createServerWatcher(
+          result,
+        );
+
+        // V5.4 intentionally continues through the remaining
+        // shortlisted candidates. Multiple VERIFIED setups can
+        // be watched simultaneously, so a waiting/overextended
+        // #1 candidate does not block a better live entry in #2/#3.
+      }
+    } on NetworkValidationException catch (_) {
+      // Already shown in the validation card.
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified trade search '
+            'failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          scanningMarkets = false;
+          findingVerifiedTrade = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // V5.5.3 AUTO MANAGER / FORWARD LIFECYCLE
+  // =========================================================
+
+  Future<void> askJasongCopilot({
+    String? presetQuestion,
+    String mode = 'GENERAL',
+  }) async {
+    final question = (presetQuestion ?? copilotController.text).trim();
+    if (question.isEmpty) return;
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await postJsonOnce(
+        Uri.parse('$apiBase/v68/ask'),
+        {
+          'question': question,
+          'mode': mode,
+        },
+        timeoutSeconds: 90,
+      );
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
+
+  Future<void> runOvernightReview() async {
+    setState(() {
+      copilotBusy = true;
+      copilotAnswer = '';
+    });
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/v68/overnight-review'),
+        timeoutSeconds: 90,
+      );
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = response['answer']?.toString() ?? 'No overnight analysis returned.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        copilotAnswer = 'Copilot error: $e';
+      });
+    } finally {
+      if (mounted) setState(() => copilotBusy = false);
+    }
+  }
+
+  Future<void> loadSystemOverview() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/system-overview',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemOverview = response;
+      });
+    } catch (_) {
+      // Keep the previous snapshot visible if a single poll fails.
+    }
+  }
+
+
+  Future<void> loadGlobalMarkets() async {
+    if (globalMarketsBusy) return;
+
+    globalMarketsBusy = true;
+
+    try {
+      // V6.9.4 source of truth. Keep these requests sequential so the phone
+      // cannot create a burst against Render while specialist analysis runs.
+      final status = await getJson(
+        Uri.parse('$apiBase/market-categories/status'),
+        timeoutSeconds: 45,
+      );
+
+      if (mounted) {
+        setState(() {
+          globalMarketsStatus = status;
+        });
+      }
+
+      const categories = <String>[
+        'FOREX',
+        'INDICES',
+        'CRYPTO',
+        'METALS',
+        'ENERGY',
+        'SHARES',
+      ];
+
+      final rows = <Map<String, dynamic>>[];
+
+      for (final category in categories) {
+        try {
+          final payload = await getJson(
+            Uri.parse('$apiBase/market-categories/$category'),
+            timeoutSeconds: 35,
+          );
+
+          final raw = payload['selections'];
+          if (raw is! List) continue;
+
+          for (final item in raw.whereType<Map>()) {
+            final row = Map<String, dynamic>.from(item);
+            row['category'] ??= category;
+            row['asset_class'] ??= category;
+            row['market'] ??= row['name'] ?? row['symbol'];
+            row['regime'] ??= row['market_regime'];
+            row['fast_score'] ??=
+                row['live_fast_score'] ?? row['smart_fast_score'];
+            rows.add(row);
+          }
+        } catch (_) {
+          // One category must not erase the other five categories.
+        }
+      }
+
+      // Old Home/AI widgets consume globalMarketCandidates. Preserve that
+      // contract while ranking forward PRIME/STRONG rows ahead of WATCH rows.
+      int stateWeight(Map<String, dynamic> row) {
+        final f = row['forward_validation'];
+        if (row['compound_eligible'] == true ||
+            row['prime_qualified'] == true ||
+            (f is Map && f['prime_eligible'] == true)) {
+          return 3;
+        }
+        if (row['strong_qualified'] == true ||
+            '${row['trade_class'] ?? ''}'.toUpperCase() == 'STRONG') {
+          return 2;
+        }
+        return 1;
+      }
+
+      double liveFast(Map<String, dynamic> row) {
+        return double.tryParse(
+              '${row['live_fast_score'] ?? row['smart_fast_score'] ?? row['fast_score'] ?? 0}',
+            ) ??
+            0.0;
+      }
+
+      rows.sort((a, b) {
+        final byState = stateWeight(b).compareTo(stateWeight(a));
+        if (byState != 0) return byState;
+        return liveFast(b).compareTo(liveFast(a));
+      });
+
+      if (!mounted) return;
+      setState(() {
+        globalMarketCandidates = rows;
+      });
+    } catch (_) {
+      // Supplemental dashboard. Keep last known snapshot on one failed poll.
+    } finally {
+      globalMarketsBusy = false;
+    }
+  }
+
+  Future<void> runGlobalMarketScanNow() async {
+    if (globalMarketsBusy) return;
+    setState(() => globalMarketsBusy = true);
+    try {
+      await postJsonOnce(
+        Uri.parse('$apiBase/market-categories/run-now'),
+        <String, dynamic>{},
+        timeoutSeconds: 180,
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => error = 'Market category scan failed: $e');
+      }
+    } finally {
+      globalMarketsBusy = false;
+    }
+
+    await loadGlobalMarkets();
+  }
+
+  String _forwardEpochIso(dynamic value) {
+    final seconds = double.tryParse('${value ?? ''}');
+    if (seconds == null || seconds <= 0) return '-';
+    return DateTime.fromMillisecondsSinceEpoch(
+      (seconds * 1000).round(),
+      isUtc: true,
+    ).toIso8601String();
+  }
+
+  String _tradeIdentity(Map<String, dynamic> row) {
+    return '${row['trade_id'] ?? row['deal_id'] ?? row['ig_deal_id'] ?? row['deal_reference'] ?? row['id'] ?? ''}'
+        .trim();
+  }
+
+  void _mergeForwardPrimeJournal() {
+    final merged = <String, Map<String, dynamic>>{};
+    var anonymous = 0;
+
+    void put(Map<String, dynamic> row) {
+      var key = _tradeIdentity(row);
+      if (key.isEmpty) {
+        key = 'ANON_${anonymous++}_${row['market'] ?? row['symbol'] ?? ''}_${row['status'] ?? ''}';
+      }
+      merged[key] = row;
+    }
+
+    // Preserve every legacy/auto-dashboard row first.
+    for (final row in paperTrades) {
+      put(Map<String, dynamic>.from(row));
+    }
+
+    // Overlay current JSCAT broker positions.
+    for (final row in categoryPortfolioPositions) {
+      final status = '${row['status'] ?? ''}'.toUpperCase();
+      if (status != 'OPEN') continue;
+
+      final brokerRaw = row['broker'];
+      final broker = brokerRaw is Map
+          ? Map<String, dynamic>.from(brokerRaw)
+          : <String, dynamic>{};
+
+      put(<String, dynamic>{
+        'id': row['deal_id'] ?? row['deal_reference'],
+        'deal_id': row['deal_id'],
+        'deal_reference': row['deal_reference'],
+        'market': row['market'] ?? row['symbol'],
+        'symbol': row['symbol'] ?? row['market'],
+        'direction': row['direction'],
+        'status': 'OPEN',
+        'entry_price': row['entry_level'] ?? broker['level'],
+        'ig_size': broker['size'] ?? row['size'],
+        'entry_class': row['trade_class'] ?? 'JSCAT_STRONG',
+        'entry_path': 'CATEGORY_FORWARD_LEARNING',
+        'broker': 'IG',
+        'source': 'V694_FORWARD_PRIME',
+        'strategy_id': row['strategy_id'],
+      });
+    }
+
+    // Settled evidence is authoritative and therefore overlays a matching
+    // open trade with the final WIN/LOSS outcome.
+    for (final row in forwardPrimeTrades) {
+      put(<String, dynamic>{
+        'id': row['trade_id'],
+        'trade_id': row['trade_id'],
+        'deal_id': row['trade_id'],
+        'market': row['market'] ?? row['symbol'],
+        'symbol': row['symbol'] ?? row['market'],
+        'direction': row['direction'],
+        'status': row['broker_result'] ?? 'CLOSED',
+        'result': row['broker_result'],
+        'entry_price': row['entry_price'],
+        'exit_price': row['exit_price'],
+        'pnl': row['broker_pnl'],
+        'r_multiple': row['r_multiple'],
+        'r_source': row['r_source'],
+        'closed_at_iso': _forwardEpochIso(row['closed_at']),
+        'entry_class': 'FORWARD_SETTLED',
+        'entry_path': 'BROKER_SETTLED_FORWARD',
+        'broker': 'IG',
+        'source': 'V694_FORWARD_PRIME',
+        'strategy_id': row['strategy_id'],
+      });
+    }
+
+    paperTrades = merged.values.toList();
+    paperTrades.sort((a, b) {
+      final aOpen = '${a['status'] ?? ''}'.toUpperCase() == 'OPEN';
+      final bOpen = '${b['status'] ?? ''}'.toUpperCase() == 'OPEN';
+      if (aOpen != bOpen) return aOpen ? -1 : 1;
+      return '${b['closed_at_iso'] ?? b['settled_at_iso'] ?? ''}'
+          .compareTo('${a['closed_at_iso'] ?? a['settled_at_iso'] ?? ''}');
+    });
+  }
+
+  Future<void> loadForwardPrimeMobileData() async {
+    // Progressive, independent calls: one slow diagnostic cannot hold the
+    // whole mobile dashboard at zero.
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/forward-validation/status'),
+        timeoutSeconds: 30,
+      );
+      if (mounted) {
+        setState(() => forwardPrimeStatus = response);
+      }
+    } catch (_) {}
+
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/category-portfolio/status'),
+        timeoutSeconds: 25,
+      );
+      if (mounted) {
+        setState(() => categoryPortfolioStatus = response);
+      }
+    } catch (_) {}
+
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/category-portfolio/positions'),
+        timeoutSeconds: 25,
+      );
+      final raw = response['positions'];
+      if (mounted && raw is List) {
+        setState(() {
+          categoryPortfolioPositions = raw
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+          _mergeForwardPrimeJournal();
+        });
+      }
+    } catch (_) {}
+
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/forward-validation/trades'),
+        timeoutSeconds: 30,
+      );
+      final raw = response['trades'];
+      if (mounted && raw is List) {
+        setState(() {
+          forwardPrimeTrades = raw
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+          _mergeForwardPrimeJournal();
+        });
+      }
+    } catch (_) {}
+
+    try {
+      final response = await getJson(
+        Uri.parse('$apiBase/market-categories/data-health'),
+        timeoutSeconds: 20,
+      );
+      if (mounted) {
+        setState(() => marketDataHealth = response);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> runSystemDiagnostic() async {
+    if (systemDiagnosticBusy) {
+      return;
+    }
+
+    setState(() {
+      systemDiagnosticBusy = true;
+      systemDiagnostic = null;
+    });
+
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/v69/diagnostic',
+        ),
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = response;
+      });
+
+      await loadSystemOverview();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        systemDiagnostic = {
+          'status': 'RED',
+          'label': 'DIAGNOSTIC REQUEST FAILED',
+          'checks': [
+            {
+              'component': 'MOBILE_TO_BACKEND',
+              'passed': false,
+              'message': e.toString(),
+            }
+          ],
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          systemDiagnosticBusy = false;
+        });
+      }
+    }
+  }
+
+  Color systemStatusColor(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Colors.greenAccent;
+      case 'AMBER':
+        return Colors.amberAccent;
+      case 'RED':
+        return Colors.redAccent;
+      case 'GREY':
+      default:
+        return Colors.white54;
+    }
+  }
+
+  IconData systemStatusIcon(
+    String status,
+  ) {
+    switch (status.toUpperCase()) {
+      case 'GREEN':
+        return Icons.check_circle;
+      case 'AMBER':
+        return Icons.warning_amber_rounded;
+      case 'RED':
+        return Icons.error;
+      case 'GREY':
+      default:
+        return Icons.pause_circle;
+    }
+  }
+
+  String formatCountdownSeconds(
+    dynamic value,
+  ) {
+    final seconds = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (seconds == null) {
+      return '-';
+    }
+
+    if (seconds <= 0) {
+      return 'Due now';
+    }
+
+    final total = seconds.round();
+    final minutes = total ~/ 60;
+    final remainder = total % 60;
+
+    if (minutes > 0) {
+      return '${minutes}m ${remainder}s';
+    }
+
+    return '${remainder}s';
+  }
+
+  String formatEpochCountdown(
+    dynamic value,
+  ) {
+    final epoch = double.tryParse(
+      value?.toString() ?? '',
+    );
+
+    if (epoch == null || epoch <= 0) {
+      return '-';
+    }
+
+    final now =
+        DateTime.now().millisecondsSinceEpoch /
+            1000.0;
+
+    return formatCountdownSeconds(
+      epoch - now,
+    );
+  }
+
+  Future<void> loadOvernightDemoStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/overnight-demo/status',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+
+        if (rawPerformance is Map) {
+          final enriched =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
+        }
+      });
+    } catch (_) {
+      // Keep the last server-side overnight snapshot visible.
+    }
+  }
+
+  Future<void> startOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
+    }
+
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/overnight-demo/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+        },
+      );
+
+      final response = await postJsonOnce(
+        uri,
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+        if (rawPerformance is Map) {
+          final enriched =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
+        }
+
+        networkStatus =
+            'Overnight IG DEMO is running on the server.';
+      });
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not start Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopOvernightDemo() async {
+    if (overnightDemoBusy) {
+      return;
+    }
+
+    setState(() {
+      overnightDemoBusy = true;
+      error = null;
+    });
+
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/overnight-demo/stop',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        overnightDemoStatus = response;
+
+        final rawPerformance =
+            response['broker_performance'];
+        if (rawPerformance is Map) {
+          final enriched =
+              Map<String, dynamic>.from(
+            rawPerformance,
+          );
+
+          enriched['current_phase_id'] =
+              response['current_phase_id'] ??
+                  (response['summary'] is Map
+                      ? (response['summary']
+                          as Map)['current_phase_id']
+                      : null);
+          enriched['current_phase'] =
+              response['current_phase'];
+          enriched['phase_history'] =
+              response['phase_history'];
+          enriched['lifetime'] =
+              response['lifetime_performance'];
+
+          igDemoPerformance = enriched;
+        }
+
+        networkStatus = response['message']
+                ?.toString() ??
+            'Overnight DEMO stopped.';
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Could not stop Overnight DEMO: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          overnightDemoBusy = false;
+        });
+      } else {
+        overnightDemoBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadAiLearningStatus() async {
+    try {
+      final response = await getJson(
+        Uri.parse(
+          '$apiBase/ai-learning/status',
+        ),
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningStatus = response;
+
+        final learning =
+            response['learning'];
+
+        if (learning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            learning,
+          );
+        }
+      });
+    } catch (_) {
+      // Keep the previous AI-learning snapshot visible.
+    }
+  }
+
+  Future<void> runAiLearningNow() async {
+    if (aiLearningBusy) {
+      return;
+    }
+
+    setState(() {
+      aiLearningBusy = true;
+      error = null;
+    });
+
+    try {
+      final response = await postJsonOnce(
+        Uri.parse(
+          '$apiBase/ai-learning/run-now',
+        ),
+        <String, dynamic>{},
+        timeoutSeconds: 90,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = response;
+      });
+
+      await loadAutoDashboard();
+      await loadAiLearningStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        aiLearningLastRun = {
+          'status': 'ERROR',
+          'paper_only': true,
+          'live_execution': false,
+          'error': e.toString(),
+        };
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          aiLearningBusy = false;
+        });
+      } else {
+        aiLearningBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadAutoDashboard() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-dashboard',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        autoDashboard = response;
+
+        final rawWatchers =
+            response['lifecycle'];
+
+        if (rawWatchers is List) {
+          serverWatchers = rawWatchers
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    Map<String, dynamic>.from(
+                  item,
+                ),
+              )
+              .toList();
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            serverWatchers,
+          );
+        }
+
+        final rawForward =
+            response['forward'];
+
+        if (rawForward is Map) {
+          forwardStats =
+              Map<String, dynamic>.from(
+            rawForward,
+          );
+        }
+
+        final rawPaperTrades =
+            response['paper_trades'];
+
+        if (rawPaperTrades is List) {
+          paperTrades =
+              rawPaperTrades
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
+        final rawIntegrity =
+            response['integrity'];
+
+        if (rawIntegrity is Map) {
+          integrityStatus =
+              Map<String, dynamic>.from(
+            rawIntegrity,
+          );
+        }
+
+        final rawModelEvidence =
+            response['model_forward_evidence'];
+
+        if (rawModelEvidence is Map) {
+          forwardStats =
+              Map<String, dynamic>.from(
+            rawModelEvidence,
+          );
+        }
+
+        final rawIgPerformance =
+            response['ig_demo_performance'];
+
+        if (rawIgPerformance is Map) {
+          igDemoPerformance =
+              Map<String, dynamic>.from(
+            rawIgPerformance,
+          );
+        }
+
+        final rawLearning =
+            response['learning'];
+
+        if (rawLearning is Map) {
+          aiLearningSnapshot =
+              Map<String, dynamic>.from(
+            rawLearning,
+          );
+        }
+
+        final rawLearningWatchers =
+            response['learning_watchers'];
+
+        if (rawLearningWatchers is List) {
+          aiLearningWatchers =
+              rawLearningWatchers
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList();
+        }
+
+        final rawV66Forward =
+            response[
+                'v66_forward_intelligence'];
+
+        if (rawV66Forward is Map) {
+          v66ForwardIntelligence =
+              Map<String, dynamic>.from(
+            rawV66Forward,
+          );
+        }
+      });
+    } catch (_) {
+      // Auto dashboard is supplemental.
+    }
+  }
+
+  Future<void> _refreshMobileDashboardSequence() async {
+    if (autoDashboardRefreshBusy) return;
+    autoDashboardRefreshBusy = true;
+
+    try {
+      await loadAutoDashboard();
+      await loadForwardPrimeMobileData();
+      await loadSystemOverview();
+      await loadAiLearningStatus();
+      await loadOvernightDemoStatus();
+      await loadGlobalMarkets();
+    } finally {
+      autoDashboardRefreshBusy = false;
+    }
+  }
+
+  void startAutoDashboardPolling() {
+    autoDashboardPollTimer?.cancel();
+
+    autoDashboardPollTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _refreshMobileDashboardSequence(),
+    );
+
+    Future.microtask(_refreshMobileDashboardSequence);
+  }
+
+  Future<void> startAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/start',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+          'scan_interval_minutes':
+              '2',
+          'target_active_watchers':
+              '6',
+          'scan_top_n': '9',
+        },
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not start Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> stopAutoMode() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/stop',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Could not stop Auto Mode: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  Future<void> runAutoManagerNow() async {
+    if (autoManagerBusy) {
+      return;
+    }
+
+    setState(() {
+      autoManagerBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/auto-manager/run-now',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 45,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(
+        response.body,
+      );
+
+      if (decoded is Map &&
+          mounted) {
+        setState(() {
+          autoManagerJob =
+              Map<String, dynamic>.from(
+            decoded,
+          );
+        });
+      }
+
+      startAutoDashboardPolling();
+      await loadAutoDashboard();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Auto Manager run failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          autoManagerBusy = false;
+        });
+      } else {
+        autoManagerBusy = false;
+      }
+    }
+  }
+
+  String formatEpochTime(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final seconds =
+        double.tryParse(
+      value.toString(),
+    );
+
+    if (seconds == null ||
+        seconds <= 0) {
+      return '-';
+    }
+
+    final dt = DateTime
+        .fromMillisecondsSinceEpoch(
+      (seconds * 1000).round(),
+      isUtc: true,
+    )
+        .toLocal();
+
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String watcherLifecycleSubtitle(
+    Map<String, dynamic> watcher,
+  ) {
+    final status =
+        watcher['status']
+                ?.toString() ??
+            '-';
+
+    final health =
+        watcher['strategy_health']
+                ?.toString() ??
+            'PROBATION';
+
+    if (status == 'OPEN') {
+      return '$health • Entry ${formatPrice(watcher['entry_price'])} • '
+          'Exit target ${watcher['target_exit_at_iso'] ?? '-'}';
+    }
+
+    if (status == 'WIN' ||
+        status == 'LOSS') {
+      return '$health • P&L ${watcher['pnl'] ?? '-'} • '
+          'Entry ${formatPrice(watcher['entry_price'])} → '
+          '${formatPrice(watcher['exit_price'])}';
+    }
+
+    final reason =
+        watcher['last_reason']
+                ?.toString() ??
+            'Awaiting next lifecycle update';
+
+    return '$health • $reason';
+  }
+
+  // =========================================================
+  // V5.3 SERVER VERIFIED WATCHER
+  // =========================================================
+
+  Future<void> createServerWatcher(
+    Map<String, dynamic> verified,
+  ) async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers',
+      ).replace(
+        queryParameters: {
+          'risk_mode': risk,
+          'starting_balance':
+              balance.text.trim(),
+          'payout': '0.8',
+        },
+      );
+
+      final response =
+          await postJsonOnce(
+        uri,
+        verified,
+        timeoutSeconds: 60,
+      );
+
+      final rawWatcher =
+          response['watcher'];
+
+      if (rawWatcher is! Map) {
+        throw const FormatException(
+          'Watcher server did not return a watcher object',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final created =
+          Map<String, dynamic>.from(
+        rawWatcher,
+      );
+
+      setState(() {
+        serverWatchers.removeWhere(
+          (item) =>
+              item['watcher_id'] ==
+              created['watcher_id'],
+        );
+
+        serverWatchers.add(
+          created,
+        );
+
+        serverWatcher =
+            _selectPrimaryWatcher(
+          serverWatchers,
+        );
+      });
+
+      startWatcherPolling();
+      await loadForwardStats();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Verified setup passed, but server watcher could not start: $e';
+      });
+    }
+  }
+
+  void startWatcherPolling() {
+    watcherPollTimer?.cancel();
+
+    watcherPollTimer =
+        Timer.periodic(
+      const Duration(
+        seconds: 20,
+      ),
+      (_) {
+        refreshServerWatchers();
+      },
+    );
+
+    Future.microtask(
+      refreshServerWatchers,
+    );
+  }
+
+  Map<String, dynamic>? _selectPrimaryWatcher(
+    List<Map<String, dynamic>> watchers,
+  ) {
+    if (watchers.isEmpty) {
+      return null;
+    }
+
+    int priority(
+      Map<String, dynamic> item,
+    ) {
+      switch (
+          item['status']
+                  ?.toString() ??
+              '') {
+        case 'OPEN':
+          return 100;
+        case 'READY':
+          return 90;
+        case 'WATCHING':
+          return 80;
+        case 'RISK_BLOCKED':
+          return 70;
+        case 'WIN':
+          return 60;
+        case 'LOSS':
+          return 50;
+        case 'EXPIRED':
+          return 30;
+        case 'INVALIDATED':
+          return 20;
+        case 'SUPERSEDED':
+          return 10;
+        default:
+          return 0;
+      }
+    }
+
+    final sorted = [
+      ...watchers,
+    ];
+
+    sorted.sort(
+      (a, b) =>
+          priority(b).compareTo(
+        priority(a),
+      ),
+    );
+
+    return sorted.first;
+  }
+
+  Future<void> refreshServerWatchers() async {
+    if (watcherBusy) {
+      return;
+    }
+
+    watcherBusy = true;
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers',
+      );
+
+      final response = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      final raw =
+          response['watchers'];
+
+      if (raw is List &&
+          mounted) {
+        final updated = <
+            Map<String, dynamic>>[];
+
+        for (final item in raw) {
+          if (item is Map) {
+            updated.add(
+              Map<String, dynamic>.from(
+                item,
+              ),
+            );
+          }
+        }
+
+        setState(() {
+          serverWatchers = updated;
+
+          serverWatcher =
+              _selectPrimaryWatcher(
+            updated,
+          );
+        });
+      }
+
+      await loadForwardStats();
+    } catch (_) {
+      // Watchers remain active on the server.
+    } finally {
+      watcherBusy = false;
+    }
+  }
+
+  Future<void> refreshServerWatcher() async {
+    await refreshServerWatchers();
+  }
+
+  Future<void> checkServerWatcherNow() async {
+    if (watcherBusy ||
+        serverWatcher == null) {
+      return;
+    }
+
+    final watcherId =
+        serverWatcher!['watcher_id']
+            ?.toString();
+
+    if (watcherId == null ||
+        watcherId.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      watcherBusy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/watchers/$watcherId/check',
+      );
+
+      final response = await http
+          .post(uri)
+          .timeout(
+            const Duration(
+              seconds: 120,
+            ),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final decoded =
+          jsonDecode(response.body);
+
+      if (decoded is! Map ||
+          decoded['watcher'] is! Map) {
+        throw const FormatException(
+          'Unexpected watcher response',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final checked =
+          Map<String, dynamic>.from(
+        decoded['watcher'] as Map,
+      );
+
+      setState(() {
+        final index =
+            serverWatchers.indexWhere(
+          (item) =>
+              item['watcher_id'] ==
+              checked['watcher_id'],
+        );
+
+        if (index >= 0) {
+          serverWatchers[index] =
+              checked;
+        } else {
+          serverWatchers.add(
+            checked,
+          );
+        }
+
+        serverWatcher =
+            _selectPrimaryWatcher(
+          serverWatchers,
+        );
+      });
+
+      await refreshServerWatchers();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          error =
+              'Watcher check failed: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          watcherBusy = false;
+        });
+      } else {
+        watcherBusy = false;
+      }
+    }
+  }
+
+  Future<void> loadForwardStats() async {
+    try {
+      final uri = Uri.parse(
+        '$apiBase/model-forward-evidence',
+      ).replace(
+        queryParameters: {
+          'starting_balance':
+              balance.text.trim(),
+        },
+      );
+
+      final stats = await getJson(
+        uri,
+        timeoutSeconds: 45,
+      );
+
+      if (mounted) {
+        setState(() {
+          forwardStats = stats;
+        });
+      }
+    } catch (_) {
+      // Forward stats are supplemental. Do not interrupt
+      // an active watcher when this request fails.
+    }
+  }
+
+  Color watcherStatusColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'WATCHING':
+      case 'READY':
+      case 'RISK_BLOCKED':
+        return Colors.amberAccent;
+      case 'LOSS':
+      case 'EXPIRED':
+      case 'INVALIDATED':
+      case 'SUPERSEDED':
+        return Colors.redAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData watcherStatusIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'OPEN':
+        return Icons.play_circle_fill;
+      case 'WIN':
+        return Icons.emoji_events;
+      case 'LOSS':
+        return Icons.cancel;
+      case 'WATCHING':
+        return Icons.visibility;
+      case 'RISK_BLOCKED':
+        return Icons.shield;
+      case 'EXPIRED':
+        return Icons.timer_off;
+      case 'INVALIDATED':
+        return Icons.block;
+      default:
+        return Icons.sync;
+    }
+  }
+
+
+  Color paperTradeColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Colors.greenAccent;
+      case 'LOSS':
+        return Colors.redAccent;
+      case 'OPEN':
+        return Colors.lightBlueAccent;
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData paperTradeIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return Icons.trending_up;
+      case 'LOSS':
+        return Icons.trending_down;
+      case 'OPEN':
+        return Icons.hourglass_top;
+      default:
+        return Icons.receipt_long;
+    }
+  }
+
+  String paperTradeHeadline(
+    String status,
+  ) {
+    switch (status) {
+      case 'WIN':
+        return 'WIN';
+      case 'LOSS':
+        return 'LOSS';
+      case 'OPEN':
+        return 'IG DEMO FORWARD TRADE';
+      default:
+        return status;
+    }
+  }
+
+  String formatMoney(
+    dynamic value,
+  ) {
+    if (value == null) {
+      return '-';
+    }
+
+    final number =
+        value is num
+            ? value.toDouble()
+            : double.tryParse(
+                  value.toString(),
+                ) ??
+                0.0;
+
+    final sign =
+        number > 0
+            ? '+'
+            : '';
+
+    return '$sign${number.toStringAsFixed(2)}';
+  }
+
+
+  // =========================================================
+  // ANALYSE MARKET
+  // =========================================================
+
+  Future<void> analyseMarket(
+    Map<String, dynamic> market,
+  ) async {
+    final selected =
+        market['symbol']
+            ?.toString();
+
+    if (selected == null ||
+        selected.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      symbol.text =
+          selected;
+
+      error = null;
+    });
+
+    await refreshSignal();
+  }
+
+  double _profileMinConfidence() {
+    switch (risk) {
+      case 'Conservative':
+        return 0.72;
+      case 'Aggressive':
+        return 0.62;
+      case 'Balanced':
+      default:
+        return 0.67;
+    }
+  }
+
+  int _intervalMinutes(
+    dynamic interval,
+  ) {
+    final text =
+        interval?.toString().trim().toLowerCase() ?? '';
+
+    if (text.endsWith('m')) {
+      return int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          15;
+    }
+
+    if (text.endsWith('h')) {
+      final hours = int.tryParse(
+            text.substring(
+              0,
+              text.length - 1,
+            ),
+          ) ??
+          1;
+
+      return hours * 60;
+    }
+
+    return 15;
+  }
+
+  Future<void>
+      analyseVerifiedTrade() async {
+    if (verifiedTrade == null ||
+        busy) {
+      return;
+    }
+
+    final selectedSymbol =
+        verifiedTrade!['symbol']
+            ?.toString();
+
+    if (selectedSymbol == null ||
+        selectedSymbol.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+      liveEntryAssessment = null;
+      symbol.text = selectedSymbol;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/signal',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              selectedSymbol,
+          'risk_mode':
+              risk,
+          'balance':
+              balance.text.trim(),
+        },
+      );
+
+      final result = await getJson(
+        uri,
+        timeoutSeconds: 120,
+      );
+
+      final verifiedDirection =
+          verifiedTrade!['direction']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final liveDecision =
+          result['decision']
+                  ?.toString()
+                  .toUpperCase() ??
+              'WAIT';
+
+      final confidence =
+          ((result['confidence'] ?? 0)
+                  as num)
+              .toDouble();
+
+      final aiUp =
+          ((result[
+                      'combined_up_probability'] ??
+                  0.50)
+              as num)
+              .toDouble();
+
+      final rsi =
+          ((result['rsi'] ?? 50)
+                  as num)
+              .toDouble();
+
+      final price =
+          result['price'];
+
+      final minConfidence =
+          _profileMinConfidence();
+
+      final reasons = <String>[];
+
+      String entryStatus =
+          'WAIT_CONFIRMATION';
+
+      String headline =
+          'WAIT FOR CONFIRMATION';
+
+      // -----------------------------------------------------
+      // 1. Opposite live signal with meaningful confidence
+      // -----------------------------------------------------
+
+      final oppositeSignal =
+          (verifiedDirection == 'BUY' &&
+                  liveDecision == 'SELL') ||
+              (verifiedDirection == 'SELL' &&
+                  liveDecision == 'BUY');
+
+      if (oppositeSignal &&
+          confidence >=
+              minConfidence) {
+        entryStatus =
+            'SETUP_INVALIDATED';
+
+        headline =
+            'SETUP INVALIDATED';
+
+        reasons.add(
+          'The live AI signal now points '
+          'against the verified historical direction.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 2. Overextended RSI: wait for pullback
+      // -----------------------------------------------------
+
+      else if (
+          verifiedDirection == 'BUY' &&
+          rsi >= 70.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'BUY setup is historically verified, '
+          'but RSI is overextended at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      } else if (
+          verifiedDirection == 'SELL' &&
+          rsi <= 30.0) {
+        entryStatus =
+            'WAIT_PULLBACK';
+
+        headline =
+            'WAIT FOR PULLBACK';
+
+        reasons.add(
+          'SELL setup is historically verified, '
+          'but RSI is oversold at '
+          '${rsi.toStringAsFixed(1)}.',
+        );
+      }
+
+      // -----------------------------------------------------
+      // 3. Live direction + confidence + AI probability agree
+      // -----------------------------------------------------
+
+      else {
+        final directionMatches =
+            liveDecision ==
+                verifiedDirection;
+
+        final confidencePass =
+            confidence >=
+                minConfidence;
+
+        final probabilityPass =
+            verifiedDirection == 'BUY'
+                ? aiUp >= 0.60
+                : aiUp <= 0.40;
+
+        if (directionMatches &&
+            confidencePass &&
+            probabilityPass) {
+          entryStatus =
+              'ENTER_NOW';
+
+          headline =
+              'ENTRY CONFIRMED';
+
+          reasons.add(
+            'Historical validation and the '
+            'current live AI signal agree.',
+          );
+
+          reasons.add(
+            'Live confidence passed the '
+            '${(minConfidence * 100).toStringAsFixed(0)}% '
+            '$risk threshold.',
+          );
+        } else {
+          entryStatus =
+              'WAIT_CONFIRMATION';
+
+          headline =
+              'WAIT FOR CONFIRMATION';
+
+          if (!directionMatches) {
+            reasons.add(
+              'The live signal is $liveDecision '
+              'while the verified setup is '
+              '$verifiedDirection.',
+            );
+          }
+
+          if (!confidencePass) {
+            reasons.add(
+              'Live confidence '
+              '${(confidence * 100).toStringAsFixed(1)}% '
+              'is below the '
+              '${(minConfidence * 100).toStringAsFixed(0)}% '
+              '$risk threshold.',
+            );
+          }
+
+          if (!probabilityPass) {
+            reasons.add(
+              'The live AI probability has not '
+              'confirmed the verified direction strongly enough.',
+            );
+          }
+        }
+      }
+
+      final intervalMinutes =
+          _intervalMinutes(
+        verifiedTrade!['interval'],
+      );
+
+      final holdingCandles =
+          int.tryParse(
+                '${verifiedTrade!['holding_candles'] ?? 0}',
+              ) ??
+              0;
+
+      final historicalHoldingMinutes =
+          intervalMinutes *
+              holdingCandles;
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        sig = result;
+
+        liveEntryAssessment = {
+          'status':
+              entryStatus,
+
+          'headline':
+              headline,
+
+          'verified_direction':
+              verifiedDirection,
+
+          'live_decision':
+              liveDecision,
+
+          'confidence':
+              confidence,
+
+          'ai_up_probability':
+              aiUp,
+
+          'rsi':
+              rsi,
+
+          'price':
+              price,
+
+          'signal_reason':
+              result['reason'],
+
+          'reasons':
+              reasons,
+
+          'interval_minutes':
+              intervalMinutes,
+
+          'recheck_minutes':
+              intervalMinutes,
+
+          'historical_holding_minutes':
+              historicalHoldingMinutes,
+        };
+      });
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            'Live entry confirmation failed: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  Color liveEntryColor(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Colors.greenAccent;
+
+      case 'WAIT_PULLBACK':
+        return Colors.amberAccent;
+
+      case 'WAIT_CONFIRMATION':
+        return Colors.amberAccent;
+
+      case 'SETUP_INVALIDATED':
+        return Colors.redAccent;
+
+      default:
+        return Colors.white70;
+    }
+  }
+
+  IconData liveEntryIcon(
+    String status,
+  ) {
+    switch (status) {
+      case 'ENTER_NOW':
+        return Icons.play_circle_fill;
+
+      case 'WAIT_PULLBACK':
+        return Icons.trending_down;
+
+      case 'WAIT_CONFIRMATION':
+        return Icons.hourglass_top;
+
+      case 'SETUP_INVALIDATED':
+        return Icons.block;
+
+      default:
+        return Icons.info_outline;
+    }
+  }
+
+
+  // =========================================================
+  // FORWARD SIGNAL
+  // =========================================================
+
+  Future<void>
+      recordPaperTrade() async {
+    if (busy || sig == null) {
+      return;
+    }
+
+    final direction =
+        sig!['decision']
+            ?.toString();
+
+    if (direction != 'BUY' &&
+        direction != 'SELL') {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final uri = Uri.parse(
+        '$apiBase/paper-trades',
+      ).replace(
+        queryParameters: {
+          'symbol':
+              symbol.text.trim(),
+          'direction':
+              direction!,
+          'confidence':
+              '${sig!['confidence']}',
+          'entry_price':
+              '${sig!['price']}',
+          'stake':
+              '${sig!['suggested_paper_stake']}',
+        },
+      );
+
+      final response =
+          await http
+              .post(uri)
+              .timeout(
+                const Duration(
+                  seconds: 30,
+                ),
+              );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(
+        const SnackBar(
+          content:
+              Text(
+            'Forward signal recorded',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error =
+            e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  // =========================================================
+  // INIT
+  // =========================================================
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    Future.microtask(() => refreshAll());
 
-    refreshTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) {
-        if (selectedTab != 1 && !refreshing) {
-          refreshAll(silent: true);
-        }
-      },
+    Future.microtask(
+      refreshSignal,
     );
+
+    Future.microtask(
+      loadForwardStats,
+    );
+
+    startAutoDashboardPolling();
+  }
+
+  @override
+  void didChangeAppLifecycleState(
+    AppLifecycleState state,
+  ) {
+    if (state == AppLifecycleState.resumed) {
+      // The backend/IG connection is authoritative. Whenever Android resumes
+      // the UI, immediately rebuild the phone view from server + IG truth.
+      startAutoDashboardPolling();
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    refreshTimer?.cancel();
-    _client.close();
+    watcherPollTimer?.cancel();
+    autoDashboardPollTimer?.cancel();
+    symbol.dispose();
+    balance.dispose();
+    copilotController.dispose();
+
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && selectedTab != 1) {
-      refreshAll(silent: true);
+  // =========================================================
+  // FORMATTERS
+  // =========================================================
+
+  Color decisionColor(
+    String value,
+  ) {
+    if (value == 'BUY') {
+      return Colors.greenAccent;
+    }
+
+    if (value == 'SELL') {
+      return Colors.redAccent;
+    }
+
+    return Colors.amberAccent;
+  }
+
+  Color statusColor(
+    String value,
+  ) {
+    switch (value) {
+      case 'VERIFIED':
+      case 'VERIFIED_TRADE':
+      case 'STRONG':
+        return Colors.greenAccent;
+
+      case 'NEAR_VERIFIED':
+        return Colors.amberAccent;
+
+      case 'WATCH':
+        return Colors.amberAccent;
+
+      case 'NETWORK_ERROR':
+        return Colors.orangeAccent;
+
+      case 'DIRECTION_MISMATCH':
+        return Colors.orangeAccent;
+
+      case 'REJECT':
+      case 'ERROR':
+        return Colors.redAccent;
+
+      default:
+        return Colors.white70;
     }
   }
 
-  Future<Map<String, dynamic>> _get(
-    String path, {
-    int timeoutSeconds = 20,
-  }) async {
-    final response = await _client
-        .get(
-          Uri.parse('$apiBase$path'),
-          headers: const {
-            'Accept': 'application/json',
-            'Cache-Control': 'no-cache',
-          },
-        )
-        .timeout(Duration(seconds: timeoutSeconds));
-
-    if (response.statusCode != 200) {
-      throw HttpException('HTTP ${response.statusCode}');
-    }
-
-    final body = response.body.trim();
-    if (body.startsWith('<')) {
-      throw const FormatException('Backend returned HTML');
-    }
-
-    final decoded = jsonDecode(body);
-    if (decoded is! Map) {
-      throw const FormatException('Expected JSON object');
-    }
-    return Map<String, dynamic>.from(decoded);
-  }
-
-  bool _transient(Object e) {
-    final text = e.toString().toLowerCase();
-    return e is TimeoutException ||
-        e is SocketException ||
-        e is http.ClientException ||
-        text.contains('502') ||
-        text.contains('503') ||
-        text.contains('504') ||
-        text.contains('timeout') ||
-        text.contains('timed out') ||
-        text.contains('connection reset') ||
-        text.contains('connection closed');
-  }
-
-  String _friendlyError(String path, Object e) {
-    final text = e.toString().toLowerCase();
-
-    if (text.contains('502')) {
-      return '$path: Render is temporarily busy (HTTP 502).';
-    }
-    if (text.contains('503')) {
-      return '$path: backend temporarily unavailable (HTTP 503).';
-    }
-    if (text.contains('504') || e is TimeoutException) {
-      return '$path: request timed out.';
-    }
-    if (e is SocketException || e is http.ClientException) {
-      return '$path: network connection interrupted.';
-    }
-    if (e is FormatException) {
-      return '$path: invalid server response.';
-    }
-    return '$path: ${e.runtimeType}.';
-  }
-
-  Future<Map<String, dynamic>> _getRetry(
-    String path, {
-    int timeoutSeconds = 20,
-    int attempts = 2,
-  }) async {
-    Object? lastError;
-
-    for (var attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        return await _get(
-          path,
-          timeoutSeconds: timeoutSeconds,
-        );
-      } catch (e) {
-        lastError = e;
-        if (!_transient(e) || attempt >= attempts) {
-          rethrow;
-        }
-        await Future.delayed(Duration(seconds: attempt * 2));
-      }
-    }
-
-    throw lastError ?? const HttpException('Unknown request failure');
-  }
-
-  void _markSuccess() {
-    if (!mounted) return;
-    setState(() {
-      lastUpdated = DateTime.now();
-      error = null;
-    });
-  }
-
-  Future<void> _loadStep(
-    String path,
-    void Function(Map<String, dynamic>) apply, {
-    int timeoutSeconds = 20,
-    bool silent = false,
-  }) async {
-    if (!mounted) return;
-
-    setState(() {
-      activeEndpoint = path;
-    });
-
-    try {
-      final payload = await _getRetry(
-        path,
-        timeoutSeconds: timeoutSeconds,
-      );
-
-      if (!mounted) return;
-      setState(() {
-        apply(payload);
-        lastUpdated = DateTime.now();
-        error = null;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      if (!silent) {
-        setState(() {
-          error = _friendlyError(path, e);
-        });
-      }
-    }
-  }
-
-  List<Map<String, dynamic>> _mapList(dynamic value) {
-    if (value is! List) return const [];
-    return value
-        .whereType<Map>()
-        .map((row) => Map<String, dynamic>.from(row))
-        .toList();
-  }
-
-  Future<void> refreshAll({bool silent = false}) async {
-    if (refreshing) return;
-
-    if (mounted) {
-      setState(() {
-        refreshing = true;
-        activeEndpoint = 'connecting';
-        if (!silent) error = null;
-      });
-    }
-
-    try {
-      // Progressive loading:
-      // each successful response updates the screen immediately.
-      // Heavy/secondary endpoints cannot hold the whole UI at zero.
-
-      await _loadStep(
-        '/category-portfolio/status',
-        (payload) => portfolioStatus = payload,
-        timeoutSeconds: 15,
-        silent: silent,
-      );
-
-      await _loadStep(
-        '/forward-validation/status',
-        (payload) => forwardStatus = payload,
-        timeoutSeconds: 20,
-        silent: silent,
-      );
-
-      await _loadStep(
-        '/category-portfolio/positions',
-        (payload) => categoryPositions = _mapList(payload['positions']),
-        timeoutSeconds: 15,
-        silent: silent,
-      );
-
-      await _loadStep(
-        '/forward-validation/trades',
-        (payload) => forwardTrades = _mapList(payload['trades']),
-        timeoutSeconds: 20,
-        silent: silent,
-      );
-
-      await _loadStep(
-        '/forward-validation/learning',
-        (payload) => forwardLearning = payload,
-        timeoutSeconds: 15,
-        silent: silent,
-      );
-
-      await _loadStep(
-        '/market-categories/data-health',
-        (payload) => dataHealth = payload,
-        timeoutSeconds: 15,
-        silent: silent,
-      );
-
-      // Compound candidate generation can be heavier, so load it last.
-      await _loadStep(
-        '/market-categories/compound-candidates',
-        (payload) => compoundPayload = payload,
-        timeoutSeconds: 30,
-        silent: silent,
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          refreshing = false;
-          activeEndpoint = null;
-        });
-      }
-    }
-  }
-
-  double _num(dynamic value) {
-    if (value is num) return value.toDouble();
-    return double.tryParse('$value') ?? 0.0;
-  }
-
-  double _pct(dynamic value) {
-    final n = _num(value);
-    return n.abs() <= 1.0 ? n * 100.0 : n;
-  }
-
-  int _int(dynamic value) {
-    if (value is int) return value;
-    if (value is num) return value.round();
-    return int.tryParse('$value') ?? 0;
-  }
-
-  String _displayInt(
-    bool loaded,
+  String formatPrice(
     dynamic value,
   ) {
-    return loaded ? '${_int(value)}' : '—';
-  }
+    if (value is num) {
+      if (value >= 100) {
+        return value
+            .toDouble()
+            .toStringAsFixed(3);
+      }
 
-  String _timeLabel() {
-    final value = lastUpdated;
-    if (value == null) {
-      if (refreshing) return 'connecting…';
-      return 'not connected';
+      return value
+          .toDouble()
+          .toStringAsFixed(5);
     }
-    final h = value.hour.toString().padLeft(2, '0');
-    final m = value.minute.toString().padLeft(2, '0');
-    final s = value.second.toString().padLeft(2, '0');
-    return 'updated $h:$m:$s';
+
+    return '-';
   }
 
-  Map<String, dynamic> get _strategyMetrics {
-    final raw = forwardStatus['strategy_metrics'];
-    return raw is Map ? Map<String, dynamic>.from(raw) : {};
-  }
-
-  List<Map<String, dynamic>> get _compoundCandidates {
-    final raw = compoundPayload['candidates'];
-    return _mapList(raw);
-  }
-
-  List<Map<String, dynamic>> get _openCategoryPositions {
-    return categoryPositions.where((row) {
-      return '${row['status'] ?? ''}'.toUpperCase() == 'OPEN';
-    }).toList();
-  }
-
-  Widget _card({
-    required Widget child,
-    EdgeInsets? padding,
+  String formatNumber(
+    dynamic value, {
+    int decimals = 2,
   }) {
-    return Container(
-      width: double.infinity,
-      padding: padding ?? const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .04),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: Colors.white.withValues(alpha: .075),
-        ),
-      ),
-      child: child,
-    );
+    if (value is num) {
+      return value
+          .toDouble()
+          .toStringAsFixed(
+            decimals,
+          );
+    }
+
+    return '-';
   }
 
-  Widget _pill(
-    String text, {
-    Color color = _blue,
+  String formatPercent(
+    dynamic value, {
+    int decimals = 1,
   }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 8,
-        vertical: 5,
-      ),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: .11),
-        border: Border.all(
-          color: color.withValues(alpha: .30),
-        ),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: color,
-          fontSize: 9,
-          fontWeight: FontWeight.w800,
-        ),
-      ),
-    );
+    if (value is num) {
+      return (
+        value.toDouble() * 100
+      ).toStringAsFixed(
+        decimals,
+      );
+    }
+
+    return '0.0';
   }
 
-  Widget _metric(
+  // =========================================================
+  // METRIC
+  // =========================================================
+
+  Widget metric(
     String label,
-    String value, {
-    Color color = Colors.white,
-  }) {
-    return Expanded(
-      child: Column(
-        children: [
-          Text(
-            value,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: color,
-              fontSize: 16,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.white38,
-              fontSize: 8.5,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sectionTitle(
-    String title, {
-    String? trailing,
-  }) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            title,
-            style: const TextStyle(
-              color: _teal,
-              fontSize: 15,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-        ),
-        if (trailing != null)
-          Text(
-            trailing,
-            style: const TextStyle(
-              color: Colors.white38,
-              fontSize: 9,
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _header() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 10, 8),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              gradient: const LinearGradient(
-                colors: [
-                  Color(0xFF65E6D3),
-                  Color(0xFF6FA8FF),
-                ],
-                begin: Alignment.bottomLeft,
-                end: Alignment.topRight,
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Image.asset(
-                'assets/images/jasong_logo.png',
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Icon(
-                  Icons.auto_graph_rounded,
-                  color: Colors.black,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Jasong AI Trader',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                SizedBox(height: 2),
-                Text(
-                  'V6.9.4-forward • Broker-Settled Intelligence • IG DEMO',
-                  style: TextStyle(
-                    fontSize: 9.2,
-                    color: Colors.white54,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          IconButton.filledTonal(
-            onPressed: refreshing ? null : () => refreshAll(),
-            icon: refreshing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                    ),
-                  )
-                : const Icon(Icons.refresh_rounded),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _connectionBanner() {
-    if (!refreshing && error == null) {
-      return const SizedBox.shrink();
-    }
-
-    final message = error ??
-        'Loading ${activeEndpoint ?? 'backend data'}…';
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: _card(
-        child: Row(
-          children: [
-            if (refreshing)
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                ),
-              )
-            else
-              const Icon(
-                Icons.warning_amber_rounded,
-                size: 16,
-                color: _amber,
-              ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(
-                  color: error == null
-                      ? Colors.white54
-                      : _amber,
-                  fontSize: 9.5,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _homePage() {
-    final forwardLoaded = forwardStatus.isNotEmpty;
-    final portfolioLoaded = portfolioStatus.isNotEmpty;
-
-    final metrics = _strategyMetrics.values
-        .whereType<Map>()
-        .map(
-          (row) => Map<String, dynamic>.from(row),
-        )
-        .toList();
-
-    final learningStrategies = metrics
-        .where(
-          (row) => _int(row['settled_trades']) > 0,
-        )
-        .length;
-
-    final primeStrategies = metrics
-        .where(
-          (row) => row['prime_eligible'] == true,
-        )
-        .length;
-
-    final liveMoney =
-        forwardStatus['live_money_execution'] == true;
-
-    final authority =
-        '${forwardStatus['authority'] ?? 'BROKER_SETTLED_FORWARD_ONLY'}';
-
-    final sourceMap = dataHealth['last_source_by_market'];
-    final sourcesLoaded = sourceMap is Map && sourceMap.isNotEmpty;
-    final sourceSummary = sourcesLoaded
-        ? sourceMap.entries
-            .take(3)
-            .map((e) => '${e.key}: ${e.value}')
-            .join(' • ')
-        : 'market source telemetry loading';
-
-    return RefreshIndicator(
-      onRefresh: refreshAll,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          14,
-          6,
-          14,
-          110,
-        ),
-        children: [
-          _sectionTitle(
-            'SYSTEM — FORWARD PRIME',
-            trailing: _timeLabel(),
-          ),
-          const SizedBox(height: 10),
-          _connectionBanner(),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                Wrap(
-                  spacing: 7,
-                  runSpacing: 7,
-                  children: [
-                    _pill(
-                      'IG DEMO ONLY',
-                      color: _green,
-                    ),
-                    _pill(
-                      'FORWARD AUTHORITY',
-                      color: _blue,
-                    ),
-                    _pill(
-                      'HISTORY = INFO',
-                      color: _purple,
-                    ),
-                    _pill(
-                      liveMoney
-                          ? 'LIVE MONEY ON'
-                          : 'LIVE MONEY OFF',
-                      color:
-                          liveMoney ? _red : _green,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 13),
-                Row(
-                  children: [
-                    _metric(
-                      'SETTLED STORE',
-                      _displayInt(
-                        forwardLoaded,
-                        forwardStatus[
-                            'stored_settled_trades'],
-                      ),
-                    ),
-                    _metric(
-                      'OPEN JSCAT',
-                      _displayInt(
-                        portfolioLoaded,
-                        portfolioStatus[
-                            'open_positions'],
-                      ),
-                    ),
-                    _metric(
-                      'JSCAT CLOSED',
-                      _displayInt(
-                        portfolioLoaded,
-                        portfolioStatus['closes'],
-                      ),
-                    ),
-                    _metric(
-                      'CAPACITY LEFT',
-                      _displayInt(
-                        portfolioLoaded,
-                        portfolioStatus[
-                            'global_remaining_positions'],
-                      ),
-                    ),
-                  ],
-                ),
-                const Divider(
-                  height: 24,
-                  color: Colors.white10,
-                ),
-                Row(
-                  children: [
-                    _metric(
-                      'LEARNING STRATS',
-                      forwardLoaded
-                          ? '$learningStrategies'
-                          : '—',
-                      color: _blue,
-                    ),
-                    _metric(
-                      'PRIME STRATS',
-                      forwardLoaded
-                          ? '$primeStrategies'
-                          : '—',
-                      color: primeStrategies > 0
-                          ? _amber
-                          : Colors.white54,
-                    ),
-                    _metric(
-                      'QUANT',
-                      '≥28%',
-                      color: _green,
-                    ),
-                    _metric(
-                      'AI / FAST',
-                      '40 / 45',
-                      color: _green,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 11),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'PRIME AUTHORITY',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    color: _teal,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                Text(
-                  authority.replaceAll('_', ' '),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                const Text(
-                  'STRONG → controlled IG DEMO category learning → '
-                  'broker settlement → strategy forward metrics → '
-                  'PRIME → Compound.',
-                  style: TextStyle(
-                    color: Colors.white60,
-                    fontSize: 10,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 11),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'MARKET DATA HEALTH',
-                        style: TextStyle(
-                          color: _teal,
-                          fontSize: 10,
-                          fontWeight:
-                              FontWeight.w900,
-                        ),
-                      ),
-                    ),
-                    _pill(
-                      dataHealth[
-                                  'yahoo_cooldown_active'] ==
-                              true
-                          ? 'YAHOO COOLDOWN'
-                          : 'DATA ROUTER READY',
-                      color: dataHealth[
-                                  'yahoo_cooldown_active'] ==
-                              true
-                          ? _amber
-                          : _green,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  sourceSummary,
-                  style: const TextStyle(
-                    color: Colors.white54,
-                    fontSize: 9,
-                    height: 1.35,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _compoundPage() {
-    final rows = _compoundCandidates;
-    final loaded = compoundPayload.isNotEmpty;
-    final rule =
-        '${compoundPayload['rule'] ?? ''}';
-
-    return RefreshIndicator(
-      onRefresh: refreshAll,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          14,
-          6,
-          14,
-          110,
-        ),
-        children: [
-          _sectionTitle(
-            'COMPOUND — PRIME ONLY',
-            trailing: _timeLabel(),
-          ),
-          const SizedBox(height: 10),
-          _connectionBanner(),
-          _card(
-            child: Row(
-              children: [
-                _metric(
-                  'CANDIDATES',
-                  loaded ? '${rows.length}' : '—',
-                  color: rows.isNotEmpty
-                      ? _amber
-                      : Colors.white54,
-                ),
-                _metric('RANK', '#1 / #2'),
-                _metric('QUANT', '≥28%'),
-                _metric('AI / FAST', '40 / 45'),
-              ],
-            ),
-          ),
-          if (rule.isNotEmpty) ...[
-            const SizedBox(height: 9),
-            Text(
-              rule,
-              style: const TextStyle(
-                color: Colors.white54,
-                fontSize: 9,
-                height: 1.35,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          if (!loaded)
-            _emptyMessage(
-              'Compound candidates are still loading.',
-            )
-          else if (rows.isEmpty)
-            _emptyMessage(
-              'No PRIME Compound candidates yet. '
-              'Strategies are still building broker-settled forward evidence.',
-            )
-          else
-            ...rows.map(_compoundCandidateCard),
-        ],
-      ),
-    );
-  }
-
-  Widget _compoundCandidateCard(
-    Map<String, dynamic> row,
+    String value,
   ) {
-    final market =
-        '${row['market'] ?? row['symbol'] ?? '-'}';
-    final direction =
-        '${row['direction'] ?? '-'}'.toUpperCase();
-    final strategy =
-        '${row['strategy_name'] ?? row['strategy_id'] ?? '-'}';
-    final quant = _pct(row['quant_confidence']);
-    final ai = _pct(row['model_ai_confidence']);
-    final fast = _num(
-      row['live_fast_score'] ??
-          row['smart_fast_score'],
+    return Expanded(
+      child: Card(
+        child: Padding(
+          padding:
+              const EdgeInsets.all(
+            14,
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style:
+                    const TextStyle(
+                  fontSize: 12,
+                ),
+              ),
+
+              const SizedBox(
+                height: 6,
+              ),
+
+              Text(
+                value,
+                textAlign:
+                    TextAlign.center,
+                style:
+                    const TextStyle(
+                  fontSize: 19,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
+  }
 
-    final forwardRaw = row['forward_validation'];
-    final forward = forwardRaw is Map
-        ? Map<String, dynamic>.from(forwardRaw)
-        : <String, dynamic>{};
+  // =========================================================
+  // VALIDATION CARD
+  // =========================================================
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 9),
-      child: _card(
+  Widget validationCard(
+    Map<String, dynamic> item,
+  ) {
+    final status =
+        item['deep_status']
+                ?.toString() ??
+            'UNKNOWN';
+
+    final verified =
+        item['verified'] == true;
+
+    final nearVerified =
+        item['near_verified'] == true ||
+            status == 'NEAR_VERIFIED';
+
+    final errorMessage =
+        item['error']
+            ?.toString();
+
+    final explanation =
+        item['explanation']
+            ?.toString();
+
+    final primaryReason =
+        item['primary_reason']
+            ?.toString();
+
+    return Card(
+      child: Padding(
+        padding:
+            const EdgeInsets.all(
+          16,
+        ),
         child: Column(
           crossAxisAlignment:
               CrossAxisAlignment.start,
@@ -953,747 +3816,6202 @@ class _JasongShellState extends State<JasongShell>
             Row(
               children: [
                 Expanded(
-                  child: Column(
+                  child: Text(
+                    '#${item['position']} '
+                    '${item['market']}',
+                    style:
+                        const TextStyle(
+                      fontSize: 20,
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Icon(
+                  verified
+                      ? Icons.verified
+                      : nearVerified
+                          ? Icons
+                              .verified_outlined
+                          : status ==
+                                  'NETWORK_ERROR'
+                              ? Icons.wifi_off
+                              : Icons
+                                  .cancel_outlined,
+                  color:
+                      verified
+                          ? Colors
+                              .greenAccent
+                          : statusColor(
+                              status,
+                            ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            Text(
+              status.replaceAll(
+                '_',
+                ' ',
+              ),
+              style:
+                  TextStyle(
+                fontSize: 16,
+                fontWeight:
+                    FontWeight.bold,
+                color:
+                    statusColor(
+                  status,
+                ),
+              ),
+            ),
+
+            const SizedBox(
+              height: 8,
+            ),
+
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Deep score: '
+                    '${formatNumber(item['deep_score'])}',
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    'Reliable score: '
+                    '${formatNumber(item['reliability_adjusted_score'])}',
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(
+              height: 4,
+            ),
+
+            Text(
+              'Historical: '
+              '${item['wins'] ?? '-'} wins / '
+              '${item['losses'] ?? '-'} losses '
+              '(${formatPercent(item['win_rate'])}% WR)',
+            ),
+
+            Text(
+              'Trades: ${item['trades'] ?? '-'}'
+              ' • PF ${formatNumber(item['profit_factor'])}'
+              ' • Max DD '
+              '${formatPercent(item['max_drawdown'])}%',
+            ),
+
+            Text(
+              'Reliability: '
+              '${formatNumber(item['sample_reliability_pct'], decimals: 1)}%'
+              ' • Conservative WR: '
+              '${formatNumber(item['wilson_lower_win_rate_pct'], decimals: 1)}%',
+            ),
+
+            if (item['interval'] != null ||
+                item['period'] != null)
+              Text(
+                'Setup: '
+                '${item['interval'] ?? '-'}'
+                ' • ${item['period'] ?? '-'}'
+                ' • Hold '
+                '${item['holding_candles'] ?? '-'} candles',
+              ),
+
+            if (primaryReason != null &&
+                primaryReason.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                'Reason: '
+                '${primaryReason.replaceAll('_', ' ')}',
+                style:
+                    TextStyle(
+                  color:
+                      statusColor(
+                    status,
+                  ),
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+            ],
+
+            if (explanation != null &&
+                explanation.isNotEmpty) ...[
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                explanation,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+
+            if (errorMessage != null) ...[
+              const SizedBox(
+                height: 10,
+              ),
+              Text(
+                errorMessage,
+                style:
+                    const TextStyle(
+                  fontSize: 12,
+                  color:
+                      Colors.orangeAccent,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+
+  // =========================================================
+  // FAST MARKET CARD
+  // =========================================================
+
+  Widget fastMarketCard(
+    Map<String, dynamic> market,
+    int rank,
+  ) {
+    final marketName =
+        market['market']
+                ?.toString() ??
+            '-';
+
+    final direction =
+        market['direction']
+                ?.toString() ??
+            'WAIT';
+
+    final status =
+        market['status']
+                ?.toString() ??
+            '-';
+
+    final rawScore =
+        market['fast_score'] ??
+            0.0;
+
+    final score =
+        rawScore is num
+            ? rawScore.toDouble()
+            : 0.0;
+
+    final reasons =
+        (market['reasons']
+                    as List?) ??
+            const [];
+
+    return Card(
+      child: InkWell(
+        onTap:
+            busy
+                ? null
+                : () {
+                    analyseMarket(
+                      market,
+                    );
+                  },
+        child: Padding(
+          padding:
+              const EdgeInsets.all(
+            16,
+          ),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '#$rank $marketName',
+                      style:
+                          const TextStyle(
+                        fontSize: 20,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ),
+
+                  Text(
+                    direction,
+                    style:
+                        TextStyle(
+                      fontSize: 18,
+                      fontWeight:
+                          FontWeight.bold,
+                      color:
+                          decisionColor(
+                        direction,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 8,
+              ),
+
+              Row(
+                children: [
+                  Text(
+                    status,
+                    style:
+                        TextStyle(
+                      color:
+                          statusColor(
+                        status,
+                      ),
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+
+                  const Spacer(),
+
+                  Column(
                     crossAxisAlignment:
-                        CrossAxisAlignment.start,
+                        CrossAxisAlignment.end,
                     children: [
                       Text(
-                        market,
+                        'Smart Score '
+                        '${score.toStringAsFixed(1)}/100',
+                        style:
+                            const TextStyle(
+                          fontWeight:
+                              FontWeight.bold,
+                        ),
+                      ),
+                      if (market[
+                              'quality_tier'] !=
+                          null)
+                        Text(
+                          'Tier '
+                          '${market['quality_tier']}'
+                          '${market['raw_fast_score'] != null ? ' • Raw ${formatNumber(market['raw_fast_score'], decimals: 1)}' : ''}',
+                          style:
+                              const TextStyle(
+                            fontSize: 11,
+                            color:
+                                Colors.white70,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+
+              const SizedBox(
+                height: 8,
+              ),
+
+              Text(
+                'Price '
+                '${formatPrice(market['price'])}'
+                ' • RSI '
+                '${formatNumber(market['rsi'])}',
+              ),
+
+              Text(
+                '${market['interval'] ?? '-'}'
+                ' • '
+                '${market['period'] ?? '-'}',
+              ),
+
+              if (reasons.isNotEmpty) ...[
+                const SizedBox(
+                  height: 8,
+                ),
+
+                Text(
+                  reasons
+                      .take(3)
+                      .join(' • '),
+                  style:
+                      const TextStyle(
+                    fontSize: 12,
+                    color:
+                        Colors.white70,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // =========================================================
+  // V6.7 ELITE COMPOUND DASHBOARD
+  // =========================================================
+
+  Future<void> openCompoundDashboard() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CompoundDashboardScreen(
+          apiBase: apiBase,
+          defaultCapital: balance.text.trim(),
+        ),
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    await loadAutoDashboard();
+    await loadOvernightDemoStatus();
+    await loadForwardStats();
+  }
+
+  // =========================================================
+  // BUILD
+  // =========================================================
+
+  @override
+  Widget build(
+    BuildContext context,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+
+    final liveDecision =
+        sig?['decision']?.toString().toUpperCase() ?? 'WAIT';
+    final confidence = formatPercent(sig?['confidence']);
+    final aiUp = formatPercent(sig?['combined_up_probability']);
+    final unifiedLive = sig?['unified_intelligence'] is Map
+        ? Map<String, dynamic>.from(
+            sig!['unified_intelligence'] as Map,
+          )
+        : <String, dynamic>{};
+    final liveDirectionalAi = formatPercent(
+      unifiedLive['model_ai_confidence'],
+    );
+    final liveCompoundBridge = sig?['compound_bridge'] is Map
+        ? Map<String, dynamic>.from(
+            sig!['compound_bridge'] as Map,
+          )
+        : <String, dynamic>{};
+    final liveCompoundBridgeState =
+        liveCompoundBridge['bridge_state']?.toString().toUpperCase() ??
+            'WAITING';
+
+    final dashboard = autoDashboard ?? <String, dynamic>{};
+    final manager = dashboard['manager'] is Map
+        ? Map<String, dynamic>.from(dashboard['manager'] as Map)
+        : <String, dynamic>{};
+    final summary = dashboard['summary'] is Map
+        ? Map<String, dynamic>.from(dashboard['summary'] as Map)
+        : <String, dynamic>{};
+    final compound = dashboard['compound'] is Map
+        ? Map<String, dynamic>.from(dashboard['compound'] as Map)
+        : <String, dynamic>{};
+    final compoundStatus =
+        compound['status']?.toString().toUpperCase() ?? 'STOPPED';
+    final compoundEnabled = compound['enabled'] == true;
+    final compoundCapital = compound['current_capital'];
+    final compoundReserve = compound['reserve_balance'] ?? 0;
+    final compoundCycle = compound['cycle_number'] ?? 0;
+    final compoundCurrent = compound['current_cycle'] is Map
+        ? Map<String, dynamic>.from(compound['current_cycle'] as Map)
+        : <String, dynamic>{};
+    final compoundPnl = compoundCurrent['running_pnl'] ?? 0;
+    final compoundOpen = compound['compound_broker_positions'] is List
+        ? (compound['compound_broker_positions'] as List).length
+        : 0;
+    final compoundMax =
+        int.tryParse(
+          '${compound['compound_max_positions'] ?? 5}',
+        ) ??
+        5;
+    final compoundCapacity =
+        compound['broker_capacity'] is Map
+            ? Map<String, dynamic>.from(
+                compound['broker_capacity'] as Map,
+              )
+            : <String, dynamic>{};
+    final brokerCapacityOpen =
+        int.tryParse(
+          '${compoundCapacity['total_open'] ?? 0}',
+        ) ??
+        0;
+    final brokerCapacityMax =
+        int.tryParse(
+          '${compoundCapacity['global_max'] ?? 15}',
+        ) ??
+        15;
+    final compoundPending = int.tryParse(
+          '${compound['pending_elite_count'] ?? 0}',
+        ) ??
+        0;
+    final compoundBridgeState =
+        compound['intelligence_bridge_state']?.toString().toUpperCase() ??
+            'IDLE';
+
+    final integrity = integrityStatus ??
+        (dashboard['integrity'] is Map
+            ? Map<String, dynamic>.from(
+                dashboard['integrity'] as Map,
+              )
+            : <String, dynamic>{});
+    final integrityScores =
+        integrity['scores'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['scores'] as Map,
+              )
+            : <String, dynamic>{};
+    final integrityModel =
+        integrity['model_evidence'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['model_evidence'] as Map,
+              )
+            : <String, dynamic>{};
+    final integrityBroker =
+        integrity['broker_integrity'] is Map
+            ? Map<String, dynamic>.from(
+                integrity['broker_integrity'] as Map,
+              )
+            : <String, dynamic>{};
+    final systemEfficiency =
+        integrity['system_efficiency_score'] ?? 0;
+    final operationalScore =
+        integrityScores['operational_readiness'] ?? 0;
+    final evidenceScore =
+        integrityScores['evidence_quality'] ?? 0;
+    final strategyScore =
+        integrityScores['strategy_performance'] ?? 0;
+    final compoundReadinessScore =
+        integrityScores['compound_readiness'] ?? 0;
+    final integrityConfidence =
+        integrity['strategy_score_confidence']
+                ?.toString() ??
+            'LOW';
+    final integrityBlockers =
+        integrity['blockers'] is List
+            ? (integrity['blockers'] as List)
+                .map((e) => e.toString())
+                .toList()
+            : <String>[];
+    final integrityRecommendations =
+        integrity['recommendations'] is List
+            ? (integrity['recommendations'] as List)
+                .map((e) => e.toString())
+                .toList()
+            : <String>[];
+
+    final autoOn = dashboard['auto_mode'] == true ||
+        manager['enabled'] == true ||
+        systemOverview?['auto_manager_enabled'] == true;
+
+    final stage = summary['current_stage']?.toString() ??
+        manager['progress_stage']?.toString() ??
+        'IDLE';
+    final stageMessage = summary['current_message']?.toString() ??
+        manager['progress_message']?.toString() ??
+        'Waiting for next automatic cycle';
+    final progress = double.tryParse(
+          '${summary['progress_percent'] ?? manager['progress_percent'] ?? 0}',
+        ) ??
+        0.0;
+
+    final activeWatchers = int.tryParse(
+          '${summary['active_watchers'] ?? serverWatchers.length}',
+        ) ??
+        serverWatchers.length;
+    final targetWatchers = int.tryParse(
+          '${summary['target_active_watchers'] ?? 6}',
+        ) ??
+        6;
+    final calibration =
+        dashboard['calibration'] is Map
+            ? Map<String, dynamic>.from(
+                dashboard['calibration'] as Map,
+              )
+            : integrity['calibration'] is Map
+                ? Map<String, dynamic>.from(
+                    integrity['calibration'] as Map,
+                  )
+                : <String, dynamic>{};
+    final calibrationFresh =
+        calibration['fresh'] == true ||
+        calibration['status']?.toString().toUpperCase() == 'FRESH';
+    final calibrationKnown = calibration.isNotEmpty;
+    final calibrationLabel =
+        calibrationKnown
+            ? (calibrationFresh ? 'FRESH' : 'STALE')
+            : 'STALE';
+
+    final forwardTrades = forwardStats?['forward_trades'] ??
+        forwardStats?['trades'] ??
+        0;
+    final paperBalance = forwardStats?['paper_balance'] ?? balance.text.trim();
+    final totalPnl = forwardStats?['total_pnl'] ??
+        forwardStats?['pnl'] ??
+        0;
+    final forwardWr = forwardStats?['win_rate_pct'] ??
+        forwardStats?['forward_win_rate_pct'] ??
+        0;
+    final modelOpen =
+        forwardStats?['open_entries'] ?? 0;
+    final modelSettled =
+        forwardStats?['settled_entries'] ?? 0;
+    final modelWins =
+        forwardStats?['wins'] ?? 0;
+    final modelLosses =
+        forwardStats?['losses'] ?? 0;
+    final modelBrokerMatched =
+        forwardStats?['broker_matched_entries'] ?? 0;
+    final recoveredUnattributed =
+        forwardStats?['broker_recovered_unattributed'] ?? 0;
+
+    final brokerPerf =
+        igDemoPerformance ??
+            <String, dynamic>{};
+
+    final currentIgPhase =
+        brokerPerf['current_phase'] is Map
+            ? Map<String, dynamic>.from(
+                brokerPerf['current_phase'] as Map,
+              )
+            : <String, dynamic>{};
+
+    final igPhaseHistory =
+        brokerPerf['phase_history'] is List
+            ? (brokerPerf['phase_history'] as List)
+                .whereType<Map>()
+                .map(
+                  (item) =>
+                      Map<String, dynamic>.from(
+                    item,
+                  ),
+                )
+                .toList()
+            : <Map<String, dynamic>>[];
+
+    final igLifetime =
+        brokerPerf['lifetime'] is Map
+            ? Map<String, dynamic>.from(
+                brokerPerf['lifetime'] as Map,
+              )
+            : <String, dynamic>{};
+
+    final igCurrentPhaseId =
+        int.tryParse(
+          '${brokerPerf['current_phase_id'] ?? currentIgPhase['phase_id'] ?? 1}',
+        ) ??
+        1;
+
+    final igAccepted =
+        currentIgPhase['accepted'] ??
+            brokerPerf['accepted_trades'] ??
+            0;
+    final igOpen =
+        currentIgPhase['open'] ??
+            brokerPerf['open_positions'] ??
+            0;
+    final igClosed =
+        currentIgPhase['settled'] ??
+            brokerPerf['closed_positions'] ??
+            0;
+    final igGraded =
+        currentIgPhase['settled'] ??
+            brokerPerf['graded_trades'] ??
+            brokerPerf['trades'] ??
+            0;
+    final igWins =
+        currentIgPhase['wins'] ??
+            brokerPerf['wins'] ??
+            0;
+    final igLosses =
+        currentIgPhase['losses'] ??
+            brokerPerf['losses'] ??
+            0;
+    final igWinRate =
+        currentIgPhase['win_rate_pct'] ??
+            brokerPerf['win_rate_pct'] ??
+            0;
+    final igPhaseTarget =
+        currentIgPhase['target'] ??
+            10;
+
+    final igLifetimeSettled =
+        igLifetime['settled'] ??
+            igLifetime['graded_trades'] ??
+            igGraded;
+    final igLifetimeWins =
+        igLifetime['wins'] ??
+            igWins;
+    final igLifetimeLosses =
+        igLifetime['losses'] ??
+            igLosses;
+    final igLifetimeWinRate =
+        igLifetime['win_rate_pct'] ??
+            igWinRate;
+
+    final igBalance =
+        brokerPerf['account_balance'];
+    final igAvailable =
+        brokerPerf['account_available'];
+    final igRunningPnl =
+        brokerPerf['account_profit_loss'];
+    final igCurrency =
+        brokerPerf['account_currency']
+                ?.toString() ??
+            '';
+
+    final topCandidates = (fastScan?['top_candidates'] as List?) ?? const [];
+    final ranking = (fastScan?['ranking'] as List?) ?? const [];
+
+    Color sideColor(String value) {
+      final v = value.toUpperCase();
+      if (v == 'BUY' || v == 'WIN' || v == 'OPEN') {
+        return const Color(0xFF67F0C1);
+      }
+      if (v == 'SELL' || v == 'LOSS') {
+        return const Color(0xFFFF6B75);
+      }
+      return const Color(0xFFFFD75E);
+    }
+
+    Widget glassCard({
+      required Widget child,
+      EdgeInsets padding = const EdgeInsets.all(16),
+      Color? glow,
+    }) {
+      return Container(
+        padding: padding,
+        decoration: BoxDecoration(
+          color: const Color(0xFF0E1A24).withValues(alpha: .94),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: glow?.withValues(alpha: .28) ?? const Color(0xFF18313C),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: (glow ?? Colors.black).withValues(alpha: .08),
+              blurRadius: 26,
+              offset: const Offset(0, 12),
+            ),
+          ],
+        ),
+        child: child,
+      );
+    }
+
+    Widget sectionTitle(String title, {String? subtitle}) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .2,
+                    ),
+                  ),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget statTile(
+      String label,
+      String value,
+      IconData icon, {
+      Color? valueColor,
+    }) {
+      return Expanded(
+        child: glassCard(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: cs.primary, size: 20),
+              const SizedBox(height: 14),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                  color: valueColor ?? Colors.white,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget pill(
+      String text, {
+      IconData? icon,
+      Color? color,
+    }) {
+      final c = color ?? cs.primary;
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: c.withValues(alpha: .20)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 13, color: c),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              text,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                color: c,
+                letterSpacing: .25,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget watcherCard(Map<String, dynamic> w) {
+      final market = w['market']?.toString() ?? w['symbol']?.toString() ?? 'MARKET';
+      final direction = w['direction']?.toString().toUpperCase() ?? 'WAIT';
+      final status = w['status']?.toString().toUpperCase() ?? 'WATCHING';
+      final conf = formatPercent(w['confidence']);
+      final reason = w['last_reason']?.toString() ?? watcherLifecycleSubtitle(w);
+      return glassCard(
+        glow: sideColor(direction),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: sideColor(direction).withValues(alpha: .12),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Icon(Icons.currency_exchange_rounded, color: sideColor(direction)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          market,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        direction,
+                        style: TextStyle(
+                          color: sideColor(direction),
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      pill(status, color: watcherStatusColor(status)),
+                      const SizedBox(width: 7),
+                      if (conf != '0.0')
+                        Text(
+                          '$conf%',
+                          style: const TextStyle(
+                            color: Colors.white60,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    reason,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget dashboardPage() {
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(26),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  cs.primary.withValues(alpha: .22),
+                  const Color(0xFF0D2630),
+                  const Color(0xFF0B1620),
+                ],
+              ),
+              border: Border.all(color: cs.primary.withValues(alpha: .25)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    pill(
+                      autoOn ? 'AUTO MANAGER ON' : 'AUTO MANAGER OFF',
+                      icon: autoOn ? Icons.bolt_rounded : Icons.pause_rounded,
+                      color: autoOn ? cs.primary : const Color(0xFFFFD75E),
+                    ),
+                    const Spacer(),
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: systemOverview != null || autoDashboard != null
+                            ? const Color(0xFF67F0C1)
+                            : const Color(0xFFFFD75E),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'V6.5',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  stage.replaceAll('_', ' '),
+                  style: const TextStyle(
+                    fontSize: 27,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .2,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  stageMessage,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 13,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(99),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0, 100) / 100,
+                    minHeight: 7,
+                    backgroundColor: Colors.white10,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                      'Next scan ${formatEpochTime(summary['next_scan_at'])}',
+                      style: const TextStyle(color: Colors.white54, fontSize: 11),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${progress.round()}%',
+                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              statTile(
+                igBalance != null ? 'IG funds' : 'Reference balance',
+                igBalance != null
+                    ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}'
+                    : '$paperBalance',
+                Icons.account_balance_wallet_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'IG positions',
+                '$igOpen',
+                Icons.swap_horiz_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile('Watchers', '$activeWatchers / $targetWatchers', Icons.visibility_outlined),
+              const SizedBox(width: 10),
+              statTile(
+                'Phase $igCurrentPhaseId',
+                '$igAccepted / $igPhaseTarget',
+                Icons.flag_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Calibration',
+                calibrationLabel,
+                calibrationFresh
+                    ? Icons.check_circle_outline_rounded
+                    : Icons.history_toggle_off_rounded,
+                valueColor: calibrationFresh
+                    ? Colors.greenAccent
+                    : Colors.amberAccent,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Mode',
+                'ADVISORY',
+                Icons.tune_rounded,
+                valueColor: Colors.lightBlueAccent,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          glassCard(
+            glow: compoundEnabled
+                ? const Color(0xFF67F0C1)
+                : const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF65E6D3).withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      child: const Icon(
+                        Icons.autorenew_rounded,
+                        color: Color(0xFF65E6D3),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'JASONG ELITE COMPOUND',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '+50% basket • 20% harvest • AI ≥40% • best 1–5 markets',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: .52),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    pill(
+                      compoundStatus.replaceAll('_', ' '),
+                      color: compoundEnabled
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFFD75E),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Cycle',
+                        '#$compoundCycle',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Capital',
+                        compoundCapital == null
+                            ? '-'
+                            : formatMoney(compoundCapital),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Reserve',
+                        formatMoney(compoundReserve),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Compound',
+                        '$compoundOpen / $compoundMax',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Basket P&L',
+                        formatMoney(compoundPnl),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: _MidnightValue(
+                        'Environment',
+                        'IG DEMO',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _midnightValue(
+                        'Broker capacity',
+                        '$brokerCapacityOpen / $brokerCapacityMax',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Available',
+                        '${(brokerCapacityMax - brokerCapacityOpen).clamp(0, brokerCapacityMax)}',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _midnightValue(
+                        'Execution',
+                        'IG DEMO',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 9),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 11,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .035),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        size: 16,
+                        color: Color(0xFF65E6D3),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          'Live Intelligence ↔ Compound: '
+                          '${compoundBridgeState.replaceAll('_', ' ')}'
+                          '${compoundPending > 0 ? ' • $compoundPending Elite ready' : ''}',
+                          style: const TextStyle(
+                            color: Colors.white60,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: openCompoundDashboard,
+                    icon: const Icon(Icons.dashboard_customize_rounded),
+                    label: const Text('Open Compound Strategy'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Live intelligence', subtitle: 'Current signal for ${symbol.text.trim()}'),
+          glassCard(
+            glow: sideColor(liveDecision),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      liveDecision,
+                      style: TextStyle(
+                        fontSize: 34,
+                        fontWeight: FontWeight.w900,
+                        color: sideColor(liveDecision),
+                      ),
+                    ),
+                    const Spacer(),
+                    pill(risk.toUpperCase(), icon: Icons.shield_outlined),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  sig?['reason']?.toString() ?? 'Waiting for signal...',
+                  style: const TextStyle(color: Colors.white60, height: 1.35),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(child: _midnightValue('Quant', '$confidence%')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _midnightValue('AI up', '$aiUp%')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _midnightValue('RSI', formatNumber(sig?['rsi']))),
+                  ],
+                ),
+                const SizedBox(height: 9),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF65E6D3).withValues(alpha: .06),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0xFF65E6D3).withValues(alpha: .16),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        color: Color(0xFF65E6D3),
+                        size: 17,
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          'Directional AI for $liveDecision: $liveDirectionalAi% • '
+                          'Compound bridge: ${liveCompoundBridgeState.replaceAll('_', ' ')}',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: busy ? null : scanAllMarkets,
+                  icon: const Icon(Icons.radar_rounded),
+                  label: const Text('Scan markets'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: busy ? null : findVerifiedTrade,
+                  icon: const Icon(Icons.verified_rounded),
+                  label: const Text('Find setup'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Active watchers', subtitle: 'Verified setups under live observation'),
+          if (serverWatchers.isEmpty)
+            glassCard(
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.visibility_off_outlined, color: Colors.white38),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'No watcher snapshot loaded yet. Auto Manager will populate this automatically.',
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            ...serverWatchers.take(4).map((w) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: watcherCard(w),
+                )),
+          const SizedBox(height: 10),
+          sectionTitle('V6.5 learning policy'),
+          glassCard(
+            child: const Column(
+              children: [
+                _MidnightRuleRow('Normal forward path', '≥ 30%', 'Verified + live direction agrees'),
+                Divider(height: 24),
+                _MidnightRuleRow('AI forward path', '≥ 40%', 'AI approves + direction agrees'),
+                Divider(height: 24),
+                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
+              ],
+            ),
+          ),
+          if (error != null) ...[
+            const SizedBox(height: 14),
+            glassCard(
+              glow: const Color(0xFFFF6B75),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.error_outline_rounded, color: Color(0xFFFF6B75)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      error!,
+                      style: const TextStyle(color: Color(0xFFFF9098), fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
+    Widget marketsPage() {
+      return MarketCategoriesPage(
+        apiBase: apiBase,
+      );
+    }
+
+    Widget tradesPage() {
+      final pnlValue =
+          double.tryParse(
+            '${igRunningPnl ?? 0}',
+          ) ??
+          0.0;
+
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          sectionTitle(
+            'Evidence & execution integrity',
+            subtitle:
+                'Operational readiness is separated from evidence quality and strategy performance',
+          ),
+          Row(
+            children: [
+              statTile(
+                'System',
+                '${formatNumber(systemEfficiency, decimals: 0)}/100',
+                Icons.health_and_safety_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Operational',
+                '${formatNumber(operationalScore, decimals: 0)}/100',
+                Icons.settings_suggest_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Evidence',
+                '${formatNumber(evidenceScore, decimals: 0)}/100',
+                Icons.fact_check_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Strategy',
+                '${formatNumber(strategyScore, decimals: 0)}/100',
+                Icons.query_stats_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Compound ready',
+                '${formatNumber(compoundReadinessScore, decimals: 0)}/100',
+                Icons.account_tree_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Confidence',
+                integrityConfidence,
+                Icons.analytics_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          glassCard(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Settled model: ${integrityModel['settled_entries'] ?? 0} • '
+                  'PF ${formatNumber(integrityModel['profit_factor'], decimals: 2)} • '
+                  'Metadata ${formatNumber(integrityModel['metadata_completeness_pct'], decimals: 0)}%',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Broker close errors: ${integrityBroker['close_error_count'] ?? 0} • '
+                  'Overdue closes: ${integrityBroker['overdue_open_count'] ?? 0} • '
+                  'Close pending: ${integrityBroker['close_pending_count'] ?? 0}',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 10,
+                  ),
+                ),
+                if (integrityBlockers.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ...integrityBlockers.take(3).map(
+                    (item) => Padding(
+                      padding:
+                          const EdgeInsets.only(
+                        bottom: 3,
+                      ),
+                      child: Text(
+                        '• $item',
                         style: const TextStyle(
-                          fontSize: 14,
+                          color: Color(0xFFFFD75E),
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+                if (integrityRecommendations.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    integrityRecommendations.first,
+                    style: const TextStyle(
+                      color: Color(0xFF67F0C1),
+                      fontSize: 10,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'IG DEMO verified performance',
+            subtitle:
+                'Current Phase $igCurrentPhaseId • broker-settled IG DEMO evidence',
+          ),
+          Row(
+            children: [
+              statTile(
+                'Phase $igCurrentPhaseId trades',
+                '$igAccepted / $igPhaseTarget',
+                Icons.flag_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Open IG',
+                '$igOpen',
+                Icons.swap_horiz_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Settled IG',
+                '$igClosed',
+                Icons.fact_check_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'IG W / L',
+                '$igWins / $igLosses',
+                Icons.insights_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'IG win rate',
+                '${formatNumber(igWinRate, decimals: 1)}%',
+                Icons.percent_rounded,
+                valueColor:
+                    (double.tryParse('$igWinRate') ?? 0) > 0
+                        ? const Color(0xFF67F0C1)
+                        : Colors.white,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Running P&L',
+                igRunningPnl == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igRunningPnl)}',
+                Icons.payments_outlined,
+                valueColor:
+                    pnlValue >= 0
+                        ? const Color(0xFF67F0C1)
+                        : const Color(0xFFFF6B75),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'IG funds',
+                igBalance == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}',
+                Icons.account_balance_wallet_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Available',
+                igAvailable == null
+                    ? '-'
+                    : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igAvailable)}',
+                Icons.savings_outlined,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          glassCard(
+            child: Text(
+              igGraded == 0
+                  ? 'Phase $igCurrentPhaseId is collecting broker-verified evidence. Open positions still contribute to the broker running P&L above.'
+                  : '$igGraded settled IG DEMO trade(s) currently have a WIN/LOSS outcome in Phase $igCurrentPhaseId.',
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          glassCard(
+            glow: const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Lifetime IG evidence',
+                  style: TextStyle(
+                    fontWeight:
+                        FontWeight.w900,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  '$igLifetimeSettled settled • '
+                  '$igLifetimeWins W / $igLifetimeLosses L • '
+                  '${formatNumber(igLifetimeWinRate, decimals: 1)}% win rate',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (igPhaseHistory.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            glassCard(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Phase history',
+                    style: TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...igPhaseHistory
+                      .where(
+                        (phase) =>
+                            int.tryParse(
+                              '${phase['phase_id'] ?? 0}',
+                            ) !=
+                            igCurrentPhaseId,
+                      )
+                      .toList()
+                      .reversed
+                      .take(5)
+                      .map(
+                    (phase) {
+                      final perf =
+                          phase['performance']
+                                  is Map
+                              ? Map<String,
+                                      dynamic>.from(
+                                  phase[
+                                          'performance']
+                                      as Map,
+                                )
+                              : <String,
+                                  dynamic>{};
+                      final phaseId =
+                          phase['phase_id'] ??
+                              '-';
+                      final settled =
+                          perf['settled'] ?? 0;
+                      final wins =
+                          perf['wins'] ?? 0;
+                      final losses =
+                          perf['losses'] ?? 0;
+                      final wr =
+                          perf['win_rate_pct'] ??
+                              0;
+                      final state =
+                          phase['status']
+                                  ?.toString()
+                                  .toUpperCase() ??
+                              'COMPLETE';
+
+                      return Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          bottom: 7,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Phase $phaseId • $settled settled • $wins W / $losses L',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white70,
+                                  fontSize: 10,
+                                  fontWeight:
+                                      FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${formatNumber(wr, decimals: 1)}% • $state',
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Color(0xFF67F0C1),
+                                fontSize: 9,
+                                fontWeight:
+                                    FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Trade journal',
+            subtitle:
+                'Internal AI entries + broker-reconciled IG DEMO positions',
+          ),
+          if (paperTrades.isEmpty)
+            glassCard(
+              child: const Column(
+                children: [
+                  Icon(
+                    Icons.hourglass_empty_rounded,
+                    size: 38,
+                    color: Colors.white30,
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    'No reconciled trades loaded yet.',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'IG DEMO positions and forward-learning evidence will reappear here after server reconciliation.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            ...paperTrades.take(30).map(
+              (trade) {
+                final status =
+                    trade['status']
+                            ?.toString()
+                            .toUpperCase() ??
+                        '-';
+                final market =
+                    trade['market']?.toString() ??
+                        trade['symbol']?.toString() ??
+                        '-';
+                final direction =
+                    trade['direction']
+                            ?.toString()
+                            .toUpperCase() ??
+                        '-';
+                final broker =
+                    trade['broker']?.toString() ??
+                        '';
+                final entryPath =
+                    trade['entry_class'] ??
+                        trade['entry_path'] ??
+                        '-';
+                final pnl = trade['pnl'];
+
+                return Padding(
+                  padding:
+                      const EdgeInsets.only(
+                    bottom: 10,
+                  ),
+                  child: glassCard(
+                    glow:
+                        paperTradeColor(status),
+                    child: Row(
+                      children: [
+                        Icon(
+                          paperTradeIcon(status),
+                          color:
+                              paperTradeColor(status),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '$market  $direction',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${paperTradeHeadline(status)} • $entryPath'
+                                '${broker.isNotEmpty ? ' • $broker DEMO' : ''}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white54,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              if (trade['entry_price'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
+                                  '${trade['ig_size'] != null ? ' • Size ${trade['ig_size']}' : ''}',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                              if (trade['mfe_bps'] != null ||
+                                  trade['mae_bps'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'MFE ${formatNumber(trade['mfe_bps'], decimals: 1)} bps'
+                                  ' • MAE ${formatNumber(trade['mae_bps'], decimals: 1)} bps',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        Text(
+                          pnl == null
+                              ? (status == 'OPEN'
+                                  ? 'OPEN'
+                                  : '-')
+                              : formatMoney(pnl),
+                          style: TextStyle(
+                            color:
+                                paperTradeColor(status),
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Model forward evidence',
+            subtitle:
+                'V6 AI-learning entries • open trades count immediately; W/L only after settlement',
+          ),
+          Row(
+            children: [
+              statTile(
+                'Model entries',
+                '$forwardTrades',
+                Icons.receipt_long_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Open model',
+                '$modelOpen',
+                Icons.hourglass_top_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Settled model',
+                '$modelSettled',
+                Icons.fact_check_outlined,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Model W / L',
+                '$modelWins / $modelLosses',
+                Icons.insights_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Model WR',
+                '${formatNumber(forwardWr, decimals: 1)}%',
+                Icons.percent_rounded,
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Broker matched',
+                '$modelBrokerMatched',
+                Icons.link_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              statTile(
+                'Model P&L',
+                formatMoney(totalPnl),
+                Icons.analytics_outlined,
+                valueColor:
+                    (double.tryParse('$totalPnl') ?? 0) >= 0
+                        ? const Color(0xFF67F0C1)
+                        : const Color(0xFFFF6B75),
+              ),
+              const SizedBox(width: 10),
+              statTile(
+                'Reference balance',
+                '$paperBalance',
+                Icons.account_balance_wallet_outlined,
+              ),
+            ],
+          ),
+          if ((int.tryParse('$recoveredUnattributed') ?? 0) > 0) ...[
+            const SizedBox(height: 8),
+            glassCard(
+              child: Text(
+                '$recoveredUnattributed IG-recovered position(s) are preserved as broker evidence but are not falsely attributed to the model because their original confidence metadata was lost before Always-Sync persistence.',
+                style: const TextStyle(
+                  color: Colors.amberAccent,
+                  fontSize: 11,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                await loadAutoDashboard();
+                await loadOvernightDemoStatus();
+                await loadForwardStats();
+              },
+              icon: const Icon(
+                Icons.refresh_rounded,
+              ),
+              label: const Text(
+                'Refresh performance',
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget aiPage() {
+      final learning =
+          aiLearningSnapshot ??
+              <String, dynamic>{};
+
+      final mode =
+          aiLearningStatus?['mode']
+                  ?.toString() ??
+              'DIRECT_AI40_SHADOW_PROMOTION_V662';
+
+      final aiFloor =
+          aiLearningStatus?[
+                  'ai_min_confidence_pct'] ??
+              40.0;
+
+      final engineEnabled =
+          learning['enabled'] == true;
+
+      final activeWatchers =
+          learning['active_watchers'] ?? 0;
+
+      final openTrades =
+          learning['open_trades'] ?? 0;
+
+      final activeSignalRecords =
+          learning['active_signal_records'] ??
+          learning['open_trades'] ??
+          0;
+
+      final learningBalance =
+          learning['reference_balance'] ??
+          learning['starting_reference_balance'] ??
+          10000;
+
+      final overnight =
+          overnightDemoStatus ??
+              <String, dynamic>{};
+
+      final overnightSummary =
+          overnight['summary'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['summary'],
+                )
+              : <String, dynamic>{};
+
+      final overnightState =
+          overnight['status']
+                  ?.toString()
+                  .toUpperCase() ??
+              'PAUSED';
+
+      final overnightActive =
+          overnightState == 'ACTIVE';
+
+      final overnightDraining =
+          overnightState == 'DRAINING';
+
+      final overnightComplete =
+          overnightState ==
+              'PHASE_COMPLETE';
+
+      final currentPhaseId =
+          int.tryParse(
+            '${overnightSummary['current_phase_id'] ?? overnight['current_phase_id'] ?? 1}',
+          ) ??
+          1;
+
+      final phaseAccepted =
+          overnightSummary[
+                  'phase_accepted_trades'] ??
+              0;
+
+      final phaseSettled =
+          overnightSummary[
+                  'phase_settled_trades'] ??
+              0;
+
+      final phaseTarget =
+          overnightSummary['phase_target'] ??
+              10;
+
+      final phaseRemaining =
+          overnightSummary[
+                  'phase_remaining'] ??
+              phaseTarget;
+
+      final phaseEntryLimitReached =
+          overnightSummary[
+                  'phase_entry_limit_reached'] ==
+              true;
+
+      final executionRequired =
+          overnightSummary[
+                  'execution_required'] ==
+              true;
+
+      final entryBlocker =
+          overnightSummary[
+                  'entry_blocker']
+              ?.toString();
+
+      final brokerPositions =
+          overnightSummary[
+                  'open_broker_positions'] ??
+              0;
+
+      final maxBrokerPositions =
+          overnightSummary[
+                  'max_broker_positions'] ??
+              15;
+
+      final mirrors =
+          overnight['ig_demo'] is Map &&
+                  (overnight['ig_demo'] as Map)['mirrors'] is List
+              ? ((overnight['ig_demo'] as Map)['mirrors'] as List)
+                  .whereType<Map>()
+                  .map((row) => Map<String, dynamic>.from(row))
+                  .toList()
+              : <Map<String, dynamic>>[];
+
+      final waitingSignals =
+          mirrors.where((row) {
+            final status =
+                row['broker_status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '';
+            final hasDeal =
+                (row['ig_deal_id']
+                        ?.toString()
+                        .isNotEmpty ??
+                    false);
+            return !hasDeal &&
+                {
+                  'SUBMITTING',
+                  'WAITING_FOR_IG',
+                  'WAITING_FOR_CAPACITY',
+                  'PENDING',
+                }.contains(status);
+          }).length;
+
+      final overnightIg =
+          overnight['ig_demo'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['ig_demo'],
+                )
+              : <String, dynamic>{};
+
+      final brokerSyncState =
+          overnightSummary[
+                  'broker_sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              overnightIg['sync_state']
+                  ?.toString()
+                  .toUpperCase() ??
+              'STALE';
+
+      final brokerSyncAge =
+          overnightSummary[
+                  'broker_sync_age_seconds'] ??
+              overnightIg[
+                  'broker_sync_age_seconds'];
+
+      final brokerPositionRows =
+          overnight['broker_positions'] is List
+              ? (overnight[
+                          'broker_positions']
+                      as List)
+                  .whereType<Map>()
+                  .map(
+                    (item) =>
+                        Map<String, dynamic>.from(
+                      item,
+                    ),
+                  )
+                  .toList()
+              : <Map<String, dynamic>>[];
+
+      final overnightCurrentPhase =
+          overnight['current_phase'] is Map
+              ? Map<String, dynamic>.from(
+                  overnight['current_phase'] as Map,
+                )
+              : <String, dynamic>{};
+
+      final overnightWins =
+          overnightCurrentPhase['wins'] ??
+              overnightSummary['wins'] ??
+              0;
+
+      final overnightLosses =
+          overnightCurrentPhase['losses'] ??
+              overnightSummary['losses'] ??
+              0;
+
+      final overnightWinRate =
+          overnightCurrentPhase[
+                  'win_rate_pct'] ??
+              overnightSummary[
+                  'win_rate_pct'] ??
+              0.0;
+
+      final aiTrades = paperTrades
+          .where(
+            (trade) =>
+                trade['source']?.toString() ==
+                    'V66_LEARNING_ENGINE',
+          )
+          .toList();
+
+      Map<String, dynamic>? openAiTrade;
+
+      for (final trade in aiTrades) {
+        if (trade['status']
+                ?.toString()
+                .toUpperCase() ==
+            'OPEN') {
+          openAiTrade = trade;
+          break;
+        }
+      }
+
+      Widget learningTradeCard(
+        Map<String, dynamic> trade,
+      ) {
+        final status =
+            trade['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final market =
+            trade['market']?.toString() ??
+                trade['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            trade['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final entryClass =
+            trade['entry_path']?.toString() ??
+                trade['entry_class']?.toString() ??
+                '-';
+
+        final aiConfidence =
+            trade['model_ai_confidence'];
+
+        final quant =
+            trade['entry_confidence'] ??
+                trade['quant_confidence'];
+
+        final dueAt =
+            trade['settlement_due_at'] ??
+                trade['scheduled_close_at'];
+
+        return glassCard(
+          glow: paperTradeColor(status),
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    paperTradeIcon(status),
+                    color:
+                        paperTradeColor(status),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    entryClass,
+                    color: const Color(
+                      0xFF65E6D3,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  statTile(
+                    'Model AI',
+                    aiConfidence is num
+                        ? '${formatPercent(aiConfidence)}%'
+                        : '-',
+                    Icons.psychology_alt_rounded,
+                    valueColor:
+                        Colors.greenAccent,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Quant',
+                    quant is num
+                        ? '${formatPercent(quant)}%'
+                        : '-',
+                    Icons.analytics_outlined,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'Stake',
+                    formatMoney(
+                      trade['stake'],
+                    ),
+                    Icons.payments_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    status == 'OPEN'
+                        ? 'Time left'
+                        : 'P&L',
+                    status == 'OPEN'
+                        ? formatEpochCountdown(
+                            dueAt,
+                          )
+                        : formatMoney(
+                            trade['pnl'],
+                          ),
+                    status == 'OPEN'
+                        ? Icons.timer_outlined
+                        : Icons
+                            .account_balance_wallet_outlined,
+                    valueColor:
+                        status == 'WIN'
+                            ? Colors.greenAccent
+                            : status == 'LOSS'
+                                ? Colors.redAccent
+                                : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Entry ${formatNumber(trade['entry_price'], decimals: 5)}'
+                '${trade['exit_price'] != null ? '  •  Exit ${formatNumber(trade['exit_price'], decimals: 5)}' : ''}',
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                status == 'OPEN'
+                    ? 'IG DEMO forward trade is being monitored by the backend.'
+                    : 'Settled IG DEMO outcome: ${trade['result'] ?? status}.',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      Widget learningWatcherCard(
+        Map<String, dynamic> watcher,
+      ) {
+        final candidate =
+            watcher['candidate'] is Map
+                ? Map<String, dynamic>.from(
+                    watcher['candidate'],
+                  )
+                : <String, dynamic>{};
+
+        final market =
+            watcher['market']?.toString() ??
+                watcher['symbol']?.toString() ??
+                '-';
+
+        final direction =
+            watcher['direction']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final status =
+            watcher['status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final deepStatus =
+            watcher['deep_status']
+                    ?.toString()
+                    .toUpperCase() ??
+                '-';
+
+        final quality =
+            candidate['quality_tier']
+                    ?.toString() ??
+                '-';
+
+        final fastScore =
+            candidate['smart_fast_score'];
+
+        final quant =
+            watcher['last_quant_confidence'];
+
+        return glassCard(
+          glow: status == 'SHADOW_WATCH'
+              ? Colors.amberAccent
+              : cs.primary,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '$market  $direction',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  pill(
+                    status,
+                    color:
+                        status == 'SHADOW_WATCH'
+                            ? Colors.amberAccent
+                            : cs.primary,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  pill(
+                    'Deep $deepStatus',
+                    icon:
+                        Icons.fact_check_outlined,
+                  ),
+                  pill(
+                    'Quality $quality',
+                    icon: Icons.grade_outlined,
+                  ),
+                  if (fastScore is num)
+                    pill(
+                      'Fast ${formatNumber(fastScore, decimals: 0)}',
+                      icon:
+                          Icons.speed_rounded,
+                    ),
+                  if (quant is num)
+                    pill(
+                      'Quant ${formatPercent(quant)}%',
+                      icon: Icons
+                          .analytics_outlined,
+                    ),
+                ],
+              ),
+              if (watcher['last_error'] !=
+                  null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  watcher['last_error']
+                      .toString(),
+                  maxLines: 3,
+                  overflow:
+                      TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      }
+
+      Widget overnightDemoCard() {
+        Color stateColor;
+        IconData stateIcon;
+
+        if (phaseEntryLimitReached &&
+            phaseSettled < phaseTarget) {
+          stateColor = Colors.amberAccent;
+          stateIcon = Icons.hourglass_top_rounded;
+        } else if (overnightComplete) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.autorenew_rounded;
+        } else if (overnightActive) {
+          stateColor = Colors.greenAccent;
+          stateIcon = Icons.nightlight_round;
+        } else if (overnightDraining) {
+          stateColor = Colors.amberAccent;
+          stateIcon = Icons.hourglass_bottom_rounded;
+        } else {
+          stateColor = Colors.white54;
+          stateIcon = Icons.bedtime_outlined;
+        }
+
+        final manager =
+            overnight['manager'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['manager'],
+                  )
+                : <String, dynamic>{};
+
+        final progressMessage =
+            manager['progress_message']
+                    ?.toString() ??
+                'Waiting for the next scan';
+
+        final currentTrade =
+            overnight['current_trade'] is Map
+                ? Map<String, dynamic>.from(
+                    overnight['current_trade'],
+                  )
+                : null;
+
+        return glassCard(
+          glow: stateColor,
+          child: Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: stateColor.withValues(
+                        alpha: .10,
+                      ),
+                      borderRadius:
+                          BorderRadius.circular(15),
+                    ),
+                    child: Icon(
+                      stateIcon,
+                      color: stateColor,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'OVERNIGHT IG DEMO',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          phaseEntryLimitReached &&
+                                  phaseSettled <
+                                      phaseTarget
+                              ? 'Phase $currentPhaseId is full • waiting for broker settlement before automatic rollover'
+                              : overnightActive
+                                  ? 'Phase $currentPhaseId autonomous IG DEMO learning is active'
+                                  : overnightDraining
+                                      ? 'New entries stopped • current demo trade is settling'
+                                      : overnightComplete
+                                          ? 'Phase $currentPhaseId complete • rolling automatically to the next phase'
+                                          : 'Ready for a server-side IG DEMO learning run',
+                          style: const TextStyle(
+                            color:
+                                Colors.white60,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  pill(
+                    overnightState,
+                    color: stateColor,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  statTile(
+                    'Phase $currentPhaseId',
+                    '$phaseAccepted / $phaseTarget',
+                    Icons.flag_outlined,
+                    valueColor:
+                        phaseEntryLimitReached
+                            ? Colors.amberAccent
+                            : Colors.white,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'IG Open Trades',
+                    '$brokerPositions',
+                    Icons.swap_horiz_rounded,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'Waiting Signals',
+                    '$waitingSignals',
+                    Icons.pending_actions_rounded,
+                    valueColor: waitingSignals > 0
+                        ? Colors.amberAccent
+                        : Colors.white,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Broker Capacity',
+                    '$brokerPositions / $maxBrokerPositions',
+                    Icons.hub_rounded,
+                    valueColor:
+                        brokerPositions < maxBrokerPositions
+                            ? Colors.greenAccent
+                            : Colors.amberAccent,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  statTile(
+                    'W / L',
+                    '$overnightWins / $overnightLosses',
+                    Icons.fact_check_outlined,
+                  ),
+                  const SizedBox(width: 10),
+                  statTile(
+                    'Win rate',
+                    '${formatNumber(overnightWinRate, decimals: 1)}%',
+                    Icons.insights_rounded,
+                    valueColor:
+                        overnightWins > 0
+                            ? Colors.greenAccent
+                            : Colors.white,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: (
+                    brokerSyncState == 'SYNCED'
+                        ? Colors.greenAccent
+                        : brokerSyncState == 'ERROR'
+                            ? Colors.redAccent
+                            : Colors.amberAccent
+                  ).withValues(alpha: .06),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color: (
+                      brokerSyncState == 'SYNCED'
+                          ? Colors.greenAccent
+                          : brokerSyncState == 'ERROR'
+                              ? Colors.redAccent
+                              : Colors.amberAccent
+                    ).withValues(alpha: .20),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      brokerSyncState == 'SYNCED'
+                          ? Icons.sync_rounded
+                          : brokerSyncState == 'ERROR'
+                              ? Icons.sync_problem_rounded
+                              : Icons.sync_lock_rounded,
+                      color:
+                          brokerSyncState == 'SYNCED'
+                              ? Colors.greenAccent
+                              : brokerSyncState == 'ERROR'
+                                  ? Colors.redAccent
+                                  : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Backend ↔ IG DEMO: $brokerSyncState',
+                            style: const TextStyle(
+                              fontWeight:
+                                  FontWeight.w900,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            brokerSyncAge is num
+                                ? 'Last broker reconciliation ${formatCountdownSeconds(brokerSyncAge)} ago • $brokerPositions open position(s)'
+                                : 'Waiting for broker reconciliation • $brokerPositions open position(s)',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white54,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (brokerPositionRows.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                ...brokerPositionRows
+                    .take(3)
+                    .map(
+                      (position) => Padding(
+                        padding:
+                            const EdgeInsets.only(
+                          bottom: 8,
+                        ),
+                        child: Container(
+                          width:
+                              double.infinity,
+                          padding:
+                              const EdgeInsets
+                                  .symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration:
+                              BoxDecoration(
+                            color: Colors.white
+                                .withValues(
+                              alpha: .025,
+                            ),
+                            borderRadius:
+                                BorderRadius
+                                    .circular(
+                              12,
+                            ),
+                            border: Border.all(
+                              color: Colors.white
+                                  .withValues(
+                                alpha: .05,
+                              ),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons
+                                    .account_balance_rounded,
+                                size: 17,
+                                color: Color(
+                                  0xFF65E6D3,
+                                ),
+                              ),
+                              const SizedBox(
+                                width: 9,
+                              ),
+                              Expanded(
+                                child: Text(
+                                  '${position['symbol'] ?? position['market'] ?? 'IG'} '
+                                  '${position['direction'] ?? ''}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight
+                                            .w800,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                '${position['size'] ?? '-'} @ ${formatNumber(position['entry_level'], decimals: 5)}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white60,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+              ],
+              const SizedBox(height: 4),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(
+                    alpha: .035,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(14),
+                  border: Border.all(
+                    color:
+                        Colors.white.withValues(
+                      alpha: .05,
+                    ),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Scanner: ${overnight['scanner_universe'] ?? 'CURATED_LEARNING_FX'}',
+                      style: const TextStyle(
+                        fontWeight:
+                            FontWeight.w700,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      progressMessage,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      phaseEntryLimitReached
+                          ? 'Phase $currentPhaseId accepted $phaseAccepted/$phaseTarget • settled $phaseSettled/$phaseTarget • ${entryBlocker ?? 'waiting for rollover'}'
+                          : 'Phase $currentPhaseId • $phaseAccepted/$phaseTarget accepted • $phaseRemaining settlement(s) remaining • AI floor ${formatNumber(overnight['ai_min_confidence_pct'] ?? aiFloor, decimals: 0)}%',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (currentTrade != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Current: ${currentTrade['symbol'] ?? currentTrade['market'] ?? '-'} '
+                  '${currentTrade['direction'] ?? ''} • '
+                  'closes in ${formatEpochCountdown(currentTrade['scheduled_close_at'] ?? currentTrade['settlement_due_at'])}',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: overnightDemoBusy
+                          ? null
+                          : overnightActive ||
+                                  overnightDraining ||
+                                  phaseEntryLimitReached
+                              ? stopOvernightDemo
+                              : startOvernightDemo,
+                      icon: overnightDemoBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : Icon(
+                              overnightActive ||
+                                      overnightDraining ||
+                                      phaseEntryLimitReached
+                                  ? Icons.stop_circle_outlined
+                                  : Icons.play_circle_fill_rounded,
+                            ),
+                      label: Text(
+                        overnightDemoBusy
+                            ? 'Please wait...'
+                            : overnightActive ||
+                                    overnightDraining ||
+                                    phaseEntryLimitReached
+                                ? 'Stop new overnight entries'
+                                : 'START OVERNIGHT DEMO',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    tooltip:
+                        'Refresh overnight status',
+                    onPressed:
+                        loadOvernightDemoStatus,
+                    icon: const Icon(
+                      Icons.refresh_rounded,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'IG DEMO ONLY • Live-money execution remains disabled. '
+                'IG is the broker source of truth; the app re-syncs from the backend whenever it opens or resumes.',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 10,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      return ListView(
+        padding:
+            const EdgeInsets.fromLTRB(
+          16,
+          4,
+          16,
+          120,
+        ),
+        children: [
+          sectionTitle(
+            'Overnight Demo Mode',
+            subtitle:
+                'One-tap server-side IG DEMO learning • phone can be locked or closed',
+          ),
+          overnightDemoCard(),
+          const SizedBox(height: 14),
+          glassCard(
+            glow: const Color(0xFF65E6D3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.autorenew_rounded,
+                      color: Color(0xFF65E6D3),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Elite 80/20 Compound Strategy',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    pill(
+                      compoundStatus.replaceAll('_', ' '),
+                      color: compoundEnabled
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFFD75E),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'IG DEMO forward learning stays active alongside Compound. Compound selects up to 5 broker positions, closes the basket at +50% or -15%, harvests 20% of realised profit and compounds the rest.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: openCompoundDashboard,
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: const Text('Open Elite Compound'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+          sectionTitle(
+            'IG DEMO Forward Learning',
+            subtitle:
+                'Broker-forward evidence • execution and reconciliation run on the backend',
+          ),
+          glassCard(
+            glow: engineEnabled
+                ? Colors.greenAccent
+                : Colors.amberAccent,
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      engineEnabled
+                          ? Icons
+                              .smart_toy_rounded
+                          : Icons
+                              .pause_circle_outline,
+                      color: engineEnabled
+                          ? Colors.greenAccent
+                          : Colors.amberAccent,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        engineEnabled
+                            ? 'AI learning is ACTIVE'
+                            : 'AI learning is PAUSED',
+                        style: const TextStyle(
+                          fontSize: 16,
                           fontWeight:
                               FontWeight.w900,
                         ),
                       ),
-                      Text(
-                        strategy,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 9,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                _pill(
-                  direction,
-                  color: direction == 'BUY'
-                      ? _green
-                      : _red,
-                ),
-                const SizedBox(width: 6),
-                _pill('PRIME', color: _amber),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                _metric(
-                  'QUANT',
-                  '${quant.toStringAsFixed(1)}%',
-                ),
-                _metric(
-                  'AI',
-                  '${ai.toStringAsFixed(1)}%',
-                ),
-                _metric(
-                  'FAST',
-                  fast.toStringAsFixed(0),
-                ),
-                _metric(
-                  'SETTLED',
-                  '${_int(forward['settled_trades'])}',
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _tradesPage() {
-    final openRows = _openCategoryPositions;
-    final loaded =
-        forwardTrades.isNotEmpty ||
-        forwardStatus.isNotEmpty;
-
-    final wins = forwardTrades.where((row) {
-      return '${row['broker_result'] ?? ''}'
-              .toUpperCase() ==
-          'WIN';
-    }).length;
-
-    final losses = forwardTrades.where((row) {
-      return '${row['broker_result'] ?? ''}'
-              .toUpperCase() ==
-          'LOSS';
-    }).length;
-
-    final total = forwardTrades.length;
-    final wr = total > 0
-        ? wins * 100.0 / total
-        : 0.0;
-
-    return RefreshIndicator(
-      onRefresh: refreshAll,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          14,
-          6,
-          14,
-          110,
-        ),
-        children: [
-          _sectionTitle(
-            'TRADES — IG DEMO',
-            trailing: _timeLabel(),
-          ),
-          const SizedBox(height: 10),
-          _connectionBanner(),
-          _card(
-            child: Row(
-              children: [
-                _metric(
-                  'OPEN JSCAT',
-                  categoryPositions.isEmpty &&
-                          portfolioStatus.isEmpty
-                      ? '—'
-                      : '${openRows.length}',
-                  color: _blue,
-                ),
-                _metric(
-                  'SETTLED',
-                  loaded ? '$total' : '—',
-                ),
-                _metric(
-                  'WINS',
-                  loaded ? '$wins' : '—',
-                  color: _green,
-                ),
-                _metric(
-                  'LOSSES',
-                  loaded ? '$losses' : '—',
-                  color: _red,
-                ),
-                _metric(
-                  'WR',
-                  loaded
-                      ? '${wr.toStringAsFixed(1)}%'
-                      : '—',
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 13),
-          const Text(
-            'OPEN CATEGORY / LEARNING POSITIONS',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 7),
-          if (categoryPositions.isEmpty &&
-              portfolioStatus.isEmpty)
-            _emptyMessage('Positions loading…')
-          else if (openRows.isEmpty)
-            _emptyMessage('No open JSCAT positions')
-          else
-            ...openRows.take(20).map(_openTradeCard),
-          const SizedBox(height: 13),
-          const Text(
-            'BROKER-SETTLED FORWARD EVIDENCE',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 7),
-          if (!loaded)
-            _emptyMessage('Forward settlements loading…')
-          else if (forwardTrades.isEmpty)
-            _emptyMessage('No forward settlements loaded')
-          else
-            ...forwardTrades
-                .take(50)
-                .map(_settledTradeCard),
-        ],
-      ),
-    );
-  }
-
-  Widget _openTradeCard(
-    Map<String, dynamic> row,
-  ) {
-    final market =
-        '${row['market'] ?? row['symbol'] ?? '-'}';
-    final direction =
-        '${row['direction'] ?? '-'}'.toUpperCase();
-    final strategy =
-        '${row['strategy_id'] ?? '-'}';
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: _card(
-        child: Row(
-          children: [
-            Expanded(
-              flex: 4,
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    market,
-                    style: const TextStyle(
-                      fontWeight:
-                          FontWeight.w900,
-                      fontSize: 12,
                     ),
-                  ),
-                  Text(
-                    strategy,
-                    maxLines: 1,
-                    overflow:
-                        TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white38,
-                      fontSize: 8.5,
+                    pill(
+                      'IG DEMO ONLY',
+                      color: Colors.greenAccent,
                     ),
-                  ),
-                ],
-              ),
-            ),
-            _pill(
-              direction,
-              color: direction == 'BUY'
-                  ? _green
-                  : _red,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _settledTradeCard(
-    Map<String, dynamic> row,
-  ) {
-    final market =
-        '${row['market'] ?? row['symbol'] ?? '-'}';
-    final result =
-        '${row['broker_result'] ?? 'CLOSED'}'
-            .toUpperCase();
-    final strategy =
-        '${row['strategy_id'] ?? 'UNKNOWN'}';
-    final r = _num(row['r_multiple']);
-    final color = result == 'WIN'
-        ? _green
-        : result == 'LOSS'
-            ? _red
-            : Colors.white54;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: _card(
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    market,
-                    style: const TextStyle(
-                      fontWeight:
-                          FontWeight.w900,
-                    ),
-                  ),
-                  Text(
-                    strategy,
-                    style: const TextStyle(
-                      color: Colors.white38,
-                      fontSize: 8.5,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Text(
-              result,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              '${r >= 0 ? '+' : ''}${r.toStringAsFixed(2)}R',
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _aiPage() {
-    final entries = _strategyMetrics.entries.toList()
-      ..sort((a, b) {
-        final am = a.value is Map
-            ? Map<String, dynamic>.from(
-                a.value as Map,
-              )
-            : <String, dynamic>{};
-        final bm = b.value is Map
-            ? Map<String, dynamic>.from(
-                b.value as Map,
-              )
-            : <String, dynamic>{};
-        return _int(bm['settled_trades'])
-            .compareTo(
-          _int(am['settled_trades']),
-        );
-      });
-
-    final findings = _mapList(
-      forwardLearning['findings'],
-    );
-
-    return RefreshIndicator(
-      onRefresh: refreshAll,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          14,
-          6,
-          14,
-          110,
-        ),
-        children: [
-          _sectionTitle(
-            'AI — FORWARD LEARNING',
-            trailing: _timeLabel(),
-          ),
-          const SizedBox(height: 10),
-          _connectionBanner(),
-          if (forwardStatus.isEmpty)
-            _emptyMessage(
-              'Forward strategy metrics loading…',
-            )
-          else if (entries.isEmpty)
-            _emptyMessage(
-              'No strategy forward metrics yet.',
-            )
-          else
-            ...entries.map((entry) {
-              final row = entry.value is Map
-                  ? Map<String, dynamic>.from(
-                      entry.value as Map,
-                    )
-                  : <String, dynamic>{};
-
-              return Padding(
-                padding:
-                    const EdgeInsets.only(bottom: 8),
-                child: _card(
-                  child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              entry.key,
-                              style: const TextStyle(
-                                fontSize: 10,
-                                fontWeight:
-                                    FontWeight.w900,
-                              ),
-                            ),
-                          ),
-                          _pill(
-                            '${row['state'] ?? 'BOOTSTRAP'}',
-                            color:
-                                row['prime_eligible'] ==
-                                        true
-                                    ? _amber
-                                    : _blue,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 9),
-                      Row(
-                        children: [
-                          _metric(
-                            'SETTLED',
-                            '${_int(row['settled_trades'])}',
-                          ),
-                          _metric(
-                            'WR',
-                            '${_pct(row['win_rate']).toStringAsFixed(1)}%',
-                          ),
-                          _metric(
-                            'PF',
-                            _num(row['profit_factor'])
-                                .toStringAsFixed(2),
-                          ),
-                          _metric(
-                            'EXP R',
-                            _num(row['expectancy_r'])
-                                .toStringAsFixed(2),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                  ],
                 ),
-              );
-            }),
-          const SizedBox(height: 10),
-          const Text(
-            'RECURRING LEARNING FINDINGS',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 10,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 7),
-          if (forwardLearning.isEmpty)
-            _emptyMessage('Learning report loading…')
-          else if (findings.isEmpty)
-            _emptyMessage(
-              'No repeated strategy mistake has crossed the minimum occurrence threshold.',
-            )
-          else
-            ...findings.map((row) {
-              final name =
-                  '${row['finding'] ?? row['name'] ?? 'Finding'}';
-              final count =
-                  _int(row['occurrences'] ?? row['count']);
-              final recommendation =
-                  '${row['recommendation'] ?? row['message'] ?? ''}';
-
-              return Padding(
-                padding:
-                    const EdgeInsets.only(bottom: 8),
-                child: _card(
-                  child: Column(
-                    crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              name,
-                              style: const TextStyle(
-                                fontWeight:
-                                    FontWeight.w900,
-                              ),
-                            ),
-                          ),
-                          _pill(
-                            '$count OCCURRENCES',
-                            color: _amber,
-                          ),
-                        ],
-                      ),
-                      if (recommendation.isNotEmpty) ...[
-                        const SizedBox(height: 7),
-                        Text(
-                          recommendation,
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 9.5,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              );
-            }),
-        ],
-      ),
-    );
-  }
-
-  Widget _settingsPage() {
-    final thresholdsRaw =
-        forwardStatus['thresholds'];
-    final thresholds = thresholdsRaw is Map
-        ? Map<String, dynamic>.from(
-            thresholdsRaw,
-          )
-        : <String, dynamic>{};
-
-    final historyRaw =
-        forwardStatus['historical_validation'];
-    final history = historyRaw is Map
-        ? Map<String, dynamic>.from(historyRaw)
-        : <String, dynamic>{};
-
-    return RefreshIndicator(
-      onRefresh: refreshAll,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(
-          14,
-          6,
-          14,
-          110,
-        ),
-        children: [
-          _sectionTitle(
-            'SETTINGS — RUNTIME VIEW',
-            trailing: 'read-only mobile',
-          ),
-          const SizedBox(height: 10),
-          _connectionBanner(),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'BACKEND',
-                  style: TextStyle(
-                    color: _teal,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                SelectableText(
-                  apiBase,
+                const SizedBox(height: 12),
+                Text(
+                  mode,
                   style: const TextStyle(
                     color: Colors.white70,
-                    fontSize: 10,
+                    fontWeight:
+                        FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'AI directional floor: ${formatNumber(aiFloor, decimals: 0)}% • N30 disabled for this experiment',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    statTile(
+                      'Watchers',
+                      '$activeWatchers',
+                      Icons.visibility_outlined,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'IG Open Trades',
+                      '$openTrades',
+                      Icons.receipt_long_outlined,
+                      valueColor:
+                          (openTrades is num && openTrades > 0)
+                              ? Colors.lightBlueAccent
+                              : Colors.white,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    statTile(
+                      'Active Signals',
+                      '$activeSignalRecords',
+                      Icons.radar_rounded,
+                      valueColor:
+                          (activeSignalRecords is num &&
+                                  activeSignalRecords > 0)
+                              ? Colors.amberAccent
+                              : Colors.white,
+                    ),
+                    const SizedBox(width: 10),
+                    statTile(
+                      'AI40 floor',
+                      '${formatNumber(aiFloor, decimals: 0)}%',
+                      Icons
+                          .verified_outlined,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child:
+                          FilledButton.icon(
+                        onPressed:
+                            aiLearningBusy
+                                ? null
+                                : runAiLearningNow,
+                        icon:
+                            aiLearningBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child:
+                                        CircularProgressIndicator(
+                                      strokeWidth:
+                                          2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons
+                                        .auto_awesome_rounded,
+                                  ),
+                        label: Text(
+                          aiLearningBusy
+                              ? 'AI evaluating...'
+                              : 'Run AI cycle now',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip:
+                          'Refresh AI learning',
+                      onPressed: () async {
+                        await loadAutoDashboard();
+                        await loadAiLearningStatus();
+                      },
+                      icon: const Icon(
+                        Icons.refresh_rounded,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (openAiTrade != null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Current IG DEMO forward trade',
+              subtitle:
+                  'Accepted broker trades only • signals may wait for IG separately',
+            ),
+            learningTradeCard(
+              openAiTrade,
+            ),
+          ] else if (aiTrades.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Latest IG DEMO learning outcome',
+            ),
+            learningTradeCard(
+              aiTrades.first,
+            ),
+          ],
+          if (aiLearningLastRun !=
+              null) ...[
+            const SizedBox(height: 20),
+            sectionTitle(
+              'Last AI decision',
+            ),
+            glassCard(
+              glow: aiLearningLastRun![
+                          'status']
+                      ?.toString() ==
+                  'PAPER_TRADE_OPENED'
+                  ? Colors.greenAccent
+                  : Colors.amberAccent,
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    aiLearningLastRun![
+                                'status']
+                            ?.toString() ??
+                        '-',
+                    style: const TextStyle(
+                      fontWeight:
+                          FontWeight.w900,
+                      fontSize: 15,
+                    ),
+                  ),
+                  if (aiLearningLastRun![
+                          'selected']
+                      is Map) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Builder(
+                      builder: (_) {
+                        final selected =
+                            Map<String,
+                                dynamic>.from(
+                          aiLearningLastRun![
+                              'selected'],
+                        );
+
+                        return Text(
+                          '${selected['market'] ?? selected['symbol'] ?? '-'} '
+                          '${selected['candidate_direction'] ?? ''} • '
+                          'AI ${selected['model_ai_directional_confidence_pct'] ?? '-'}% • '
+                          'Quant ${selected['quant_confidence_pct'] ?? '-'}%',
+                          style:
+                              const TextStyle(
+                            color:
+                                Colors.white70,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                  if (aiLearningLastRun![
+                          'error'] !=
+                      null) ...[
+                    const SizedBox(
+                      height: 8,
+                    ),
+                    Text(
+                      aiLearningLastRun![
+                              'error']
+                          .toString(),
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.redAccent,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'AI learning watchers',
+            subtitle:
+                'A/A+ shadow candidates are isolated from normal production entries',
+          ),
+          if (aiLearningWatchers.isEmpty)
+            glassCard(
+              child: const Text(
+                'No AI-learning watchers yet. Auto Manager will supply new candidates automatically.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          else
+            ...aiLearningWatchers
+                .take(6)
+                .map(
+                  (watcher) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child:
+                        learningWatcherCard(
+                      watcher,
+                    ),
+                  ),
+                ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Jasong AI Copilot',
+            subtitle:
+                'Advisory analysis of forward evidence and risk',
+          ),
+          glassCard(
+            glow: cs.secondary,
+            child: Column(
+              children: [
+                TextField(
+                  controller:
+                      copilotController,
+                  minLines: 3,
+                  maxLines: 5,
+                  decoration:
+                      const InputDecoration(
+                    hintText:
+                        'Ask Jasong AI about trades, watchers, losses or confidence buckets...',
+                    prefixIcon: Icon(
+                      Icons
+                          .psychology_alt_rounded,
+                    ),
+                  ),
+                ),
+                const SizedBox(
+                  height: 10,
+                ),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: copilotBusy
+                        ? null
+                        : () =>
+                            askJasongCopilot(),
+                    icon: copilotBusy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(
+                            Icons
+                                .auto_awesome_rounded,
+                          ),
+                    label: Text(
+                      copilotBusy
+                          ? 'Analysing...'
+                          : 'Ask Jasong AI',
+                    ),
+                  ),
+                ),
+                const SizedBox(
+                  height: 8,
+                ),
+                SizedBox(
+                  width: double.infinity,
+                  child:
+                      OutlinedButton.icon(
+                    onPressed: copilotBusy
+                        ? null
+                        : runOvernightReview,
+                    icon: const Icon(
+                      Icons
+                          .nights_stay_rounded,
+                    ),
+                    label: const Text(
+                      'Analyse overnight performance',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (copilotAnswer
+              .isNotEmpty) ...[
+            const SizedBox(height: 12),
+            glassCard(
+              child: SelectableText(
+                copilotAnswer,
+                style: const TextStyle(
+                  color: Colors.white70,
+                  height: 1.45,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Learning thresholds',
+            subtitle:
+                'Experimental forward eligibility — not win probabilities',
+          ),
+          glassCard(
+            child: const Column(
+              children: [
+                _MidnightRuleRow(
+                  'AI40',
+                  '40%',
+                  'Directional model-AI + live direction agreement',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'EM',
+                  'Experimental',
+                  'High-quality shadow promoted for IG DEMO forward learning only',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'SHADOW',
+                  'ON',
+                  'Rejected opportunities remain learning evidence',
+                ),
+                Divider(height: 24),
+                _MidnightRuleRow(
+                  'IG DEMO BROKER',
+                  'ON',
+                  'Demo broker orders are mirrored to IG • live money remains OFF',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle(
+            'Normal observation portfolio',
+          ),
+          if (serverWatchers.isEmpty)
+            glassCard(
+              child: const Text(
+                'No normal active watchers loaded.',
+                style: TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          else
+            ...serverWatchers
+                .take(6)
+                .map(
+                  (w) => Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 10,
+                    ),
+                    child: watcherCard(w),
+                  ),
+                ),
+        ],
+      );
+    }
+
+    Widget settingsPage() {
+      final overviewStatus = systemOverview?['status']?.toString() ??
+          systemOverview?['overall_status']?.toString() ??
+          (autoDashboard != null ? 'ONLINE' : 'CHECKING');
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 120),
+        children: [
+          sectionTitle('Trading preferences'),
+          glassCard(
+            child: Column(
+              children: [
+                TextField(
+                  controller: symbol,
+                  decoration: const InputDecoration(
+                    labelText: 'Market symbol',
+                    prefixIcon: Icon(Icons.currency_exchange_rounded),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: balance,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Reference balance',
+                    prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: risk,
+                  decoration: const InputDecoration(
+                    labelText: 'Risk mode',
+                    prefixIcon: Icon(Icons.shield_outlined),
+                  ),
+                  items: ['Conservative', 'Balanced', 'Aggressive']
+                      .map((value) => DropdownMenuItem<String>(value: value, child: Text(value)))
+                      .toList(),
+                  onChanged: busy
+                      ? null
+                      : (value) => setState(() => risk = value ?? 'Balanced'),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: busy ? null : refreshSignal,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Refresh current signal'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('Auto Manager'),
+          glassCard(
+            glow: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Icon(autoOn ? Icons.bolt_rounded : Icons.pause_circle_outline, color: autoOn ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(autoOn ? 'Auto Manager is running' : 'Auto Manager is stopped', style: const TextStyle(fontWeight: FontWeight.w900)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: autoManagerBusy ? null : (autoOn ? stopAutoMode : startAutoMode),
+                    icon: Icon(autoOn ? Icons.stop_circle_outlined : Icons.play_circle_outline),
+                    label: Text(autoOn ? 'Stop Auto Mode' : 'Start Auto Mode'),
                   ),
                 ),
                 const SizedBox(height: 8),
-                _settingRow(
-                  'Connection',
-                  lastUpdated == null
-                      ? 'WAITING'
-                      : 'CONNECTED',
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: autoManagerBusy ? null : runAutoManagerNow,
+                    icon: const Icon(Icons.bolt_rounded),
+                    label: const Text('Run one cycle now'),
+                  ),
                 ),
-                _settingRow(
-                  'Last update',
-                  _timeLabel(),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          sectionTitle('System health'),
+          glassCard(
+            child: Column(
+              children: [
+                _MidnightSystemRow('Backend', overviewStatus),
+                const Divider(height: 24),
+                _MidnightSystemRow('API endpoint', apiBase.replaceFirst('https://', '')),
+                const Divider(height: 24),
+                const _MidnightSystemRow('Execution', 'IG DEMO ONLY'),
+                const Divider(height: 24),
+                const _MidnightSystemRow('Live money', 'OFF'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: systemDiagnosticBusy ? null : runSystemDiagnostic,
+              icon: systemDiagnosticBusy
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.health_and_safety_outlined),
+              label: Text(systemDiagnosticBusy ? 'Running diagnostic...' : 'Run system diagnostic'),
+            ),
+          ),
+          if (systemDiagnostic != null) ...[
+            const SizedBox(height: 12),
+            glassCard(
+              child: SelectableText(
+                const JsonEncoder.withIndent('  ').convert(systemDiagnostic),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white60),
+              ),
+            ),
+          ],
+        ],
+      );
+    }
+
+
+    // =========================================================
+    // V6.9.4 FORWARD UI — original full mobile surface preserved
+    // Visual contract follows the supplied six-screen reference:
+    // Home • Markets • Compound • Trades • AI • Settings.
+    // All values below remain live API-backed; no demo values are fabricated.
+    // =========================================================
+
+    const templateTeal = Color(0xFF63E6D0);
+    const templateGreen = Color(0xFF64E9B4);
+    const templateRed = Color(0xFFFF6C7C);
+    const templateAmber = Color(0xFFFFCE55);
+    const templateBlue = Color(0xFF66B9FF);
+    const templatePanel = Color(0xFF0C1A24);
+    const templateBorder = Color(0xFF24414A);
+
+    Widget templateCard({
+      required Widget child,
+      EdgeInsets padding = const EdgeInsets.all(16),
+      Color? borderColor,
+      double radius = 18,
+    }) {
+      return Container(
+        padding: padding,
+        decoration: BoxDecoration(
+          color: templatePanel,
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(
+            color: (borderColor ?? templateBorder).withValues(alpha: .92),
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x22000000),
+              blurRadius: 18,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
+      );
+    }
+
+    Widget templateMetric({
+      required String label,
+      required String value,
+      required IconData icon,
+      Color color = templateTeal,
+    }) {
+      return Expanded(
+        child: templateCard(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 18, color: color),
+              const SizedBox(height: 13),
+              Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color == templateTeal ? Colors.white : color,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
                 ),
-                _settingRow(
-                  'Data cache',
-                  '${dataHealth['memory_entries'] ?? '—'} markets',
+              ),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget templateTinyPill(
+      String text, {
+      Color color = templateTeal,
+      IconData? icon,
+    }) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .11),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: color.withValues(alpha: .34)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 12, color: color),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              text,
+              style: TextStyle(
+                color: color,
+                fontSize: 9.5,
+                fontWeight: FontWeight.w900,
+                letterSpacing: .2,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    String templatePercent(dynamic value) {
+      if (value == null) return '--';
+      final n = value is num ? value.toDouble() : double.tryParse('$value');
+      if (n == null) return '--';
+      final pct = n.abs() <= 1.0 ? n * 100.0 : n;
+      return '${pct.toStringAsFixed(1)}%';
+    }
+
+    String templateMoney(dynamic value, {String fallback = '--'}) {
+      if (value == null) return fallback;
+      final n = value is num ? value.toDouble() : double.tryParse('$value');
+      if (n == null) return fallback;
+      final sign = n >= 0 ? '+' : '-';
+      return '$sign${n.abs().toStringAsFixed(2)}';
+    }
+
+    Color templateStateColor(String state) {
+      final value = state.toUpperCase();
+      if (value.contains('PRIME') || value.contains('STRONG') || value.contains('BUY') || value.contains('WIN') || value.contains('OPEN')) {
+        return templateGreen;
+      }
+      if (value.contains('SELL') || value.contains('LOSS') || value.contains('REJECT')) {
+        return templateRed;
+      }
+      if (value.contains('WAIT') || value.contains('WATCH')) {
+        return templateAmber;
+      }
+      return templateTeal;
+    }
+
+    String templateRegimeLabel(String raw) {
+      final r = raw.toUpperCase();
+      if (r.contains('BREAK')) return 'BREAKOUT';
+      if (r.contains('TREND') || r.contains('MOMENTUM')) return 'TRENDING';
+      if (r.contains('RANGE') || r.contains('REVERSION') || r.contains('SIDEWAYS')) return 'RANGING';
+      if (r.contains('NORMAL')) return 'RANGING';
+      return r.length > 9 ? r.substring(0, 9) : r;
+    }
+
+    IconData templateAssetIcon(String raw) {
+      final a = raw.toUpperCase();
+      if (a.contains('FX') || a.contains('FOREX')) return Icons.currency_exchange_rounded;
+      if (a.contains('CRYPTO')) return Icons.currency_exchange_rounded;
+      if (a.contains('INDEX')) return Icons.show_chart_rounded;
+      if (a.contains('SHARE')) return Icons.business_center_outlined;
+      if (a.contains('COMMOD') || a.contains('METAL') || a.contains('ENERGY')) return Icons.water_drop_outlined;
+      return Icons.insights_rounded;
+    }
+
+    String templateMarketState(Map<String, dynamic> row) {
+      final forwardRaw = row['forward_validation'];
+      final forward = forwardRaw is Map
+          ? Map<String, dynamic>.from(forwardRaw)
+          : <String, dynamic>{};
+      if (row['compound_eligible'] == true ||
+          row['prime_qualified'] == true ||
+          forward['prime_eligible'] == true) {
+        return 'PRIME';
+      }
+      final fast = double.tryParse(
+            '${row['live_fast_score'] ?? row['smart_fast_score'] ?? row['fast_score'] ?? 0}',
+          ) ??
+          0;
+      final q = double.tryParse('${row['quant_confidence'] ?? row['quant'] ?? 0}') ?? 0;
+      final ai = double.tryParse('${row['model_ai_confidence'] ?? row['ai_up'] ?? row['combined_up_probability'] ?? 0}') ?? 0;
+      final qPct = q.abs() <= 1 ? q * 100 : q;
+      final aiPct = ai.abs() <= 1 ? ai * 100 : ai;
+      if (row['strong_qualified'] == true ||
+          '${row['trade_class'] ?? ''}'.toUpperCase() == 'STRONG' ||
+          (fast >= 45 && qPct >= 28 && aiPct >= 40)) {
+        return 'STRONG';
+      }
+      return 'WATCH';
+    }
+
+    Widget templateHomePage() {
+      final systemGood = autoOn && (systemOverview != null || autoDashboard != null);
+      final phaseText = '$igAccepted / $igPhaseTarget';
+      final primeQueue = compoundPending;
+      final progressValue = progress <= 0 && autoOn ? 85.0 : progress.clamp(0, 100);
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          templateCard(
+            borderColor: templateTeal,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text('SYSTEM STATUS', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: .5)),
+                    const SizedBox(width: 7),
+                    templateTinyPill(systemGood ? 'ALL SYSTEMS GO' : 'CHECKING', color: systemGood ? templateGreen : templateAmber),
+                    const Spacer(),
+                    const Text('V6.9.4-forward', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  autoOn ? 'ADAPTIVE STRATEGY ACTIVE' : 'ADAPTIVE STRATEGY PAUSED',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: .2),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '15s opportunity assessment cycle',
+                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                ),
+                const SizedBox(height: 16),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(99),
+                  child: LinearProgressIndicator(
+                    value: progressValue / 100,
+                    minHeight: 6,
+                    backgroundColor: Colors.white12,
+                    color: templateTeal,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Row(
+                  children: [
+                    Text('Next assessment: ${formatEpochTime(summary['next_scan_at'])}', style: const TextStyle(color: Colors.white54, fontSize: 9.5)),
+                    const Spacer(),
+                    Text('${progressValue.round()}%', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w900)),
+                  ],
                 ),
               ],
             ),
           ),
           const SizedBox(height: 10),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'FORWARD PRIME THRESHOLDS',
-                  style: TextStyle(
-                    color: _teal,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _settingRow(
-                  'Minimum settled trades',
-                  '${thresholds['min_settled_trades_for_prime'] ?? 12}',
-                ),
-                _settingRow(
-                  'Profit factor',
-                  '≥ ${_num(thresholds['min_profit_factor'] ?? 1.2).toStringAsFixed(2)}',
-                ),
-                _settingRow(
-                  'Expectancy',
-                  '≥ +${_num(thresholds['min_expectancy_r'] ?? .05).toStringAsFixed(2)}R',
-                ),
-                _settingRow(
-                  'Win rate',
-                  '≥ ${_pct(thresholds['min_win_rate'] ?? .45).toStringAsFixed(0)}%',
-                ),
-                _settingRow(
-                  'Bootstrap',
-                  '≥ ${_pct(thresholds['min_bootstrap_prob_positive_expectancy'] ?? .75).toStringAsFixed(0)}%',
-                ),
-                _settingRow(
-                  'Max drawdown',
-                  '≤ ${_num(thresholds['max_drawdown_r'] ?? 6).toStringAsFixed(1)}R',
-                ),
-              ],
+          Row(children: [
+            templateMetric(label: 'IG DEMO BALANCE', value: igBalance != null ? '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(igBalance)}' : '--', icon: Icons.account_balance_wallet_outlined),
+            const SizedBox(width: 9),
+            templateMetric(label: 'BROKER POSITIONS', value: '$brokerCapacityOpen / $brokerCapacityMax', icon: Icons.swap_horiz_rounded),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(label: 'ACTIVE WATCHERS', value: '$activeWatchers / $targetWatchers', icon: Icons.visibility_outlined),
+            const SizedBox(width: 9),
+            templateMetric(label: 'LEARNING PHASE', value: phaseText, icon: Icons.flag_outlined),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(label: 'COMPOUND STATUS', value: compoundStatus.replaceAll('_', ' '), icon: Icons.autorenew_rounded, color: compoundEnabled ? templateGreen : templateAmber),
+            const SizedBox(width: 9),
+            templateMetric(label: 'PRIME QUEUE', value: '$primeQueue / 5', icon: Icons.stars_outlined),
+          ]),
+          const SizedBox(height: 9),
+          Row(children: [
+            templateMetric(
+              label: 'ADAPTIVE TARGET',
+              value: '${compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier'] ?? '--'}${(compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier']) != null ? '×' : ''}',
+              icon: Icons.track_changes_rounded,
+              color: templateGreen,
             ),
-          ),
-          const SizedBox(height: 10),
-          _card(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
+            const SizedBox(width: 9),
+            templateMetric(
+              label: 'RECENT BROKER WR',
+              value: templatePercent(igLifetimeWinRate),
+              icon: Icons.query_stats_rounded,
+              color: templateTeal,
+            ),
+          ]),
+          const SizedBox(height: 11),
+          templateCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            borderColor: templateTeal,
+            child: Row(
               children: [
-                const Text(
-                  'HISTORICAL VALIDATION',
-                  style: TextStyle(
-                    color: _teal,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
+                const Icon(Icons.schedule_rounded, color: templateTeal, size: 19),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('15-SECOND ASSESSMENT ENGINE', style: TextStyle(color: templateTeal, fontSize: 10, fontWeight: FontWeight.w900)),
+                      SizedBox(height: 2),
+                      Text('Markets re-evaluated every 15 seconds', style: TextStyle(color: Colors.white60, fontSize: 10)),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 8),
-                _settingRow(
-                  'Mode',
-                  '${history['mode'] ?? 'INFORMATIONAL_ONLY'}',
-                ),
-                _settingRow(
-                  'Execution veto',
-                  '${history['execution_veto'] ?? false}',
                 ),
               ],
             ),
           ),
         ],
+      );
+    }
+
+    Widget templateMarketsPage() {
+      final rows = globalMarketCandidates.map((e) => Map<String, dynamic>.from(e)).toList();
+      List<Map<String, dynamic>> filtered(String view) {
+        if (view == 'ALL') return rows;
+        return rows.where((row) => templateMarketState(row) == view).toList();
+      }
+      final visible = filtered(marketView);
+      Widget filterButton(String label) {
+        final selected = marketView == label;
+        final count = label == 'ALL' ? rows.length : filtered(label).length;
+        return Expanded(
+          child: InkWell(
+            onTap: () => setState(() => marketView = label),
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                color: selected ? templateTeal.withValues(alpha: .13) : Colors.transparent,
+                borderRadius: BorderRadius.circular(10),
+                border: Border(bottom: BorderSide(color: selected ? templateTeal : Colors.transparent, width: 2)),
+              ),
+              child: Text('$label ($count)', textAlign: TextAlign.center, style: TextStyle(color: selected ? templateTeal : Colors.white54, fontSize: 9.5, fontWeight: FontWeight.w900)),
+            ),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          Row(children: const [
+            Expanded(child: Text('GLOBAL OPPORTUNITIES', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900))),
+            Text('V6.9.4-forward', style: TextStyle(color: Colors.white54, fontSize: 9)),
+          ]),
+          const SizedBox(height: 3),
+          const Text('Live market intelligence • Assessed every 15s', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 12),
+          templateCard(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+              children: [
+                Row(children: [filterButton('ALL'), filterButton('PRIME'), filterButton('STRONG'), filterButton('WATCH')]),
+                const Divider(height: 14, color: Colors.white10),
+                Row(children: const [
+                  Expanded(flex: 24, child: Text('MARKET', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 18, child: Text('REGIME', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 12, child: Text('AI UP', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 12, child: Text('QUANT', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 10, child: Text('FAST', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                  Expanded(flex: 16, child: Text('STATE', textAlign: TextAlign.right, style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                ]),
+                const SizedBox(height: 4),
+                if (visible.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 28),
+                    child: Text('No markets in this state yet', style: TextStyle(color: Colors.white54, fontSize: 11)),
+                  )
+                else
+                  ...visible.take(45).map((row) {
+                    final name = row['market']?.toString() ?? row['name']?.toString() ?? row['symbol']?.toString() ?? '-';
+                    final asset = row['asset_class']?.toString() ?? row['category']?.toString() ?? '';
+                    final rawRegime = row['regime']?.toString().toUpperCase() ?? 'UNKNOWN';
+                    final regime = templateRegimeLabel(rawRegime);
+                    final state = templateMarketState(row);
+                    final ai = row['model_ai_confidence'] ?? row['ai_up'] ?? row['combined_up_probability'];
+                    final quant = row['quant_confidence'] ?? row['quant'];
+                    final fast = row['smart_fast_score'] ?? row['fast_score'] ?? 0;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0x151FFFFFFF)))),
+                      child: Row(children: [
+                        Expanded(flex: 24, child: Row(children: [
+                          Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(color: templateTeal.withValues(alpha: .10), borderRadius: BorderRadius.circular(8)),
+                            child: Icon(templateAssetIcon(asset), size: 12, color: templateTeal),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900)),
+                            Text(asset, style: const TextStyle(color: Colors.white38, fontSize: 7.2)),
+                          ])),
+                        ])),
+                        Expanded(flex: 18, child: templateTinyPill(regime, color: regime.contains('BREAK') ? templateRed : (regime.contains('TREND') ? templateGreen : templateAmber))),
+                        Expanded(flex: 12, child: Text(templatePercent(ai), style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 12, child: Text(templatePercent(quant), style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 10, child: Text('${double.tryParse('$fast')?.toStringAsFixed(0) ?? '--'}', style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800))),
+                        Expanded(flex: 16, child: Align(alignment: Alignment.centerRight, child: templateTinyPill(state, color: templateStateColor(state)))),
+                      ]),
+                    );
+                  }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(children: const [
+            Icon(Icons.stars_rounded, color: templateGreen, size: 14),
+            SizedBox(width: 7),
+            Expanded(child: Text('FORWARD PRIME: Quant ≥28% • AI ≥40% • Fast ≥45 • 12+ broker-settled • PF ≥1.20 • Exp ≥+0.05R • WR ≥45% • Bootstrap ≥75% • DD ≤6R • history = info', style: TextStyle(color: Colors.white60, fontSize: 9.5, height: 1.35))),
+          ]),
+        ],
+      );
+    }
+
+    Map<String, dynamic> templateTargetEvidence(double target) {
+      final optimizer = compound['target_optimizer'] is Map
+          ? Map<String, dynamic>.from(compound['target_optimizer'] as Map)
+          : compound['adaptive_target_optimizer'] is Map
+              ? Map<String, dynamic>.from(compound['adaptive_target_optimizer'] as Map)
+              : <String, dynamic>{};
+      final options = optimizer['options'] is List
+          ? optimizer['options'] as List
+          : optimizer['targets'] is List
+              ? optimizer['targets'] as List
+              : const [];
+      for (final raw in options) {
+        if (raw is! Map) continue;
+        final row = Map<String, dynamic>.from(raw);
+        final mult = double.tryParse('${row['multiplier'] ?? row['target'] ?? 0}') ?? 0;
+        if ((mult - target).abs() < .01) return row;
+      }
+      return <String, dynamic>{};
+    }
+
+    Widget templateMiniMetric(String label, String value, IconData icon, {Color color = templateTeal}) {
+      return Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0A1720),
+            borderRadius: BorderRadius.circular(13),
+            border: Border.all(color: templateBorder),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(icon, size: 14, color: color),
+            const SizedBox(height: 8),
+            Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: color == templateTeal ? Colors.white : color, fontSize: 13.5, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 2),
+            Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 7.8)),
+          ]),
+        ),
+      );
+    }
+
+    Widget templateCompoundPage() {
+      final selectedRaw = compound['adaptive_target_multiplier'] ?? compound['target_multiplier'] ?? compound['selected_target_multiplier'] ?? compound['adaptive_target'];
+      final selectedTarget = double.tryParse('${selectedRaw ?? 0}') ?? 0;
+      Widget targetBox(double target, String gain) {
+        final ev = templateTargetEvidence(target);
+        final selected = (selectedTarget - target).abs() < .01;
+        final score = ev['score'] ?? ev['composite_score'];
+        final wr = ev['win_rate_pct'] ?? ev['win_rate'];
+        return Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+            decoration: BoxDecoration(
+              color: selected ? templateGreen.withValues(alpha: .08) : const Color(0xFF0A1720),
+              borderRadius: BorderRadius.circular(13),
+              border: Border.all(color: selected ? templateGreen : templateBorder),
+            ),
+            child: Column(children: [
+              Text('${target.toStringAsFixed(1)}×', style: TextStyle(color: target == 1.2 ? templateRed : target == 1.3 ? templateAmber : templateGreen, fontSize: 16, fontWeight: FontWeight.w900)),
+              Text(gain, style: const TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 5),
+              Text(score == null ? 'Score --' : 'Score ${formatNumber(score, decimals: 2)}', style: const TextStyle(color: Colors.white60, fontSize: 8.5)),
+              Text(wr == null ? 'WR --' : 'WR ${templatePercent(wr)}', style: TextStyle(color: selected ? templateGreen : Colors.white54, fontSize: 8.5, fontWeight: FontWeight.w800)),
+            ]),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          templateCard(
+            borderColor: templateTeal,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Icon(Icons.autorenew_rounded, color: templateTeal),
+                const SizedBox(width: 9),
+                const Expanded(child: Text('ELITE 80/20 COMPOUND', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900))),
+                const Text('V6.9.4-forward', style: TextStyle(color: Colors.white54, fontSize: 9)),
+              ]),
+              const SizedBox(height: 8),
+              templateTinyPill(compoundStatus.replaceAll('_', ' '), color: compoundEnabled ? templateGreen : templateAmber),
+              const SizedBox(height: 8),
+              const Text('• Best available 1–5 markets • top 2 category candidates\n• Adaptive target • 20% harvest • IG DEMO only\n• AI ≥40% • Quant ≥28% • Fast ≥45\n• PRIME = broker-settled forward only • 12+ settled • PF ≥1.20 • Exp ≥+0.05R • WR ≥45% • Bootstrap ≥75% • DD ≤6R', style: TextStyle(color: Colors.white60, fontSize: 9.5, height: 1.55)),
+              const SizedBox(height: 13),
+              Row(children: [
+                templateMiniMetric('Cycle', '#$compoundCycle', Icons.refresh_rounded),
+                const SizedBox(width: 7),
+                templateMiniMetric('Current Capital', compoundCapital == null ? '--' : '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(compoundCapital)}', Icons.account_balance_wallet_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Reserve', '${igCurrency.isNotEmpty ? '$igCurrency ' : ''}${formatMoney(compoundReserve)}', Icons.savings_outlined),
+              ]),
+              const SizedBox(height: 8),
+              Row(children: [
+                templateMiniMetric('Basket (PRIME)', '$compoundOpen / $compoundMax', Icons.grid_view_rounded),
+                const SizedBox(width: 7),
+                templateMiniMetric('Basket P&L', templateMoney(compoundPnl, fallback: '0.00'), Icons.show_chart_rounded, color: (double.tryParse('$compoundPnl') ?? 0) >= 0 ? templateGreen : templateRed),
+                const SizedBox(width: 7),
+                templateMiniMetric('Environment', 'IG DEMO', Icons.cloud_outlined),
+              ]),
+              const SizedBox(height: 8),
+              Row(children: [
+                templateMiniMetric('Broker Capacity', '$brokerCapacityOpen / $brokerCapacityMax', Icons.hub_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Compound Capacity', '$compoundOpen / $compoundMax', Icons.layers_outlined),
+                const SizedBox(width: 7),
+                templateMiniMetric('Available Slots', '${(brokerCapacityMax - brokerCapacityOpen).clamp(0, brokerCapacityMax)}', Icons.add_circle_outline_rounded),
+              ]),
+              const SizedBox(height: 15),
+              const Text('ADAPTIVE TARGET OPTIMIZER', style: TextStyle(color: templateTeal, fontSize: 10, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 3),
+              const Text('Mode: ADAPTIVE • Evidence: Genuine IG DEMO cycles', style: TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 10),
+              Row(children: [targetBox(1.2, '+20%'), const SizedBox(width: 7), targetBox(1.3, '+30%'), const SizedBox(width: 7), targetBox(1.5, '+50%')]),
+              const SizedBox(height: 9),
+              Text(selectedTarget > 0 ? 'Selected target: ${selectedTarget.toStringAsFixed(1)}× from current optimizer evidence.' : 'Selected target: waiting for sufficient optimizer evidence.', style: const TextStyle(color: Colors.white54, fontSize: 8.5)),
+              const SizedBox(height: 12),
+              const Divider(color: Colors.white10),
+              Row(children: [
+                const Icon(Icons.psychology_alt_outlined, color: templateTeal, size: 17),
+                const SizedBox(width: 8),
+                Expanded(child: Text('STRATEGY INTELLIGENCE • ${compoundBridgeState.replaceAll('_', ' ')}', style: const TextStyle(color: templateTeal, fontSize: 9.5, fontWeight: FontWeight.w900))),
+              ]),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: openCompoundDashboard,
+                  style: FilledButton.styleFrom(backgroundColor: templateTeal, foregroundColor: const Color(0xFF041014), padding: const EdgeInsets.symmetric(vertical: 13)),
+                  icon: const Icon(Icons.dashboard_customize_rounded, size: 18),
+                  label: const Text('Open Compound Strategy', style: TextStyle(fontWeight: FontWeight.w900)),
+                ),
+              ),
+            ]),
+          ),
+        ],
+      );
+    }
+
+    Widget templateTradesPage() {
+      final all = paperTrades.map((e) => Map<String, dynamic>.from(e)).toList();
+      final openRows = all.where((r) => '${r['status']}'.toUpperCase() == 'OPEN').toList();
+      final closedRows = all.where((r) {
+        final st = '${r['status']}'.toUpperCase();
+        return st == 'WIN' || st == 'LOSS' || st == 'CLOSED';
+      }).toList();
+      final rows = tradeView == 'OPEN' ? openRows : closedRows;
+      Widget tab(String name, int count) {
+        final selected = tradeView == name;
+        return Expanded(
+          child: InkWell(
+            onTap: () => setState(() => tradeView = name),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(border: Border(bottom: BorderSide(color: selected ? templateTeal : Colors.transparent, width: 2))),
+              child: Text('$name ($count)', textAlign: TextAlign.center, style: TextStyle(color: selected ? templateTeal : Colors.white54, fontSize: 9.5, fontWeight: FontWeight.w900)),
+            ),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text('TRADES — IG DEMO ALL TRADES', style: TextStyle(color: templateTeal, fontSize: 15, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          const Text('Genuine IG DEMO executed trades', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 10),
+          templateCard(
+            padding: const EdgeInsets.all(10),
+            child: Column(children: [
+              Row(children: [tab('OPEN', openRows.length), tab('CLOSED', closedRows.length), const Expanded(child: Center(child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.filter_list_rounded, size: 13, color: Colors.white54), SizedBox(width: 4), Text('FILTER', style: TextStyle(color: Colors.white54, fontSize: 9, fontWeight: FontWeight.w900))])))]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: Column(children: [Text('$igLifetimeSettled', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Total Trades', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text('$igLifetimeWins', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Wins', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text('$igLifetimeLosses', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Losses', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(templatePercent(igLifetimeWinRate), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)), const Text('Win Rate', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+                Expanded(child: Column(children: [Text(templateMoney(igRunningPnl, fallback: '0.00'), style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: (double.tryParse('$igRunningPnl') ?? 0) >= 0 ? templateGreen : templateRed)), const Text('P&L', style: TextStyle(color: Colors.white54, fontSize: 8.5))])),
+              ]),
+              const Divider(height: 18, color: Colors.white10),
+              Row(children: const [
+                Expanded(flex: 23, child: Text('MARKET', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 15, child: Text('DIRECTION', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 15, child: Text('RESULT', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 22, child: Text('P&L', style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+                Expanded(flex: 25, child: Text('CLOSED AT', textAlign: TextAlign.right, style: TextStyle(color: Colors.white38, fontSize: 8, fontWeight: FontWeight.w900))),
+              ]),
+              if (rows.isEmpty)
+                const Padding(padding: EdgeInsets.symmetric(vertical: 26), child: Text('No trades in this view yet', style: TextStyle(color: Colors.white54, fontSize: 10)))
+              else
+                ...rows.take(30).map((row) {
+                  final market = row['market']?.toString() ?? row['symbol']?.toString() ?? '-';
+                  final direction = row['direction']?.toString().toUpperCase() ?? '-';
+                  final result = row['status']?.toString().toUpperCase() ?? '-';
+                  final pnl = row['pnl'] ?? row['realized_pnl'] ?? row['profit_loss'];
+                  final closedAt = row['closed_at_iso']?.toString() ?? row['settled_at_iso']?.toString() ?? row['close_time_iso']?.toString() ?? '-';
+                  final c = templateStateColor(result);
+                  return Container(
+                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0x151FFFFFFF)))),
+                    child: Row(children: [
+                      Expanded(flex: 23, child: Text(market, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 15, child: Text(direction, style: TextStyle(color: sideColor(direction), fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 15, child: Text(result, style: TextStyle(color: c, fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 22, child: Text(pnl == null ? '--' : templateMoney(pnl), style: TextStyle(color: (double.tryParse('$pnl') ?? 0) >= 0 ? templateGreen : templateRed, fontSize: 9.5, fontWeight: FontWeight.w900))),
+                      Expanded(flex: 25, child: Text(closedAt.length > 16 ? closedAt.substring(5, 16).replaceFirst('T', ' ') : closedAt, textAlign: TextAlign.right, style: const TextStyle(color: Colors.white54, fontSize: 8.5))),
+                    ]),
+                  );
+                }),
+            ]),
+          ),
+        ],
+      );
+    }
+
+    Widget templateAiPage() {
+      final top = globalMarketCandidates.isNotEmpty
+          ? Map<String, dynamic>.from(globalMarketCandidates.first)
+          : <String, dynamic>{};
+      final aiMarket = top['market']?.toString() ??
+          top['name']?.toString() ??
+          symbol.text.trim();
+      final aiDirection =
+          top['direction']?.toString().toUpperCase() ?? liveDecision;
+      final aiValue = top['model_ai_confidence'] ??
+          unifiedLive['model_ai_confidence'] ??
+          sig?['combined_up_probability'];
+      final quantValue = top['quant_confidence'] ?? sig?['confidence'];
+      final fastValue = top['live_fast_score'] ??
+          top['smart_fast_score'] ??
+          top['fast_score'] ??
+          0;
+      final regime =
+          top['regime']?.toString().toUpperCase() ?? 'UNKNOWN';
+
+      final forwardRaw = top['forward_validation'];
+      final forward = forwardRaw is Map
+          ? Map<String, dynamic>.from(forwardRaw)
+          : <String, dynamic>{};
+
+      final aiNum = double.tryParse('${aiValue ?? 0}') ?? 0;
+      final aiPct = aiNum.abs() <= 1 ? aiNum * 100 : aiNum;
+      final qNum = double.tryParse('${quantValue ?? 0}') ?? 0;
+      final qPct = qNum.abs() <= 1 ? qNum * 100 : qNum;
+      final fastNum = double.tryParse('$fastValue') ?? 0;
+      final settled = int.tryParse('${forward['settled_trades'] ?? 0}') ?? 0;
+      final pfNum = double.tryParse('${forward['profit_factor'] ?? 0}') ?? 0;
+      final expNum = double.tryParse('${forward['expectancy_r'] ?? 0}') ?? 0;
+      final wrRaw = double.tryParse('${forward['win_rate'] ?? 0}') ?? 0;
+      final wrPct = wrRaw.abs() <= 1 ? wrRaw * 100 : wrRaw;
+      final bootRaw = double.tryParse(
+            '${forward['bootstrap_probability_positive_expectancy'] ?? 0}',
+          ) ??
+          0;
+      final bootPct = bootRaw.abs() <= 1 ? bootRaw * 100 : bootRaw;
+      final dd = double.tryParse('${forward['max_drawdown_r'] ?? 0}') ?? 0;
+
+      Widget gate(
+        String label,
+        String requirement,
+        String current,
+        bool pass, {
+        IconData icon = Icons.check_circle_outline_rounded,
+      }) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          child: Row(children: [
+            Icon(icon, size: 17, color: pass ? templateGreen : templateRed),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            Text(
+              requirement,
+              style: const TextStyle(color: Colors.white54, fontSize: 9),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              current,
+              style: TextStyle(
+                color: pass ? templateGreen : templateRed,
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ]),
+        );
+      }
+
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text(
+            'AI INTELLIGENCE',
+            style: TextStyle(
+              color: templateTeal,
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 3),
+          const Text(
+            'Strategy Intelligence & Broker-Settled Forward Evidence',
+            style: TextStyle(color: Colors.white54, fontSize: 10),
+          ),
+          const SizedBox(height: 12),
+          templateCard(
+            borderColor: const Color(0xFF7349A2),
+            child: Row(children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'CURRENT REGIME',
+                      style: TextStyle(
+                        color: Color(0xFFCE8CFF),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Market structure: ${regime.replaceAll('_', ' ')}',
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 9.5,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Adaptive strategy: ${top['strategy_name'] ?? top['strategy_id'] ?? 'Regime Adaptive'}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFFCE8CFF),
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.show_chart_rounded,
+                color: Color(0xFFCE8CFF),
+                size: 36,
+              ),
+            ]),
+          ),
+          const SizedBox(height: 10),
+          templateCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'LIVE SIGNAL (TOP)',
+                  style: TextStyle(
+                    color: templateTeal,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: Text(
+                      '$aiMarket  $aiDirection',
+                      style: TextStyle(
+                        color: templateStateColor(aiDirection),
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  templateTinyPill(
+                    templateMarketState(top),
+                    color: templateStateColor(templateMarketState(top)),
+                  ),
+                ]),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: Column(children: [
+                      Text(
+                        '${aiPct.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const Text(
+                        'AI directional',
+                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      ),
+                    ]),
+                  ),
+                  Expanded(
+                    child: Column(children: [
+                      Text(
+                        '${qPct.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const Text(
+                        'Quant',
+                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      ),
+                    ]),
+                  ),
+                  Expanded(
+                    child: Column(children: [
+                      Text(
+                        fastNum.toStringAsFixed(0),
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const Text(
+                        'Live Fast',
+                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      ),
+                    ]),
+                  ),
+                  Expanded(
+                    child: Column(children: [
+                      Text(
+                        '$settled',
+                        style: const TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const Text(
+                        'Settled',
+                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      ),
+                    ]),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          templateCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'FORWARD PRIME GATES (V6.9.4)',
+                  style: TextStyle(
+                    color: templateTeal,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                gate('AI directional gate', '≥ 40%', '${aiPct.toStringAsFixed(1)}%', aiPct >= 40),
+                gate('Quant normal gate', '≥ 28%', '${qPct.toStringAsFixed(1)}%', qPct >= 28, icon: Icons.analytics_outlined),
+                gate('Live Fast quality', '≥ 45', fastNum.toStringAsFixed(0), fastNum >= 45, icon: Icons.speed_rounded),
+                gate('Broker-settled sample', '≥ 12', '$settled', settled >= 12, icon: Icons.format_list_numbered_rounded),
+                gate('Profit factor', '≥ 1.20', pfNum.toStringAsFixed(2), pfNum >= 1.20, icon: Icons.show_chart_rounded),
+                gate('Expectancy', '≥ +0.05R', '${expNum >= 0 ? '+' : ''}${expNum.toStringAsFixed(2)}R', expNum >= .05, icon: Icons.trending_up_rounded),
+                gate('Win rate', '≥ 45%', '${wrPct.toStringAsFixed(1)}%', wrPct >= 45, icon: Icons.fact_check_outlined),
+                gate('Bootstrap positive expectancy', '≥ 75%', '${bootPct.toStringAsFixed(1)}%', bootPct >= 75, icon: Icons.science_outlined),
+                gate('Max drawdown', '≤ 6R', '${dd.toStringAsFixed(2)}R', dd <= 6, icon: Icons.shield_outlined),
+                const Divider(height: 18, color: Colors.white10),
+                const Row(children: [
+                  Icon(Icons.info_outline_rounded, color: templateBlue, size: 17),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Historical holdout / walk-forward evidence = INFORMATIONAL ONLY • no execution veto',
+                      style: TextStyle(
+                        color: templateBlue,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+                const Row(children: [
+                  Icon(Icons.cloud_done_outlined, color: templateGreen, size: 17),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Broker execution',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  Text(
+                    'IG DEMO',
+                    style: TextStyle(
+                      color: templateGreen,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+          if (aiLearningWatchers.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            const Text(
+              'AI learning watchers',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 8),
+            ...aiLearningWatchers.take(6).map(
+                  (w) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: watcherCard(w),
+                  ),
+                ),
+          ],
+        ],
+      );
+    }
+
+    Widget templateSettingsPage() {
+      final providerHealth = systemOverview?['market_data'] is Map
+          ? Map<String, dynamic>.from(systemOverview!['market_data'] as Map)
+          : <String, dynamic>{};
+      final providerCount = providerHealth['healthy_providers'] ?? providerHealth['providers_healthy'] ?? providerHealth['providers'] ?? '--';
+      Widget healthBox(IconData icon, String title, String value, Color color) {
+        return Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFF0A1720), borderRadius: BorderRadius.circular(13), border: Border.all(color: templateBorder)),
+            child: Column(children: [
+              Icon(icon, color: color, size: 18),
+              const SizedBox(height: 8),
+              Text(value, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 2),
+              Text(title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54, fontSize: 8)),
+            ]),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text('SETTINGS & SYSTEM', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          const Text('Configuration & Diagnostics', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const SizedBox(height: 12),
+          templateCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Text('SYSTEM HEALTH', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+                const Spacer(),
+                templateTinyPill((systemOverview != null || autoDashboard != null) ? 'HEALTHY' : 'CHECKING', color: (systemOverview != null || autoDashboard != null) ? templateGreen : templateAmber),
+              ]),
+              const SizedBox(height: 12),
+              Row(children: [
+                healthBox(Icons.cloud_done_outlined, 'Data Providers', '$providerCount', templateGreen),
+                const SizedBox(width: 7),
+                healthBox(Icons.verified_user_outlined, 'IG DEMO API', 'Connected', templateGreen),
+                const SizedBox(width: 7),
+                healthBox(Icons.bolt_rounded, 'Auto Manager', autoOn ? 'ON' : 'OFF', autoOn ? templateGreen : templateAmber),
+                const SizedBox(width: 7),
+                healthBox(Icons.timer_outlined, '15s Engine', 'Active', templateGreen),
+              ]),
+              const SizedBox(height: 15),
+              const Text('SYSTEM INFO', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              const _MidnightSystemRow('Version', 'V6.9.4-forward'),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Environment', 'DEMO ONLY'),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Execution Mode', 'Direct IG DEMO Execution'),
+              const Divider(height: 18, color: Colors.white10),
+              _MidnightSystemRow('Last System Check', DateTime.now().toIso8601String().substring(0, 19).replaceFirst('T', ' ')),
+              const Divider(height: 18, color: Colors.white10),
+              const _MidnightSystemRow('Qualification', '28Q / 40AI / 45Fast / 12 settled / 1.20PF / +0.05R / 45WR / 75 bootstrap / ≤6R DD'),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: systemDiagnosticBusy ? null : runSystemDiagnostic,
+                  style: FilledButton.styleFrom(backgroundColor: templateTeal, foregroundColor: const Color(0xFF041014), padding: const EdgeInsets.symmetric(vertical: 13)),
+                  icon: systemDiagnosticBusy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.shield_outlined),
+                  label: Text(systemDiagnosticBusy ? 'Running diagnostic...' : 'Run Full System Diagnostic', style: const TextStyle(fontWeight: FontWeight.w900)),
+                ),
+              ),
+            ]),
+          ),
+        ],
+      );
+    }
+
+    final pages = <Widget>[
+      templateHomePage(),
+      marketsPage(),
+      templateCompoundPage(),
+      templateTradesPage(),
+      templateAiPage(),
+      templateSettingsPage(),
+    ];
+
+    return Scaffold(
+      extendBody: true,
+      appBar: AppBar(
+        toolbarHeight: 76,
+        titleSpacing: 16,
+        title: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [cs.primary, cs.secondary]),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(Icons.auto_graph_rounded, color: Color(0xFF041014)),
+            ),
+            const SizedBox(width: 11),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  SizedBox(height: 2),
+                  Text('V6.9.4-forward • Broker-Settled Intelligence • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton.filledTonal(
+            tooltip: 'Refresh dashboard',
+            onPressed: () async {
+              await loadAutoDashboard();
+              await loadForwardPrimeMobileData();
+              await loadSystemOverview();
+              await loadAiLearningStatus();
+              await loadOvernightDemoStatus();
+              await loadGlobalMarkets();
+              await refreshServerWatchers();
+            },
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          const SizedBox(width: 10),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await loadAutoDashboard();
+          await loadSystemOverview();
+          await loadAiLearningStatus();
+          await loadOvernightDemoStatus();
+          await loadGlobalMarkets();
+          await refreshServerWatchers();
+          if (selectedTab == 0) {
+            await refreshSignal();
+          }
+        },
+        child: SafeArea(
+          top: false,
+          child: pages[selectedTab],
+        ),
+      ),
+      bottomNavigationBar: NavigationBar(
+        height: 72,
+        selectedIndex: selectedTab,
+        onDestinationSelected: (index) => setState(() => selectedTab = index),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
+          NavigationDestination(icon: Icon(Icons.dashboard_customize_outlined), selectedIcon: Icon(Icons.dashboard_customize_rounded), label: 'Compound'),
+          NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
+          NavigationDestination(icon: Icon(Icons.psychology_alt_outlined), selectedIcon: Icon(Icons.psychology_alt_rounded), label: 'AI'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings_rounded), label: 'Settings'),
+        ],
       ),
     );
   }
 
-  Widget _settingRow(
+}
+
+
+class CompoundDashboardScreen extends StatefulWidget {
+  final String apiBase;
+  final String defaultCapital;
+
+  const CompoundDashboardScreen({
+    super.key,
+    required this.apiBase,
+    required this.defaultCapital,
+  });
+
+  @override
+  State<CompoundDashboardScreen> createState() =>
+      _CompoundDashboardScreenState();
+}
+
+class _CompoundDashboardScreenState
+    extends State<CompoundDashboardScreen> {
+  late final TextEditingController capitalController;
+
+  Map<String, dynamic>? status;
+  bool busy = false;
+  String? error;
+  Timer? pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    capitalController = TextEditingController(
+      text: widget.defaultCapital.isNotEmpty
+          ? widget.defaultCapital
+          : '1000',
+    );
+    Future.microtask(refreshStatus);
+    pollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => refreshStatus(silent: true),
+    );
+  }
+
+  @override
+  void dispose() {
+    pollTimer?.cancel();
+    capitalController.dispose();
+    super.dispose();
+  }
+
+  Future<Map<String, dynamic>> _get(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    final uri = Uri.parse(
+      '${widget.apiBase}$path',
+    ).replace(
+      queryParameters: query,
+    );
+
+    final client = http.Client();
+    try {
+      final response = await client
+          .get(
+            uri,
+            headers: const {
+              'Accept': 'application/json',
+              'Connection': 'close',
+            },
+          )
+          .timeout(
+            const Duration(seconds: 60),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final bodyText = response.body.trim();
+      if (bodyText.startsWith('<')) {
+        throw const FormatException(
+          'Backend returned HTML instead of JSON',
+        );
+      }
+      final decoded = jsonDecode(bodyText);
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected backend response',
+        );
+      }
+
+      return Map<String, dynamic>.from(decoded);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<Map<String, dynamic>> _post(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    final uri = Uri.parse(
+      '${widget.apiBase}$path',
+    ).replace(
+      queryParameters: query,
+    );
+
+    final client = http.Client();
+    try {
+      final response = await client
+          .post(
+            uri,
+            headers: const {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Connection': 'close',
+            },
+            body: '{}',
+          )
+          .timeout(
+            const Duration(seconds: 120),
+          );
+
+      if (response.statusCode != 200) {
+        throw HttpException(
+          'HTTP ${response.statusCode}',
+        );
+      }
+
+      final bodyText = response.body.trim();
+      if (bodyText.startsWith('<')) {
+        throw const FormatException(
+          'Backend returned HTML instead of JSON',
+        );
+      }
+      final decoded = jsonDecode(bodyText);
+      if (decoded is! Map) {
+        throw const FormatException(
+          'Unexpected backend response',
+        );
+      }
+
+      return Map<String, dynamic>.from(decoded);
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<void> refreshStatus({
+    bool silent = false,
+  }) async {
+    if (busy && silent) {
+      return;
+    }
+
+    try {
+      final response = await _get(
+        '/compound/status',
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        status = response;
+        error = null;
+      });
+    } catch (e) {
+      if (!mounted || silent) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    }
+  }
+
+  Future<void> _runAction(
+    Future<Map<String, dynamic>> Function() action,
+  ) async {
+    if (busy) {
+      return;
+    }
+
+    setState(() {
+      busy = true;
+      error = null;
+    });
+
+    try {
+      final response = await action();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        status = response;
+      });
+
+      await refreshStatus();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        error = e.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> startNewCampaign() async {
+    final capital = double.tryParse(
+      capitalController.text.trim(),
+    );
+
+    if (capital == null || capital <= 0) {
+      setState(() {
+        error = 'Enter a valid starting compound capital.';
+      });
+      return;
+    }
+
+    await _runAction(
+      () => _post(
+        '/compound/start',
+        query: {
+          'starting_capital': capital.toString(),
+          'new_campaign': 'true',
+        },
+      ),
+    );
+  }
+
+  Future<void> resumeCampaign() async {
+    await _runAction(
+      () => _post('/compound/resume'),
+    );
+  }
+
+  Future<void> runNow() async {
+    await _runAction(
+      () => _post('/compound/run-now'),
+    );
+  }
+
+  Future<void> stopNewCycles() async {
+    await _runAction(
+      () => _post(
+        '/compound/stop',
+        query: {
+          'close_now': 'false',
+          'resume_legacy': 'false',
+        },
+      ),
+    );
+  }
+
+  Future<void> closeBasketNow() async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text(
+                'Close compound basket?',
+              ),
+              content: const Text(
+                'This closes only JASONG Elite Compound IG DEMO positions. '
+                'The completed cycle will be recorded using the realised broker result.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () =>
+                      Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () =>
+                      Navigator.of(dialogContext).pop(true),
+                  child: const Text('Close IG DEMO basket'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!confirmed || !mounted) {
+      return;
+    }
+
+    await _runAction(
+      () => _post(
+        '/compound/stop',
+        query: {
+          'close_now': 'true',
+          'resume_legacy': 'false',
+        },
+      ),
+    );
+  }
+
+  double _number(
+    dynamic value, {
+    double fallback = 0,
+  }) {
+    return double.tryParse(
+          value?.toString() ?? '',
+        ) ??
+        fallback;
+  }
+
+  String _money(dynamic value) {
+    final number = _number(value);
+    return number.toStringAsFixed(2);
+  }
+
+  String _percent01(dynamic value) {
+    return '${(_number(value) * 100).toStringAsFixed(0)}%';
+  }
+
+
+  String _statusLabel(dynamic value) {
+    return (value?.toString() ?? 'STOPPED')
+        .toUpperCase()
+        .replaceAll('_', ' ');
+  }
+
+  Color _statusColor(String value) {
+    final clean = value.toUpperCase();
+    if (clean.contains('ACTIVE') ||
+        clean.contains('OPENING') ||
+        clean.contains('COOLDOWN')) {
+      return const Color(0xFF67F0C1);
+    }
+    if (clean.contains('WAITING') ||
+        clean.contains('PAUSED') ||
+        clean.contains('DRAINING')) {
+      return const Color(0xFFFFD75E);
+    }
+    if (clean.contains('ERROR') ||
+        clean.contains('CONTAMINATION')) {
+      return const Color(0xFFFF6B75);
+    }
+    return const Color(0xFF65E6D3);
+  }
+
+  Widget _card({
+    required Widget child,
+    Color? glow,
+    EdgeInsets padding = const EdgeInsets.all(16),
+  }) {
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: const Color(0xFF0E1A24),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: (glow ?? const Color(0xFF18313C))
+              .withValues(alpha: .35),
+        ),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _metric(
+    String label,
+    String value, {
+    Color? valueColor,
+  }) {
+    return Expanded(
+      child: _card(
+        padding: const EdgeInsets.all(13),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+                color: valueColor ?? Colors.white,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ruleRow(
     String label,
     String value,
   ) {
     return Padding(
-      padding:
-          const EdgeInsets.symmetric(vertical: 5),
+      padding: const EdgeInsets.symmetric(
+        vertical: 5,
+      ),
       child: Row(
         children: [
           Expanded(
             child: Text(
               label,
               style: const TextStyle(
-                color: Colors.white54,
-                fontSize: 9.5,
+                color: Colors.white60,
+                fontSize: 11,
               ),
             ),
           ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(
-              value,
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                fontSize: 9.5,
-                fontWeight: FontWeight.w900,
-              ),
+          const SizedBox(width: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 11,
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _emptyMessage(String text) {
-    return _card(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          vertical: 20,
-        ),
-        child: Text(
-          text,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 10,
-            height: 1.35,
-          ),
-        ),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final pages = <Widget>[
-      _homePage(),
-      MarketCategoriesPage(
-        apiBase: apiBase,
-      ),
-      _compoundPage(),
-      _tradesPage(),
-      _aiPage(),
-      _settingsPage(),
-    ];
+    final data = status ?? <String, dynamic>{};
+    final rules = data['rules'] is Map
+        ? Map<String, dynamic>.from(data['rules'] as Map)
+        : <String, dynamic>{};
+    final current = data['current_cycle'] is Map
+        ? Map<String, dynamic>.from(
+            data['current_cycle'] as Map,
+          )
+        : <String, dynamic>{};
+    final account = data['broker_account'] is Map
+        ? Map<String, dynamic>.from(
+            data['broker_account'] as Map,
+          )
+        : <String, dynamic>{};
+
+    final positions = data['compound_broker_positions'] is List
+        ? (data['compound_broker_positions'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final ranking = data['last_candidate_ranking'] is List
+        ? (data['last_candidate_ranking'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final pendingElite = data['pending_elite_candidates'] is List
+        ? (data['pending_elite_candidates'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final blockers = data['foreign_broker_positions'] is List
+        ? (data['foreign_broker_positions'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final lastIntelligence = data['last_intelligence_signal'] is Map
+        ? Map<String, dynamic>.from(
+            data['last_intelligence_signal'] as Map,
+          )
+        : <String, dynamic>{};
+
+    final cycles = data['recent_cycles'] is List
+        ? (data['recent_cycles'] as List)
+            .whereType<Map>()
+            .map(
+              (row) => Map<String, dynamic>.from(row),
+            )
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final enabled = data['enabled'] == true;
+    final state = _statusLabel(data['status']);
+    final bridgeState = _statusLabel(
+      data['intelligence_bridge_state'] ?? 'IDLE',
+    );
+    final intelligenceDirection =
+        lastIntelligence['direction']?.toString().toUpperCase() ?? '-';
+    final intelligenceSymbol =
+        lastIntelligence['symbol']?.toString() ?? '-';
+    final intelligenceAi = _number(
+      lastIntelligence['model_ai_confidence'],
+    ) * 100;
+    final intelligenceQuant = _number(
+      lastIntelligence['quant_confidence'],
+    ) * 100;
+    final intelligenceObservedAt = _number(
+      lastIntelligence['observed_at'],
+    );
+    final intelligenceAgeSeconds = intelligenceObservedAt > 0
+        ? ((DateTime.now().millisecondsSinceEpoch / 1000) -
+                intelligenceObservedAt)
+            .clamp(0, 999999)
+        : null;
+    final currentCapital = data['current_capital'];
+    final reserve = data['reserve_balance'];
+    final cycleNumber = data['cycle_number'] ?? 0;
+    final runningPnl = current['running_pnl'] ?? 0;
+    final targetProfit = current['target_profit'] ??
+        (_number(currentCapital) *
+            _number(rules['profit_target_pct'], fallback: .50));
+    final stopAmount = current['stop_loss_amount'] ??
+        (_number(currentCapital) *
+            _number(rules['stop_loss_pct'], fallback: .15));
+    final basketMfe = current['basket_mfe_pnl'] ??
+        current['peak_pnl'] ??
+        0;
+    final basketMae = current['basket_mae_pnl'] ??
+        current['trough_pnl'] ??
+        0;
+    final targetProgress =
+        _number(data['current_target_progress_pct']);
+    final stopProgress =
+        _number(data['current_stop_progress_pct']);
+    final currency =
+        account['currency']?.toString() ?? '';
 
     return Scaffold(
-      body: SafeArea(
-        child: Column(
+      appBar: AppBar(
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _header(),
-            Expanded(
-              child: IndexedStack(
-                index: selectedTab,
-                children: pages,
+            Text(
+              'Elite Compound',
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            Text(
+              'V6.7.2 • IG DEMO ONLY',
+              style: TextStyle(
+                fontSize: 10,
+                color: Colors.white54,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: busy
+                ? null
+                : () => refreshStatus(),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: refreshStatus,
+        child: ListView(
+          physics:
+              const AlwaysScrollableScrollPhysics(),
+          padding:
+              const EdgeInsets.fromLTRB(
+            16,
+            8,
+            16,
+            110,
+          ),
+          children: [
+            _card(
+              glow: _statusColor(state),
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'JASONG ELITE 80/20 COMPOUND',
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding:
+                            const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _statusColor(state)
+                              .withValues(alpha: .12),
+                          borderRadius:
+                              BorderRadius.circular(99),
+                        ),
+                        child: Text(
+                          state,
+                          style: TextStyle(
+                            color:
+                                _statusColor(state),
+                            fontSize: 9,
+                            fontWeight:
+                                FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Best available 1–5 markets • no forced filler trades • live-money execution hard OFF',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (data['paused_reason'] != null) ...[
+                    const SizedBox(height: 9),
+                    Text(
+                      data['paused_reason'].toString(),
+                      style: const TextStyle(
+                        color: Color(0xFFFFD75E),
+                        fontSize: 11,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            _card(
+              glow: pendingElite.isNotEmpty
+                  ? const Color(0xFF67F0C1)
+                  : const Color(0xFF65E6D3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.hub_rounded,
+                        color: Color(0xFF65E6D3),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          'Unified Live Intelligence',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        bridgeState,
+                        style: TextStyle(
+                          color: pendingElite.isNotEmpty
+                              ? const Color(0xFF67F0C1)
+                              : const Color(0xFF65E6D3),
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (lastIntelligence.isNotEmpty)
+                    Text(
+                      '$intelligenceSymbol  $intelligenceDirection • '
+                      'Directional AI ${intelligenceAi.toStringAsFixed(1)}% • '
+                      'Quant ${intelligenceQuant.toStringAsFixed(1)}%'
+                      '${intelligenceAgeSeconds != null ? ' • ${intelligenceAgeSeconds.toStringAsFixed(0)}s ago' : ''}',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        height: 1.35,
+                      ),
+                    )
+                  else
+                    const Text(
+                      'Waiting for the next shared Live Intelligence observation.',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  if (pendingElite.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '${pendingElite.length} Elite setup(s) are ready. '
+                      '${blockers.isNotEmpty ? 'Execution is queued until the broker is clean.' : 'Compound can execute immediately after final broker preflight.'}',
+                      style: const TextStyle(
+                        color: Color(0xFF67F0C1),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                  if (blockers.isNotEmpty) ...[
+                    const SizedBox(height: 9),
+                    const Text(
+                      'Broker blockers',
+                      style: TextStyle(
+                        color: Color(0xFFFFD75E),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    ...blockers.take(5).map(
+                      (row) => Padding(
+                        padding: const EdgeInsets.only(
+                          bottom: 4,
+                        ),
+                        child: Text(
+                          '• ${row['symbol'] ?? row['epic'] ?? 'IG position'} '
+                          '${row['direction'] ?? ''} • ${row['deal_reference'] ?? ''}',
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _metric(
+                  'Cycle capital',
+                  currentCapital == null
+                      ? '-'
+                      : '${currency.isNotEmpty ? '$currency ' : ''}${_money(currentCapital)}',
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Reserve bank',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(reserve)}',
+                  valueColor:
+                      const Color(0xFF67F0C1),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Cycle',
+                  '#$cycleNumber',
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Open elite',
+                  '${positions.length} / ${rules['max_positions'] ?? 5}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Basket P&L',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(runningPnl)}',
+                  valueColor:
+                      _number(runningPnl) >= 0
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFF6B75),
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Target',
+                  '+${currency.isNotEmpty ? '$currency ' : ''}${_money(targetProfit)}',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _metric(
+                  'Basket MFE',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(basketMfe)}',
+                  valueColor:
+                      const Color(0xFF67F0C1),
+                ),
+                const SizedBox(width: 8),
+                _metric(
+                  'Basket MAE',
+                  '${currency.isNotEmpty ? '$currency ' : ''}${_money(basketMae)}',
+                  valueColor:
+                      const Color(0xFFFF8A92),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            _card(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        '+50% target progress',
+                        style: TextStyle(
+                          fontWeight:
+                              FontWeight.w800,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${targetProgress.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 7),
+                  LinearProgressIndicator(
+                    value:
+                        (targetProgress / 100)
+                            .clamp(0.0, 1.0),
+                    minHeight: 7,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Text(
+                        '-15% stop usage',
+                        style: TextStyle(
+                          fontWeight:
+                              FontWeight.w800,
+                          fontSize: 11,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '${stopProgress.toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontWeight:
+                              FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 7),
+                  LinearProgressIndicator(
+                    value:
+                        (stopProgress / 100)
+                            .clamp(0.0, 1.0),
+                    minHeight: 7,
+                  ),
+                  const SizedBox(height: 7),
+                  Text(
+                    'Take-profit +${_money(targetProfit)} • Stop -${_money(stopAmount)}',
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'Campaign controls',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            TextField(
+              controller: capitalController,
+              enabled: !busy && !enabled,
+              keyboardType:
+                  const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration:
+                  const InputDecoration(
+                labelText:
+                    'Starting compound capital',
+                helperText:
+                    'Any amount up to available IG DEMO funds',
+                prefixIcon:
+                    Icon(Icons.payments_outlined),
+              ),
+            ),
+            const SizedBox(height: 9),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed:
+                        busy || enabled
+                            ? null
+                            : startNewCampaign,
+                    icon: const Icon(
+                      Icons.play_circle_fill_rounded,
+                    ),
+                    label: const Text(
+                      'Start new campaign',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy || enabled
+                            ? null
+                            : resumeCampaign,
+                    icon: const Icon(
+                      Icons.restart_alt_rounded,
+                    ),
+                    label:
+                        const Text('Resume'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy || !enabled
+                            ? null
+                            : stopNewCycles,
+                    icon:
+                        const Icon(Icons.pause_rounded),
+                    label:
+                        const Text('Stop new cycles'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed:
+                        busy
+                            ? null
+                            : runNow,
+                    icon: const Icon(
+                      Icons.bolt_rounded,
+                    ),
+                    label:
+                        const Text('Run cycle now'),
+                  ),
+                ),
+              ],
+            ),
+            if (current.isNotEmpty ||
+                positions.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed:
+                      busy ? null : closeBasketNow,
+                  icon: const Icon(
+                    Icons.stop_circle_outlined,
+                  ),
+                  label: const Text(
+                    'Close compound basket now',
+                  ),
+                ),
+              ),
+            ],
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+            if (error != null) ...[
+              const SizedBox(height: 12),
+              _card(
+                glow: const Color(0xFFFF6B75),
+                child: Text(
+                  error!,
+                  style: const TextStyle(
+                    color: Color(0xFFFF8A92),
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 20),
+            const Text(
+              'Strategy rules',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            _card(
+              child: Column(
+                children: [
+                  _ruleRow(
+                    'Basket take-profit',
+                    '+${_percent01(rules['profit_target_pct'] ?? .50)}',
+                  ),
+                  _ruleRow(
+                    'Basket stop',
+                    '-${_percent01(rules['stop_loss_pct'] ?? .15)}',
+                  ),
+                  _ruleRow(
+                    'Profit harvest',
+                    _percent01(rules['profit_harvest_pct'] ?? .20),
+                  ),
+                  _ruleRow(
+                    'Profit compounded',
+                    _percent01(rules['profit_compound_pct'] ?? .80),
+                  ),
+                  _ruleRow(
+                    'Model-AI minimum',
+                    _percent01(rules['model_ai_min_confidence'] ?? .40),
+                  ),
+                  _ruleRow(
+                    'Quant minimum',
+                    _percent01(rules['quant_min_confidence'] ?? .28),
+                  ),
+                  _ruleRow(
+                    'Fast score minimum',
+                    '${_number(rules['fast_score_min'], fallback: 45).toStringAsFixed(0)}+',
+                  ),
+                  _ruleRow(
+                    'Quality',
+                    'A / A+',
+                  ),
+                  _ruleRow(
+                    'Maximum positions',
+                    '${rules['max_positions'] ?? 5}',
+                  ),
+                  _ruleRow(
+                    'Reserve reused',
+                    'NO',
+                  ),
+                  _ruleRow(
+                    'Close accounting',
+                    'BROKER VERIFIED',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Current Elite basket',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (positions.isEmpty)
+              _card(
+                child: const Text(
+                  'No Elite Compound positions are open. Live Intelligence is still evaluated continuously. If an Elite setup qualifies while legacy/manual IG positions are open, it is shown as PENDING and revalidated automatically as soon as the broker becomes clean.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                    height: 1.35,
+                  ),
+                ),
+              )
+            else
+              ...positions.map(
+                (row) => Padding(
+                  padding:
+                      const EdgeInsets.only(
+                    bottom: 8,
+                  ),
+                  child: _card(
+                    glow:
+                        const Color(0xFF67F0C1),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.currency_exchange_rounded,
+                          color:
+                              Color(0xFF67F0C1),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${row['symbol'] ?? row['epic'] ?? '-'}  ${row['direction'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                'Size ${row['size'] ?? '-'} • ${row['deal_reference'] ?? ''}',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors.white54,
+                                  fontSize: 10,
+                                ),
+                              ),
+                              if (row['mfe_bps'] != null ||
+                                  row['mae_bps'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'MFE ${_number(row['mfe_bps']).toStringAsFixed(1)} bps'
+                                  ' • MAE ${_number(row['mae_bps']).toStringAsFixed(1)} bps',
+                                  style:
+                                      const TextStyle(
+                                    color:
+                                        Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 20),
+            const Text(
+              'Elite market ranking',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 3),
+            const Text(
+              '40% AI is the eligibility floor — final selection is by Elite Score and diversification.',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (ranking.isEmpty)
+              _card(
+                child: const Text(
+                  'No ranking yet. Start or run the Compound engine to evaluate the current AI watcher pool.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+              )
+            else
+              ...ranking.take(12).map(
+                (row) {
+                  final eligible =
+                      row['eligible'] == true;
+                  final selected =
+                      row['selected'] == true;
+                  final reasons =
+                      row['rejection_reasons']
+                              is List
+                          ? (row['rejection_reasons']
+                                  as List)
+                              .map((e) => e.toString())
+                              .join(' • ')
+                          : '';
+
+                  return Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 8,
+                    ),
+                    child: _card(
+                      glow: selected
+                          ? const Color(0xFF67F0C1)
+                          : eligible
+                              ? const Color(0xFF65E6D3)
+                              : const Color(0xFFFFD75E),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${row['symbol'] ?? row['market'] ?? '-'}  ${row['direction'] ?? ''}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                selected
+                                    ? 'SELECTED'
+                                    : eligible
+                                        ? 'ELIGIBLE'
+                                        : 'REJECTED',
+                                style: TextStyle(
+                                  color: selected
+                                      ? const Color(0xFF67F0C1)
+                                      : eligible
+                                          ? const Color(0xFF65E6D3)
+                                          : const Color(0xFFFFD75E),
+                                  fontSize: 9,
+                                  fontWeight:
+                                      FontWeight.w900,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            'Elite ${_number(row['elite_score']).toStringAsFixed(1)} • '
+                            'AI ${(_number(row['model_ai_confidence']) * 100).toStringAsFixed(1)}% • '
+                            'Quant ${(_number(row['quant_confidence']) * 100).toStringAsFixed(1)}% • '
+                            'Fast ${_number(row['smart_fast_score']).toStringAsFixed(1)} • '
+                            '${row['quality_tier'] ?? '-'}'
+                            '${row['intelligence_source'] != null ? ' • ${_statusLabel(row['intelligence_source'])}' : ''}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white60,
+                              fontSize: 10,
+                            ),
+                          ),
+                          if (reasons.isNotEmpty) ...[
+                            const SizedBox(height: 5),
+                            Text(
+                              reasons,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.white38,
+                                fontSize: 10,
+                                height: 1.3,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            const SizedBox(height: 20),
+            const Text(
+              'Cycle history',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            if (cycles.isEmpty)
+              _card(
+                child: const Text(
+                  'No completed compound cycles yet.',
+                  style: TextStyle(
+                    color: Colors.white54,
+                    fontSize: 11,
+                  ),
+                ),
+              )
+            else
+              ...cycles.take(20).map(
+                (cycle) {
+                  final result =
+                      _statusLabel(
+                    cycle['result'],
+                  );
+                  final realised =
+                      _number(
+                    cycle['realised_profit'],
+                  );
+                  return Padding(
+                    padding:
+                        const EdgeInsets.only(
+                      bottom: 8,
+                    ),
+                    child: _card(
+                      glow: realised >= 0
+                          ? const Color(0xFF67F0C1)
+                          : const Color(0xFFFF6B75),
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'Cycle #${cycle['cycle_number'] ?? '-'}',
+                                  style:
+                                      const TextStyle(
+                                    fontWeight:
+                                        FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                result,
+                                style: TextStyle(
+                                  color:
+                                      realised >= 0
+                                          ? const Color(0xFF67F0C1)
+                                          : const Color(0xFFFF6B75),
+                                  fontWeight:
+                                      FontWeight.w900,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Start ${_money(cycle['starting_capital'])} • '
+                            'Realised ${_money(cycle['realised_profit'])} • '
+                            'Harvest ${_money(cycle['harvested_profit'])} • '
+                            'Next ${_money(cycle['next_cycle_capital'])}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white60,
+                              fontSize: 10,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'Exit: ${_statusLabel(cycle['exit_reason'])}',
+                            style:
+                                const TextStyle(
+                              color:
+                                  Colors.white38,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            const SizedBox(height: 20),
+            _card(
+              child: const Text(
+                'Unified IG DEMO design: Home Live Intelligence, Compound and forward learning share broker evidence. Compound may hold up to 5 positions, the account may hold up to 15 Jasong positions, and broker state remains the execution source of truth.',
+                style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 10,
+                  height: 1.4,
+                ),
               ),
             ),
           ],
         ),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: selectedTab,
-        onDestinationSelected: (index) {
-          setState(() {
-            selectedTab = index;
-          });
+    );
+  }
+}
 
-          if (index != 1 && !refreshing) {
-            refreshAll(silent: true);
-          }
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home_rounded),
-            label: 'Home',
+
+class _MidnightValue extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _MidnightValue(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .035),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: .05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 10,
+              color: Color(0x73FFFFFF),
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.radar_outlined),
-            selectedIcon: Icon(Icons.radar_rounded),
-            label: 'Markets',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.grid_view_outlined),
-            selectedIcon: Icon(Icons.grid_view_rounded),
-            label: 'Compound',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.receipt_long_outlined),
-            selectedIcon: Icon(Icons.receipt_long_rounded),
-            label: 'Trades',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.psychology_outlined),
-            selectedIcon: Icon(Icons.psychology_rounded),
-            label: 'AI',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings_rounded),
-            label: 'Settings',
+          const SizedBox(height: 4),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 15,
+            ),
           ),
         ],
       ),
+    );
+  }
+}
+
+Widget _midnightValue(String label, String value) {
+  return _MidnightValue(label, value);
+}
+
+class _MidnightRuleRow extends StatelessWidget {
+  final String title;
+  final String value;
+  final String subtitle;
+
+  const _MidnightRuleRow(this.title, this.value, this.subtitle);
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: .10),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(
+            Icons.auto_awesome_rounded,
+            size: 17,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: const TextStyle(color: Colors.white54, fontSize: 11, height: 1.25)),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(value, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 15)),
+      ],
+    );
+  }
+}
+
+class _MidnightSystemRow extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _MidnightSystemRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    final good = !value.toUpperCase().contains('OFFLINE') &&
+        !value.toUpperCase().contains('ERROR') &&
+        !value.toUpperCase().contains('FAILED');
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: good ? const Color(0xFF67F0C1) : const Color(0xFFFF6B75),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(child: Text(label, style: const TextStyle(color: Colors.white70))),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+// ===========================================================
+// CUSTOM NETWORK EXCEPTION
+// ===========================================================
+
+class NetworkValidationException
+    implements Exception {
+  final String market;
+  final String message;
+
+  NetworkValidationException({
+    required this.market,
+    required this.message,
+  });
+
+  @override
+  String toString() {
+    return (
+      'Network validation failed '
+      'for $market: $message'
     );
   }
 }
