@@ -29,6 +29,8 @@ VERSION = "6.9.3"
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
 HISTORICAL_WIN_RATE_TARGET = 0.60
+HISTORICAL_PROFIT_FACTOR_TARGET = 1.20
+HISTORICAL_MIN_TRADES = 30
 STANDARD_FAST_SCORE_MIN = 60.0
 COMPOUND_FAST_SCORE_MIN = 60.0
 TOP_N_PER_CATEGORY = 5
@@ -743,7 +745,14 @@ _SIGNAL_FUNC: Dict[str, Callable[[pd.Series], StrategySignal]] = {
 
 
 def _historical_grade(trades: int, win_rate: float, profit_factor: float, max_dd: float) -> tuple[str, str, bool]:
-    validated_target = trades >= 30 and win_rate >= HISTORICAL_WIN_RATE_TARGET and profit_factor >= 1.20 and max_dd <= 0.12
+    # V6.9.3 hotfix: keep the existing 30-trade evidence floor explicit.
+    # The user-selected execution targets remain 60% WR and PF >= 1.20.
+    validated_target = (
+        trades >= HISTORICAL_MIN_TRADES
+        and win_rate >= HISTORICAL_WIN_RATE_TARGET
+        and profit_factor >= HISTORICAL_PROFIT_FACTOR_TARGET
+        and max_dd <= 0.12
+    )
     if trades >= 40 and win_rate >= 0.70 and profit_factor >= 1.50 and max_dd <= 0.10:
         return "A+", "CATEGORY_ELITE_70", True
     if validated_target:
@@ -970,6 +979,69 @@ class CategoryStrategyEngine:
             cache_key=str(seed.get("key") or seed.get("name") or ""),
         )
 
+    def _resolve_bid_offer(
+        self,
+        seed: Dict[str, Any],
+        market: Dict[str, Any],
+    ) -> tuple[Optional[float], Optional[float], str]:
+        """Resolve a usable IG DEMO bid/offer without inventing a spread.
+
+        IG can return a TRADEABLE market while a particular resolver payload has
+        no top-level quote.  We first use the resolver/details snapshot, then
+        refresh the exact epic, and finally query IG market search and match the
+        same epic.  If none supplies both sides, the spread remains unavailable
+        and execution still fails closed.
+        """
+        def _pair(raw_bid: Any, raw_offer: Any, source: str):
+            bid = _safe_float(raw_bid)
+            offer = _safe_float(raw_offer)
+            if bid > 0.0 and offer >= bid:
+                return bid, offer, source
+            return None
+
+        details = market.get("details") or {}
+        snapshot = details.get("snapshot") or {}
+        for candidate in (
+            _pair(market.get("bid"), market.get("offer"), "RESOLVER_TOP_LEVEL"),
+            _pair(snapshot.get("bid"), snapshot.get("offer"), "RESOLVER_DETAILS_SNAPSHOT"),
+        ):
+            if candidate:
+                return candidate
+
+        epic = str(market.get("epic") or "").strip()
+        if epic and hasattr(self.broker, "market_details"):
+            try:
+                refreshed = self.broker.market_details(epic) or {}
+                snap = refreshed.get("snapshot") or {}
+                candidate = _pair(snap.get("bid"), snap.get("offer"), "REFRESHED_EPIC_SNAPSHOT")
+                if candidate:
+                    return candidate
+            except Exception:
+                pass
+
+        # Some IG market-search rows contain bid/offer even when the v4 details
+        # snapshot omitted them. Match only the already-resolved epic so fuzzy
+        # search can never substitute another instrument.
+        if epic and hasattr(self.broker, "search_markets"):
+            terms = list(seed.get("ig_search_terms") or [seed.get("name")])
+            for term in terms[:2]:
+                if not str(term or "").strip():
+                    continue
+                try:
+                    response = self.broker.search_markets(str(term)) or {}
+                    for raw in response.get("markets", []) or []:
+                        if not isinstance(raw, dict):
+                            continue
+                        if str(raw.get("epic") or "").strip() != epic:
+                            continue
+                        candidate = _pair(raw.get("bid"), raw.get("offer"), "EXACT_EPIC_MARKET_SEARCH")
+                        if candidate:
+                            return candidate
+                except Exception:
+                    continue
+
+        return None, None, "UNAVAILABLE"
+
     @staticmethod
     def _directional_ai(row: pd.Series, direction: str) -> float:
         up = _confidence01(row.get("JASONG_UP_PROB"))
@@ -1160,17 +1232,37 @@ class CategoryStrategyEngine:
         min_wr = min(win_rates) if win_rates else 0.0
         profitable = sum(1 for fold in qualifying if _safe_float(fold.get("profit_factor")) >= 1.0)
         fold_dd_ok = all(_safe_float(fold.get("max_drawdown")) <= 0.15 for fold in qualifying) if qualifying else False
-        passed = bool(
-            len(qualifying) >= WALK_FORWARD_MIN_FOLDS
-            and int(aggregate.get("trades") or 0) >= 30
-            and _safe_float(aggregate.get("win_rate")) >= HISTORICAL_WIN_RATE_TARGET
-            and _safe_float(aggregate.get("profit_factor")) >= 1.20
-            and _safe_float(aggregate.get("max_drawdown")) <= 0.12
-            and min_wr >= WALK_FORWARD_MIN_FOLD_WIN_RATE
-            and median_wr >= WALK_FORWARD_MIN_MEDIAN_WIN_RATE
-            and profitable >= WALK_FORWARD_MIN_PROFITABLE_FOLDS
-            and fold_dd_ok
-        )
+        checks = {
+            "enough_qualifying_folds": len(qualifying) >= WALK_FORWARD_MIN_FOLDS,
+            "holdout_sample_ok": int(aggregate.get("trades") or 0) >= HISTORICAL_MIN_TRADES,
+            "holdout_wr_ok": _safe_float(aggregate.get("win_rate")) >= HISTORICAL_WIN_RATE_TARGET,
+            "holdout_pf_ok": _safe_float(aggregate.get("profit_factor")) >= HISTORICAL_PROFIT_FACTOR_TARGET,
+            "holdout_dd_ok": _safe_float(aggregate.get("max_drawdown")) <= 0.12,
+            "min_fold_wr_ok": min_wr >= WALK_FORWARD_MIN_FOLD_WIN_RATE,
+            "median_fold_wr_ok": median_wr >= WALK_FORWARD_MIN_MEDIAN_WIN_RATE,
+            "profitable_folds_ok": profitable >= WALK_FORWARD_MIN_PROFITABLE_FOLDS,
+            "fold_drawdown_ok": fold_dd_ok,
+        }
+        passed = bool(all(checks.values()))
+        rejection_reasons: List[str] = []
+        if not checks["enough_qualifying_folds"]:
+            rejection_reasons.append("WF_QUALIFYING_FOLDS_BELOW_MIN")
+        if not checks["holdout_sample_ok"]:
+            rejection_reasons.append("WF_HOLDOUT_SAMPLE_BELOW_MIN")
+        if not checks["holdout_wr_ok"]:
+            rejection_reasons.append("WF_HOLDOUT_WR_BELOW_60")
+        if not checks["holdout_pf_ok"]:
+            rejection_reasons.append("WF_HOLDOUT_PF_BELOW_1_20")
+        if not checks["holdout_dd_ok"]:
+            rejection_reasons.append("WF_HOLDOUT_DRAWDOWN_FAIL")
+        if not checks["min_fold_wr_ok"]:
+            rejection_reasons.append("WF_MIN_FOLD_WR_BELOW_60")
+        if not checks["median_fold_wr_ok"]:
+            rejection_reasons.append("WF_MEDIAN_WR_BELOW_60")
+        if not checks["profitable_folds_ok"]:
+            rejection_reasons.append("WF_PROFITABLE_FOLDS_BELOW_2")
+        if not checks["fold_drawdown_ok"]:
+            rejection_reasons.append("WF_FOLD_DRAWDOWN_FAIL")
         return {
             "passed": passed,
             "qualifying_folds": len(qualifying),
@@ -1178,6 +1270,8 @@ class CategoryStrategyEngine:
             "median_fold_win_rate": median_wr,
             "profitable_folds": profitable,
             "fold_drawdown_ok": fold_dd_ok,
+            "checks": checks,
+            "rejection_reasons": rejection_reasons,
         }
 
     def _evaluate_seed(self, seed: Dict[str, Any]) -> Dict[str, Any]:
@@ -1299,6 +1393,8 @@ class CategoryStrategyEngine:
             "historical_win_rate_pct": round(win_rate * 100.0, 2),
             "historical_profit_factor": round(profit_factor, 4),
             "historical_trades": trades,
+            "historical_min_trades": HISTORICAL_MIN_TRADES,
+            "historical_sample_pass": trades >= HISTORICAL_MIN_TRADES,
             "historical_wins": wins,
             "historical_losses": losses,
             "historical_max_drawdown_pct": round(max_dd * 100.0, 2),
@@ -1314,6 +1410,16 @@ class CategoryStrategyEngine:
             "walk_forward_median_win_rate_pct": round(_safe_float(walk_forward["median_fold_win_rate"]) * 100.0, 2),
             "walk_forward_profitable_folds": int(walk_forward["profitable_folds"]),
             "walk_forward_fold_drawdown_ok": bool(walk_forward["fold_drawdown_ok"]),
+            "walk_forward_rejection_reasons": list(walk_forward.get("rejection_reasons") or []),
+            "walk_forward_policy": {
+                "all_qualifying_folds_must_meet_min_wr": True,
+                "minimum_qualifying_fold_wr_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
+                "median_fold_wr_pct": WALK_FORWARD_MIN_MEDIAN_WIN_RATE * 100.0,
+                "minimum_profitable_folds": WALK_FORWARD_MIN_PROFITABLE_FOLDS,
+                "minimum_trades_per_fold": WALK_FORWARD_MIN_FOLD_TRADES,
+                "minimum_qualifying_folds": WALK_FORWARD_MIN_FOLDS,
+                "holdout_min_trades": HISTORICAL_MIN_TRADES,
+            },
             "walk_forward_folds": [
                 {
                     **fold,
@@ -1349,6 +1455,9 @@ class CategoryStrategyEngine:
             "ig_epic": None,
             "ig_market_status": None,
             "ig_spread_bps": None,
+            "ig_bid": None,
+            "ig_offer": None,
+            "ig_quote_source": "NOT_REQUESTED",
             "standard_eligible": False,
             "compound_slot_candidate": False,
             "compound_eligible": False,
@@ -1367,11 +1476,11 @@ class CategoryStrategyEngine:
                 row["ig_tradeable"] = str(market.get("market_status") or "").upper() == "TRADEABLE"
                 row["ig_min_deal_size"] = market.get("min_deal_size")
                 row["ig_expiry"] = market.get("expiry")
-                details = market.get("details") or {}
-                snapshot = details.get("snapshot") or {}
-                bid = _safe_float(market.get("bid") if market.get("bid") is not None else snapshot.get("bid"))
-                offer = _safe_float(market.get("offer") if market.get("offer") is not None else snapshot.get("offer"))
-                if bid > 0 and offer >= bid:
+                bid, offer, quote_source = self._resolve_bid_offer(seed, market)
+                row["ig_bid"] = bid
+                row["ig_offer"] = offer
+                row["ig_quote_source"] = quote_source
+                if bid is not None and offer is not None:
                     mid_price = (bid + offer) / 2.0
                     row["ig_spread_bps"] = round((offer - bid) / mid_price * 10000.0, 4) if mid_price > 0 else None
             except Exception as exc:
@@ -1392,16 +1501,26 @@ class CategoryStrategyEngine:
             rejection_reasons.append("FAST_BELOW_60")
         if not selection_stable:
             rejection_reasons.append("SELECTION_UNSTABLE")
+        if trades < HISTORICAL_MIN_TRADES:
+            rejection_reasons.append("HOLDOUT_SAMPLE_BELOW_MIN")
         if win_rate < HISTORICAL_WIN_RATE_TARGET:
             rejection_reasons.append("HOLDOUT_WR_BELOW_60")
-        if profit_factor < 1.20:
+        if profit_factor < HISTORICAL_PROFIT_FACTOR_TARGET:
             rejection_reasons.append("PROFIT_FACTOR_BELOW_1_20")
         if not walk_forward["passed"]:
             rejection_reasons.append("WALK_FORWARD_BELOW_60")
+            rejection_reasons.extend(
+                reason for reason in (walk_forward.get("rejection_reasons") or [])
+                if reason not in rejection_reasons
+            )
         if promising and not row["ig_tradeable"]:
             rejection_reasons.append("IG_NOT_TRADEABLE")
         if promising and not spread_pass:
             rejection_reasons.append("SPREAD_GATE_FAIL")
+            if spread is None:
+                rejection_reasons.append("SPREAD_QUOTE_UNAVAILABLE")
+            elif _safe_float(spread, 1e9) > float(rule["spread_gate_bps"]):
+                rejection_reasons.append("SPREAD_TOO_WIDE")
         if not promising:
             rejection_reasons.append("IG_PREFLIGHT_NOT_REACHED")
         row["rejection_reasons"] = rejection_reasons
@@ -1735,15 +1854,25 @@ class CategoryStrategyEngine:
             }
         return {
             "version": self.VERSION,
-            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological folds; execution target 60% WR / PF 1.20 / WF 60%",
+            "method": "finite variant selection 40%-70%; untouched final 30% split into 3 chronological folds; execution target 60% WR / PF 1.20 / each qualifying WF fold >=60%",
             "final_holdout_used_for_selection": False,
             "walk_forward_folds": WALK_FORWARD_FOLDS,
             "quant_min_pct": 28.0,
             "model_ai_min_pct": 40.0,
             "historical_validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
-            "profit_factor_target": 1.20,
+            "profit_factor_target": HISTORICAL_PROFIT_FACTOR_TARGET,
+            "historical_min_trades": HISTORICAL_MIN_TRADES,
             "fast_score_min": STANDARD_FAST_SCORE_MIN,
             "walk_forward_min_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
+            "walk_forward_policy": {
+                "all_qualifying_folds_must_meet_min_wr": True,
+                "minimum_qualifying_fold_wr_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
+                "median_fold_wr_pct": WALK_FORWARD_MIN_MEDIAN_WIN_RATE * 100.0,
+                "minimum_profitable_folds": WALK_FORWARD_MIN_PROFITABLE_FOLDS,
+                "minimum_trades_per_fold": WALK_FORWARD_MIN_FOLD_TRADES,
+                "minimum_qualifying_folds": WALK_FORWARD_MIN_FOLDS,
+                "holdout_min_trades": HISTORICAL_MIN_TRADES,
+            },
             "coverage": self.evidence_coverage(),
             "categories": categories,
             "live_money_execution": False,
@@ -1790,9 +1919,14 @@ class CategoryStrategyEngine:
                     "model_ai_min": MODEL_AI_MIN_CONFIDENCE,
                     "model_ai_min_pct": 40.0,
                     "historical_validation_target_pct": HISTORICAL_WIN_RATE_TARGET * 100.0,
-                    "profit_factor_target": 1.20,
+                    "profit_factor_target": HISTORICAL_PROFIT_FACTOR_TARGET,
+                    "historical_min_trades": HISTORICAL_MIN_TRADES,
                     "fast_score_min": STANDARD_FAST_SCORE_MIN,
                     "walk_forward_min_pct": WALK_FORWARD_MIN_FOLD_WIN_RATE * 100.0,
+                    "walk_forward_all_qualifying_folds_must_meet_60": True,
+                    "walk_forward_median_min_pct": WALK_FORWARD_MIN_MEDIAN_WIN_RATE * 100.0,
+                    "walk_forward_min_profitable_folds": WALK_FORWARD_MIN_PROFITABLE_FOLDS,
+                    "walk_forward_min_trades_per_fold": WALK_FORWARD_MIN_FOLD_TRADES,
                     "optimizer_final_holdout_pct": 30.0,
                     "optimizer_selection_window_pct": 30.0,
                     "walk_forward_folds": WALK_FORWARD_FOLDS,
