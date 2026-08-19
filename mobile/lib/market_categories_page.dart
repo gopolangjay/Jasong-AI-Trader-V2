@@ -302,7 +302,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
               _pill('$optimised / 40 optimised', color: const Color(0xFF67F0C1)),
               _pill('$pending pending', color: pending == 0 ? const Color(0xFF67F0C1) : const Color(0xFFFFD75E)),
               _pill('refresh $refreshState', color: const Color(0xFFB899FF)),
-              _pill('70% + 3-fold evidence', color: const Color(0xFF67F0C1)),
+              _pill('60% + 3-fold WF evidence', color: const Color(0xFF67F0C1)),
             ],
           ),
         ],
@@ -322,7 +322,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
     final standard = item['standard_eligible'] == true;
     final compoundSlot = item['compound_slot_candidate'] == true;
     final compound = item['compound_eligible'] == true;
-    final verified70 = item['historical_70_verified'] == true;
+    final verified70 = item['historical_60_verified'] == true || item['historical_target_verified'] == true;
     final optimizerComplete = item['optimizer_complete'] == true;
     final selectionStable = item['optimizer_selection_stable'] == true;
     final walkForward = item['walk_forward_pass'] == true;
@@ -440,7 +440,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
         children: [
           const Text(
-            'V6.9.2 SPECIALIST REAL-TIME TESTING',
+            'V6.9.3 SPECIALIST REAL-TIME TESTING',
             style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900),
           ),
           const SizedBox(height: 4),
@@ -553,7 +553,7 @@ class _MarketCategoriesPageState extends State<MarketCategoriesPage> {
               border: Border.all(color: const Color(0xFF65E6D3).withValues(alpha: .16)),
             ),
             child: const Text(
-              'Testing policy: 28% Quant and 40% directional Model-AI remain live gates. A strategy must also pass stable variant selection, genuine 70% aggregate held-out evidence, profit-factor/drawdown gates and 3 chronological validation folds before Standard/Compound execution. Real-time IG DEMO testing is enabled; live-money execution remains off.',
+              'Testing policy: 28% Quant and 40% directional Model-AI remain live gates. A strategy must also pass stable variant selection, final holdout WR ≥60%, PF ≥1.20, Fast ≥60 and three chronological walk-forward folds each starting at 60% before Standard/Compound execution. Real-time IG DEMO testing is enabled; live-money execution remains off.',
               style: TextStyle(color: Colors.white60, fontSize: 10, height: 1.45),
             ),
           ),
