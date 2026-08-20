@@ -2,6 +2,25 @@ from __future__ import annotations
 
 import os
 
+# Protect the IG DEMO account's historical-data allowance.
+#
+# IG remains the broker source of truth for:
+# - executable quotes / spread preflight
+# - open positions
+# - MFE / MAE observations
+# - order entry / close / native take-profit
+#
+# Historical OHLCV analysis is routed through Twelve Data / Yahoo / persisted
+# specialist cache instead of consuming IG's historical-candle allowance.
+if str(
+    os.getenv("JASONG_ALLOW_IG_HISTORICAL_CANDLES", "false")
+).strip().lower() not in {"1", "true", "yes", "on"}:
+    os.environ["IG_DEMO_MARKET_DATA"] = "false"
+
+# Coalesce only short bursts of identical position reads. Any broker write
+# invalidates the cache immediately in execution_reliability.py.
+os.environ.setdefault("IG_DEMO_POSITIONS_CACHE_SECONDS", "3")
+
 import uvicorn
 
 import execution_reliability
