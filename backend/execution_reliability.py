@@ -4,6 +4,7 @@ import copy
 import os
 import threading
 import time
+import uuid
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -12,7 +13,7 @@ from category_strategy_engine import CategoryStrategyEngine
 from ig_demo_broker import IGDemoBroker
 
 
-VERSION = "6.9.4-execution-reliability-v2"
+VERSION = "6.9.4-execution-reliability-v3"
 
 
 def _now() -> float:
@@ -164,6 +165,7 @@ def _patch_ig_positions_cache() -> None:
     IGDemoBroker.close_position = _close_position_invalidate_cache
     IGDemoBroker._jasong_positions_cache_patch = True
 
+_ORIGINAL_CATEGORY_OPEN_CANDIDATE = CategoryExecutionEngine._open_candidate
 _ORIGINAL_CATEGORY_TICK = CategoryExecutionEngine.tick
 _ORIGINAL_CATEGORY_STATUS = CategoryExecutionEngine.status
 _ORIGINAL_STRATEGY_LOOP = CategoryStrategyEngine._loop
@@ -182,6 +184,325 @@ def _execution_health_state(engine: CategoryExecutionEngine) -> Dict[str, Any]:
     state.setdefault("total_isolated_candidate_opens", 0)
     state.setdefault("tick_count", 0)
     return state
+
+
+
+def _category_downsize_candidates(
+    broker: Any,
+    *,
+    requested_size: float,
+    minimum_size: float,
+    increment: float,
+) -> List[float]:
+    """Return smaller valid DEMO sizes after an explicit INSUFFICIENT_FUNDS reject.
+
+    This never increases exposure and never retries below IG's published
+    minimum. It is deliberately rejection-driven rather than guessing margin.
+    """
+    requested = max(0.0, float(requested_size or 0.0))
+    minimum = max(0.0, float(minimum_size or 0.0))
+    step = max(0.0, float(increment or 0.0))
+
+    if requested <= minimum + 1e-12:
+        return []
+
+    normalise = getattr(broker, "_normalise_deal_size", None)
+
+    def valid(value: float) -> float:
+        raw = max(minimum, float(value))
+        if callable(normalise):
+            try:
+                return float(
+                    normalise(
+                        raw,
+                        minimum_size=minimum,
+                        increment=step,
+                    )
+                )
+            except Exception:
+                pass
+        return raw
+
+    # Prefer a meaningful reduction instead of many near-identical rejects.
+    raw_candidates = [
+        requested * 0.50,
+        requested * 0.25,
+        minimum,
+    ]
+    values: List[float] = []
+    for raw in raw_candidates:
+        value = valid(raw)
+        if value >= requested - 1e-12:
+            continue
+        if value < minimum - 1e-12:
+            continue
+        if value not in values:
+            values.append(value)
+
+    # Larger reduced size first, minimum last.
+    values.sort(reverse=True)
+    if minimum > 0 and minimum < requested - 1e-12:
+        min_valid = valid(minimum)
+        if min_valid not in values and min_valid < requested - 1e-12:
+            values.append(min_valid)
+    return values[:3]
+
+
+def _adaptive_category_open_candidate(
+    self: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+    external: List[Dict[str, Any]],
+) -> None:
+    """Open one Category trade with safe DEMO-only affordability downshift.
+
+    The normal Category risk/cap/duplicate gates are preserved. The first order
+    uses the existing requested Category size. Only after IG explicitly returns
+    INSUFFICIENT_FUNDS do we try smaller valid sizes, never below IG minimum.
+    """
+    allowed, reason = self._may_open(candidate, external)
+    if not allowed:
+        return
+
+    category = str(candidate.get("category") or "UNK").upper()
+    epic = str(candidate.get("ig_epic") or "").strip()
+    direction = str(candidate.get("direction") or "").upper().strip()
+    minimum = max(0.0, _to_float(candidate.get("ig_min_deal_size"), 0.0))
+    requested = max(float(self.default_size), minimum)
+
+    base_ref = f"JSCAT_{category[:3]}_{uuid.uuid4().hex[:16].upper()}"[:30]
+    attempts: List[Dict[str, Any]] = []
+
+    def attempt(size: float, index: int) -> Dict[str, Any]:
+        ref = (
+            base_ref
+            if index == 0
+            else f"JSCAT_{category[:3]}_R{index}_{uuid.uuid4().hex[:13].upper()}"[:30]
+        )
+        started = _now()
+        try:
+            result = self.broker.open_epic_position(
+                epic=epic,
+                direction=direction,
+                size=float(size),
+                deal_reference=ref,
+            )
+            attempts.append(
+                {
+                    "size": float(size),
+                    "result": "OPENED",
+                    "at": started,
+                    "deal_id": result.get("dealId"),
+                }
+            )
+            return result
+        except Exception as exc:
+            classification = _classify_broker_error(exc)
+            attempts.append(
+                {
+                    "size": float(size),
+                    "result": classification,
+                    "at": started,
+                    "error": _compact_error(exc, 220),
+                }
+            )
+            if classification != "INSUFFICIENT_FUNDS":
+                raise
+            raise
+
+    health = _execution_health_state(self)
+    health["last_size_plan"] = {
+        "candidate": _candidate_key(candidate),
+        "category": category,
+        "symbol": candidate.get("symbol"),
+        "requested_size": requested,
+        "minimum_size": minimum,
+        "attempts": attempts,
+        "adaptive_downsize_enabled": True,
+    }
+
+    result: Optional[Dict[str, Any]] = None
+    first_error: Optional[Exception] = None
+
+    try:
+        result = attempt(requested, 0)
+    except Exception as exc:
+        if _classify_broker_error(exc) != "INSUFFICIENT_FUNDS":
+            health["last_size_plan"]["attempts"] = list(attempts)
+            raise
+        first_error = exc
+
+        # Resolve current dealing rules only after a definitive funds reject.
+        details: Dict[str, Any] = {}
+        try:
+            details = self.broker.market_details(epic) or {}
+        except Exception:
+            details = {}
+
+        min_fn = getattr(self.broker, "_min_deal_size", None)
+        inc_fn = getattr(self.broker, "_deal_size_increment", None)
+        if callable(min_fn):
+            try:
+                minimum = max(minimum, float(min_fn(details) or 0.0))
+            except Exception:
+                pass
+        increment = minimum
+        if callable(inc_fn):
+            try:
+                increment = max(0.0, float(inc_fn(details) or 0.0))
+            except Exception:
+                increment = minimum
+
+        retry_sizes = _category_downsize_candidates(
+            self.broker,
+            requested_size=requested,
+            minimum_size=minimum,
+            increment=increment,
+        )
+        health["last_size_plan"].update(
+            {
+                "minimum_size": minimum,
+                "size_increment": increment,
+                "retry_sizes": list(retry_sizes),
+            }
+        )
+
+        if not retry_sizes:
+            health["last_size_plan"]["final_result"] = (
+                "MINIMUM_DEAL_UNAFFORDABLE"
+                if requested <= minimum + 1e-12
+                else "NO_VALID_SMALLER_SIZE"
+            )
+            health["last_size_plan"]["attempts"] = list(attempts)
+            raise first_error
+
+        last_error: Exception = first_error
+        for idx, retry_size in enumerate(retry_sizes, start=1):
+            try:
+                result = attempt(retry_size, idx)
+                health["last_size_plan"]["final_result"] = "OPENED_AFTER_DOWNSIZE"
+                health["last_size_plan"]["final_size"] = result.get("size") or retry_size
+                health["last_size_plan"]["attempts"] = list(attempts)
+                health["adaptive_size_successes"] = int(
+                    health.get("adaptive_size_successes") or 0
+                ) + 1
+                break
+            except Exception as exc:
+                last_error = exc
+                if _classify_broker_error(exc) != "INSUFFICIENT_FUNDS":
+                    health["last_size_plan"]["final_result"] = _classify_broker_error(exc)
+                    health["last_size_plan"]["attempts"] = list(attempts)
+                    raise
+                continue
+
+        if result is None:
+            health["last_size_plan"]["final_result"] = "MINIMUM_DEAL_UNAFFORDABLE"
+            health["last_size_plan"]["attempts"] = list(attempts)
+            health["minimum_deal_unaffordable_count"] = int(
+                health.get("minimum_deal_unaffordable_count") or 0
+            ) + 1
+            raise last_error
+
+    if not isinstance(result, dict):
+        raise RuntimeError("IG DEMO did not return an order result")
+
+    deal_id = result.get("dealId")
+    if not deal_id:
+        raise RuntimeError(f"IG DEMO did not return dealId: {result}")
+
+    hold_seconds = max(
+        900,
+        int(candidate.get("holding_bars") or 4) * 15 * 60,
+    )
+    actual_size = result.get("size")
+    if actual_size is None:
+        actual_size = requested
+
+    position = {
+        "track": "CATEGORY",
+        "category": category,
+        "category_rank": candidate.get("category_rank"),
+        "strategy_id": candidate.get("strategy_id"),
+        "strategy_name": candidate.get("strategy_name"),
+        "symbol": candidate.get("symbol"),
+        "market": candidate.get("market"),
+        "direction": candidate.get("direction"),
+        "epic": candidate.get("ig_epic"),
+        "deal_id": deal_id,
+        "deal_reference": result.get("dealReference") or base_ref,
+        "size": actual_size,
+        "requested_size": requested,
+        "entry_level": result.get("level"),
+        "opened_at": _now(),
+        "due_at": _now() + hold_seconds,
+        "status": "OPEN",
+        "exposure_tags": list(candidate.get("exposure_tags") or []),
+        "quant_confidence": candidate.get("quant_confidence"),
+        "model_ai_confidence": candidate.get("model_ai_confidence"),
+        "historical_win_rate": candidate.get("historical_win_rate"),
+        "historical_profit_factor": candidate.get("historical_profit_factor"),
+        "smart_fast_score": candidate.get("smart_fast_score"),
+        "live_fast_score": candidate.get("live_fast_score"),
+        "adaptive_size_used": bool(
+            health.get("last_size_plan", {}).get("final_result")
+            == "OPENED_AFTER_DOWNSIZE"
+        ),
+        "size_attempts": list(attempts),
+        "dual_track": self._is_dual_track(candidate.get("ig_epic"), external),
+        "live_money_execution": False,
+    }
+    self._state.setdefault("positions", []).append(position)
+    self._state["opens"] = int(self._state.get("opens") or 0) + 1
+    self._journal(
+        "OPEN",
+        category=category,
+        symbol=position["symbol"],
+        deal_id=deal_id,
+        size=actual_size,
+        requested_size=requested,
+        adaptive_size_used=position["adaptive_size_used"],
+        dual_track=position["dual_track"],
+    )
+
+
+def _recomputed_operational_reasons(row: Dict[str, Any]) -> List[str]:
+    """Recompute the current live STRONG blockers for diagnostics only.
+
+    This intentionally avoids legacy rejection strings generated before
+    ForwardPrimeArchitecture replaced historical smart FAST with live FAST.
+    It does not change execution eligibility.
+    """
+    reasons: List[str] = []
+    direction = str(row.get("direction") or row.get("live_direction") or "").upper()
+    quant = _to_float(row.get("quant_confidence"), 0.0)
+    ai = _to_float(row.get("model_ai_confidence"), 0.0)
+    fast = _to_float(
+        row.get("live_fast_score")
+        if row.get("live_fast_score") is not None
+        else row.get("smart_fast_score"),
+        0.0,
+    )
+
+    if direction not in {"BUY", "SELL"}:
+        reasons.append("NO_DIRECTION")
+    if quant < 0.28:
+        reasons.append("QUANT_BELOW_28")
+    if ai < 0.40:
+        reasons.append("MODEL_AI_BELOW_40")
+    if fast < 45.0:
+        reasons.append("FAST_BELOW_45")
+    if not bool(row.get("ig_tradeable")):
+        reasons.append("IG_NOT_TRADEABLE")
+    if row.get("spread_pass") is not True:
+        reasons.append("SPREAD_GATE_FAIL")
+
+    provenance = row.get("provenance")
+    if isinstance(provenance, dict):
+        for issue in provenance.get("issues") or []:
+            issue_text = str(issue or "").upper().strip()
+            if issue_text and issue_text not in reasons:
+                reasons.append(issue_text)
+
+    return reasons
 
 
 def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
@@ -508,6 +829,7 @@ def install_execution_reliability() -> Dict[str, Any]:
 
         _patch_ig_demo_marker()
         _patch_ig_positions_cache()
+        CategoryExecutionEngine._open_candidate = _adaptive_category_open_candidate
         CategoryExecutionEngine.tick = _reliable_category_tick
         CategoryExecutionEngine.status = _reliable_category_status
         CategoryStrategyEngine._loop = _reliable_strategy_loop
@@ -519,6 +841,8 @@ def install_execution_reliability() -> Dict[str, Any]:
             "ig_demo_marker_fixed": True,
             "ig_positions_short_cache": True,
             "candidate_exception_isolation": True,
+            "adaptive_category_size_downshift": True,
+            "minimum_deal_size_floor_enforced": True,
             "live_refresh_independent_of_historical_refresh": True,
             "historical_execution_veto": False,
             "live_money_execution": False,
@@ -622,15 +946,8 @@ def execution_health_snapshot(
             for row in rows:
                 if bool(row.get("standard_eligible")):
                     continue
-                raw_reasons = list(row.get("rejection_reasons") or [])
-                operational_reasons: List[str] = []
-                for raw_reason in raw_reasons:
-                    reason = str(raw_reason or "").upper().strip()
-                    if not reason:
-                        continue
-                    if reason.startswith(historical_only_prefixes):
-                        continue
-                    operational_reasons.append(reason)
+                operational_reasons = _recomputed_operational_reasons(row)
+                for reason in operational_reasons:
                     signal_blockers[reason] += 1
                     cat_blockers[reason] += 1
                 blocked_candidates.append(
