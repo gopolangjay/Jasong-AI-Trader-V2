@@ -170,12 +170,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? forwardPrimeStatus;
   Map<String, dynamic>? categoryPortfolioStatus;
   Map<String, dynamic>? marketDataHealth;
+  Map<String, dynamic>? mobileSyncStatus;
   List<Map<String, dynamic>> categoryPortfolioPositions = [];
   List<Map<String, dynamic>> forwardPrimeTrades = [];
+  List<Map<String, dynamic>> tradeExcursions = [];
   bool autoDashboardRefreshBusy = false;
+  bool mobileSyncBusy = false;
+  int mobileSyncRevision = 0;
 
   Timer? watcherPollTimer;
   Timer? autoDashboardPollTimer;
+  Timer? mobileSyncPollTimer;
 
   bool watcherBusy = false;
   bool autoManagerBusy = false;
@@ -1674,10 +1679,42 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _mergeForwardPrimeJournal() {
     final merged = <String, Map<String, dynamic>>{};
+    final excursionByDeal = <String, Map<String, dynamic>>{};
+    for (final raw in tradeExcursions) {
+      final deal = '${raw['deal_id'] ?? ''}'.trim();
+      if (deal.isNotEmpty) {
+        excursionByDeal[deal] = Map<String, dynamic>.from(raw);
+      }
+    }
     var anonymous = 0;
 
     void put(Map<String, dynamic> row) {
-      var key = _tradeIdentity(row);
+      final identity = _tradeIdentity(row);
+      final excursion = excursionByDeal[identity];
+      if (excursion != null) {
+        for (final field in const [
+          'highest_price_since_entry',
+          'lowest_price_since_entry',
+          'current_price',
+          'price_basis',
+          'mfe',
+          'mae',
+          'mfe_pct',
+          'mae_pct',
+          'mae_abs',
+          'mae_abs_pct',
+          'highest_price_vs_entry_pct',
+          'highest_price_as_pct_of_entry',
+          'lowest_price_vs_entry_pct',
+          'last_observed_at',
+        ]) {
+          if (excursion[field] != null) {
+            row[field] = excursion[field];
+          }
+        }
+      }
+
+      var key = identity;
       if (key.isEmpty) {
         key = 'ANON_${anonymous++}_${row['market'] ?? row['symbol'] ?? ''}_${row['status'] ?? ''}';
       }
@@ -1751,6 +1788,148 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return '${b['closed_at_iso'] ?? b['settled_at_iso'] ?? ''}'
           .compareTo('${a['closed_at_iso'] ?? a['settled_at_iso'] ?? ''}');
     });
+  }
+
+  List<Map<String, dynamic>> _syncRows(dynamic value) {
+    if (value is! List) return <Map<String, dynamic>>[];
+    return value
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+  }
+
+  void _applyMobileSyncSnapshot(Map<String, dynamic> payload) {
+    final rankingsRaw = payload['category_rankings'];
+    final allMarkets = <Map<String, dynamic>>[];
+    if (rankingsRaw is Map) {
+      for (final category in const [
+        'FOREX',
+        'INDICES',
+        'CRYPTO',
+        'METALS',
+        'ENERGY',
+        'SHARES',
+      ]) {
+        final rows = rankingsRaw[category];
+        if (rows is! List) continue;
+        for (final item in rows.whereType<Map>()) {
+          final row = Map<String, dynamic>.from(item);
+          row['category'] ??= category;
+          row['asset_class'] ??= category;
+          row['market'] ??= row['name'] ?? row['symbol'];
+          row['regime'] ??= row['market_regime'];
+          row['fast_score'] ??=
+              row['live_fast_score'] ?? row['smart_fast_score'];
+          allMarkets.add(row);
+        }
+      }
+    }
+
+    int stateWeight(Map<String, dynamic> row) {
+      final forward = row['forward_validation'];
+      if (row['compound_eligible'] == true ||
+          row['prime_qualified'] == true ||
+          (forward is Map && forward['prime_eligible'] == true)) {
+        return 3;
+      }
+      if (row['strong_qualified'] == true ||
+          '${row['trade_class'] ?? ''}'.toUpperCase() == 'STRONG') {
+        return 2;
+      }
+      return 1;
+    }
+
+    double fast(Map<String, dynamic> row) =>
+        double.tryParse(
+          '${row['live_fast_score'] ?? row['smart_fast_score'] ?? row['fast_score'] ?? 0}',
+        ) ??
+        0.0;
+
+    allMarkets.sort((a, b) {
+      final state = stateWeight(b).compareTo(stateWeight(a));
+      if (state != 0) return state;
+      return fast(b).compareTo(fast(a));
+    });
+
+    final portfolioStatusRaw = payload['category_portfolio_status'];
+    final forwardStatusRaw = payload['forward_validation_status'];
+    final dataHealthRaw = payload['market_data_health'];
+    final compoundRaw = payload['compound_status'];
+
+    globalMarketCandidates = allMarkets;
+    globalMarketsStatus = {
+      'version': payload['version'],
+      'revision': payload['revision'],
+      'built_at': payload['built_at'],
+      'age_seconds': payload['age_seconds'],
+      'ready': payload['ready'] == true,
+    };
+    categoryPortfolioPositions =
+        _syncRows(payload['category_portfolio_positions']);
+    forwardPrimeTrades =
+        _syncRows(payload['forward_validation_trades']);
+    tradeExcursions = _syncRows(payload['trade_excursions']);
+
+    if (portfolioStatusRaw is Map) {
+      categoryPortfolioStatus =
+          Map<String, dynamic>.from(portfolioStatusRaw);
+    }
+    if (forwardStatusRaw is Map) {
+      forwardPrimeStatus = Map<String, dynamic>.from(forwardStatusRaw);
+    }
+    if (dataHealthRaw is Map) {
+      marketDataHealth = Map<String, dynamic>.from(dataHealthRaw);
+    }
+    if (compoundRaw is Map) {
+      final dashboard = Map<String, dynamic>.from(
+        autoDashboard ?? <String, dynamic>{},
+      );
+      dashboard['compound'] = Map<String, dynamic>.from(compoundRaw);
+      autoDashboard = dashboard;
+    }
+
+    mobileSyncStatus = payload;
+    mobileSyncRevision =
+        int.tryParse('${payload['revision'] ?? mobileSyncRevision}') ??
+        mobileSyncRevision;
+    _mergeForwardPrimeJournal();
+  }
+
+  Future<void> loadMobileSync({
+    bool fallbackToLegacy = true,
+  }) async {
+    if (mobileSyncBusy) return;
+    mobileSyncBusy = true;
+    try {
+      var payload = await getJson(
+        Uri.parse('$apiBase/mobile/sync'),
+        timeoutSeconds: 12,
+      );
+
+      if (payload['ready'] != true) {
+        await Future.delayed(const Duration(milliseconds: 700));
+        payload = await getJson(
+          Uri.parse('$apiBase/mobile/sync'),
+          timeoutSeconds: 12,
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _applyMobileSyncSnapshot(payload);
+      });
+    } catch (_) {
+      // Compatibility fallback for a backend that has not yet deployed the
+      // unified mobile snapshot. Never erase already displayed data.
+      if (fallbackToLegacy &&
+          globalMarketCandidates.isEmpty &&
+          categoryPortfolioPositions.isEmpty) {
+        await loadForwardPrimeMobileData();
+        await loadGlobalMarkets();
+      }
+    } finally {
+      mobileSyncBusy = false;
+    }
   }
 
   Future<void> loadForwardPrimeMobileData() async {
@@ -2392,12 +2571,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     autoDashboardRefreshBusy = true;
 
     try {
+      // Legacy/diagnostic surfaces refresh less often. V6.9.4 markets,
+      // forward evidence and trades are kept current by /mobile/sync.
       await loadAutoDashboard();
-      await loadForwardPrimeMobileData();
       await loadSystemOverview();
       await loadAiLearningStatus();
       await loadOvernightDemoStatus();
-      await loadGlobalMarkets();
     } finally {
       autoDashboardRefreshBusy = false;
     }
@@ -2405,13 +2584,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void startAutoDashboardPolling() {
     autoDashboardPollTimer?.cancel();
+    mobileSyncPollTimer?.cancel();
 
+    // Fast coherent snapshot: one cheap request every 10 seconds.
+    mobileSyncPollTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => loadMobileSync(fallbackToLegacy: false),
+    );
+
+    // Slower legacy diagnostics do not hold up the live mobile state.
     autoDashboardPollTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(seconds: 60),
       (_) => _refreshMobileDashboardSequence(),
     );
 
-    Future.microtask(_refreshMobileDashboardSequence);
+    Future.microtask(loadMobileSync);
+    Future.delayed(
+      const Duration(seconds: 2),
+      _refreshMobileDashboardSequence,
+    );
   }
 
   Future<void> startAutoMode() async {
@@ -3622,6 +3813,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     watcherPollTimer?.cancel();
     autoDashboardPollTimer?.cancel();
+    mobileSyncPollTimer?.cancel();
     symbol.dispose();
     balance.dispose();
     copilotController.dispose();
@@ -5648,16 +5840,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   ),
                                 ),
                               ],
-                              if (trade['mfe_bps'] != null ||
+                              if (trade['highest_price_since_entry'] != null ||
+                                  trade['lowest_price_since_entry'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'High ${formatNumber(trade['highest_price_since_entry'], decimals: 5)}'
+                                  ' • Low ${formatNumber(trade['lowest_price_since_entry'], decimals: 5)}',
+                                  style: const TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'MFE ${formatNumber(trade['mfe'], decimals: 5)}'
+                                  ' (${formatNumber(trade['mfe_pct'], decimals: 2)}%)'
+                                  ' • MAE ${formatNumber(trade['mae'], decimals: 5)}'
+                                  ' (${formatNumber(trade['mae_pct'], decimals: 2)}%)',
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Highest vs entry ${formatNumber(trade['highest_price_vs_entry_pct'], decimals: 2)}%'
+                                  ' • High = ${formatNumber(trade['highest_price_as_pct_of_entry'], decimals: 2)}% of entry',
+                                  style: const TextStyle(
+                                    color: Color(0xFF67F0C1),
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ] else if (trade['mfe_bps'] != null ||
                                   trade['mae_bps'] != null) ...[
                                 const SizedBox(height: 3),
                                 Text(
                                   'MFE ${formatNumber(trade['mfe_bps'], decimals: 1)} bps'
                                   ' • MAE ${formatNumber(trade['mae_bps'], decimals: 1)} bps',
-                                  style:
-                                      const TextStyle(
-                                    color:
-                                        Colors.white38,
+                                  style: const TextStyle(
+                                    color: Colors.white38,
                                     fontSize: 10,
                                   ),
                                 ),
@@ -9604,16 +9826,36 @@ class _CompoundDashboardScreenState
                                   fontSize: 10,
                                 ),
                               ),
-                              if (row['mfe_bps'] != null ||
+                              if (row['mfe'] != null ||
+                                  row['mae'] != null) ...[
+                                const SizedBox(height: 3),
+                                Text(
+                                  'MFE ${_number(row['mfe']).toStringAsFixed(5)}'
+                                  ' (${_number(row['mfe_pct']).toStringAsFixed(2)}%)'
+                                  ' • MAE ${_number(row['mae']).toStringAsFixed(5)}'
+                                  ' (${_number(row['mae_pct']).toStringAsFixed(2)}%)',
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'High ${_number(row['highest_price_since_entry']).toStringAsFixed(5)}'
+                                  ' • ${_number(row['highest_price_vs_entry_pct']).toStringAsFixed(2)}% vs entry',
+                                  style: const TextStyle(
+                                    color: Color(0xFF67F0C1),
+                                    fontSize: 10,
+                                  ),
+                                ),
+                              ] else if (row['mfe_bps'] != null ||
                                   row['mae_bps'] != null) ...[
                                 const SizedBox(height: 3),
                                 Text(
                                   'MFE ${_number(row['mfe_bps']).toStringAsFixed(1)} bps'
                                   ' • MAE ${_number(row['mae_bps']).toStringAsFixed(1)} bps',
-                                  style:
-                                      const TextStyle(
-                                    color:
-                                        Colors.white38,
+                                  style: const TextStyle(
+                                    color: Colors.white38,
                                     fontSize: 10,
                                   ),
                                 ),
