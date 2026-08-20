@@ -12,7 +12,7 @@ from category_strategy_engine import CategoryStrategyEngine
 from ig_demo_broker import IGDemoBroker
 
 
-VERSION = "6.9.4-execution-reliability"
+VERSION = "6.9.4-execution-reliability-v2"
 
 
 def _now() -> float:
@@ -65,6 +65,13 @@ def _compact_error(exc: Exception, limit: int = 360) -> str:
     return text[:limit]
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def _patch_ig_demo_marker() -> None:
     # ig_demo_broker.py already hard-codes the DEMO URL, but its adaptive
     # SIZE_INCREMENT branch references self.demo. Older builds never created
@@ -74,6 +81,88 @@ def _patch_ig_demo_marker() -> None:
     if not hasattr(IGDemoBroker, "demo"):
         IGDemoBroker.demo = True  # type: ignore[attr-defined]
 
+
+
+_ORIGINAL_IG_POSITIONS = IGDemoBroker.positions
+_ORIGINAL_IG_OPEN_EPIC_POSITION = IGDemoBroker.open_epic_position
+_ORIGINAL_IG_CLOSE_POSITION = IGDemoBroker.close_position
+
+
+def _positions_cache_seconds() -> float:
+    try:
+        value = float(os.getenv("IG_DEMO_POSITIONS_CACHE_SECONDS", "3"))
+    except Exception:
+        value = 3.0
+    return max(0.5, min(10.0, value))
+
+
+def _invalidate_ig_positions_cache(broker: Any) -> None:
+    try:
+        with getattr(broker, "_jasong_positions_cache_lock"):
+            broker._jasong_positions_cache_payload = None
+            broker._jasong_positions_cache_at = 0.0
+    except Exception:
+        try:
+            broker._jasong_positions_cache_payload = None
+            broker._jasong_positions_cache_at = 0.0
+        except Exception:
+            pass
+
+
+def _cached_ig_positions(self: IGDemoBroker) -> Dict[str, Any]:
+    """Coalesce short bursts of identical IG position reads.
+
+    Category reconciliation, Category status, MFE/MAE observation and mobile
+    reporting can all ask for positions within the same few seconds. Reusing one
+    successful snapshot avoids spending broker REST allowance on duplicate reads.
+    Order writes invalidate this cache immediately.
+    """
+    lock = getattr(self, "_jasong_positions_cache_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        self._jasong_positions_cache_lock = lock
+    ttl = _positions_cache_seconds()
+    now = _now()
+    with lock:
+        payload = getattr(self, "_jasong_positions_cache_payload", None)
+        cached_at = float(getattr(self, "_jasong_positions_cache_at", 0.0) or 0.0)
+        if isinstance(payload, dict) and (now - cached_at) <= ttl:
+            self._jasong_positions_cache_hits = int(
+                getattr(self, "_jasong_positions_cache_hits", 0) or 0
+            ) + 1
+            return copy.deepcopy(payload)
+
+    payload = _ORIGINAL_IG_POSITIONS(self)
+    with lock:
+        self._jasong_positions_cache_payload = copy.deepcopy(payload)
+        self._jasong_positions_cache_at = _now()
+        self._jasong_positions_cache_misses = int(
+            getattr(self, "_jasong_positions_cache_misses", 0) or 0
+        ) + 1
+    return payload
+
+
+def _open_epic_position_invalidate_cache(self: IGDemoBroker, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        return _ORIGINAL_IG_OPEN_EPIC_POSITION(self, *args, **kwargs)
+    finally:
+        _invalidate_ig_positions_cache(self)
+
+
+def _close_position_invalidate_cache(self: IGDemoBroker, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        return _ORIGINAL_IG_CLOSE_POSITION(self, *args, **kwargs)
+    finally:
+        _invalidate_ig_positions_cache(self)
+
+
+def _patch_ig_positions_cache() -> None:
+    if getattr(IGDemoBroker, "_jasong_positions_cache_patch", False):
+        return
+    IGDemoBroker.positions = _cached_ig_positions
+    IGDemoBroker.open_epic_position = _open_epic_position_invalidate_cache
+    IGDemoBroker.close_position = _close_position_invalidate_cache
+    IGDemoBroker._jasong_positions_cache_patch = True
 
 _ORIGINAL_CATEGORY_TICK = CategoryExecutionEngine.tick
 _ORIGINAL_CATEGORY_STATUS = CategoryExecutionEngine.status
@@ -418,6 +507,7 @@ def install_execution_reliability() -> Dict[str, Any]:
             }
 
         _patch_ig_demo_marker()
+        _patch_ig_positions_cache()
         CategoryExecutionEngine.tick = _reliable_category_tick
         CategoryExecutionEngine.status = _reliable_category_status
         CategoryStrategyEngine._loop = _reliable_strategy_loop
@@ -427,6 +517,7 @@ def install_execution_reliability() -> Dict[str, Any]:
             "version": VERSION,
             "installed": True,
             "ig_demo_marker_fixed": True,
+            "ig_positions_short_cache": True,
             "candidate_exception_isolation": True,
             "live_refresh_independent_of_historical_refresh": True,
             "historical_execution_veto": False,
@@ -486,7 +577,17 @@ def execution_health_snapshot(
     ranked = 0
     strong = 0
     prime = 0
-    by_category: Dict[str, Dict[str, int]] = {}
+    by_category: Dict[str, Dict[str, Any]] = {}
+    signal_blockers: Counter[str] = Counter()
+    blocked_candidates: List[Dict[str, Any]] = []
+    historical_only_prefixes = (
+        "HOLDOUT_",
+        "WF_",
+        "WALK_FORWARD_",
+        "PROFIT_FACTOR_",
+        "SELECTION_UNSTABLE",
+        "FORWARD_VALIDATION_NOT_YET_PRIME",
+    )
     try:
         rankings = (
             forward_prime.category_rankings()
@@ -517,6 +618,42 @@ def execution_health_snapshot(
             cat_prime = sum(
                 1 for row in rows if bool(row.get("prime_qualified"))
             )
+            cat_blockers: Counter[str] = Counter()
+            for row in rows:
+                if bool(row.get("standard_eligible")):
+                    continue
+                raw_reasons = list(row.get("rejection_reasons") or [])
+                operational_reasons: List[str] = []
+                for raw_reason in raw_reasons:
+                    reason = str(raw_reason or "").upper().strip()
+                    if not reason:
+                        continue
+                    if reason.startswith(historical_only_prefixes):
+                        continue
+                    operational_reasons.append(reason)
+                    signal_blockers[reason] += 1
+                    cat_blockers[reason] += 1
+                blocked_candidates.append(
+                    {
+                        "category": category,
+                        "symbol": row.get("symbol") or row.get("market"),
+                        "direction": row.get("direction"),
+                        "quant_pct": (
+                            round(_to_float(row.get("quant_confidence")) * 100.0, 2)
+                        ),
+                        "model_ai_pct": (
+                            round(_to_float(row.get("model_ai_confidence")) * 100.0, 2)
+                        ),
+                        "fast": row.get("live_fast_score")
+                        if row.get("live_fast_score") is not None
+                        else row.get("smart_fast_score"),
+                        "signal_age_seconds": row.get("signal_age_seconds"),
+                        "quote_age_seconds": row.get("quote_age_seconds"),
+                        "ig_tradeable": row.get("ig_tradeable"),
+                        "spread_pass": row.get("spread_pass"),
+                        "reasons": operational_reasons[:8],
+                    }
+                )
             ranked += cat_ranked
             strong += cat_strong
             prime += cat_prime
@@ -524,6 +661,7 @@ def execution_health_snapshot(
                 "ranked": cat_ranked,
                 "strong": cat_strong,
                 "prime": cat_prime,
+                "top_signal_blockers": dict(cat_blockers.most_common(5)),
             }
     except Exception as exc:
         reliability["ranking_health_error"] = _compact_error(exc)
@@ -540,12 +678,39 @@ def execution_health_snapshot(
     tick_error = reliability.get("tick_error")
     last_result = str(reliability.get("last_open_result") or "")
 
+    tick_at = (
+        portfolio_state.get("last_tick_at")
+        if isinstance(portfolio_state, dict)
+        else None
+    )
+    tick_age = _age_seconds(tick_at)
+    scan_at = intelligence_state.get("last_run_at")
+    scan_age = _age_seconds(scan_at)
+    execution_poll = float(getattr(portfolio, "poll_seconds", 30) or 30)
+    scan_interval = float(getattr(intelligence, "scan_interval_seconds", 180) or 180)
+    execution_stale_after = max(120.0, execution_poll * 3.0 + 30.0)
+    scan_stale_after = max(360.0, scan_interval * 2.0 + 60.0)
+    broker_last_error = str(broker_status.get("last_error") or "")
+    historical_allowance_exhausted = (
+        "historical-data-allowance" in broker_last_error.lower()
+        or "historical data allowance" in broker_last_error.lower()
+    )
+
     if not configured:
         flow_state = "BROKER_NOT_CONFIGURED"
     elif not enabled:
         flow_state = "CATEGORY_AUTOTRADE_DISABLED"
     elif tick_error:
         flow_state = "EXECUTION_TICK_ERROR"
+    elif historical_allowance_exhausted and (
+        (tick_age is not None and tick_age > execution_stale_after)
+        or (scan_age is not None and scan_age > scan_stale_after)
+    ):
+        flow_state = "IG_HISTORICAL_ALLOWANCE_EXHAUSTED"
+    elif tick_age is not None and tick_age > execution_stale_after:
+        flow_state = "EXECUTION_LOOP_STALE"
+    elif scan_age is not None and scan_age > scan_stale_after:
+        flow_state = "LIVE_SCANNER_STALE"
     elif strong <= 0:
         flow_state = "WAITING_FOR_STRONG_SIGNAL"
     elif last_result in {
@@ -585,16 +750,9 @@ def execution_health_snapshot(
             "global_ig_max_positions": getattr(
                 portfolio, "global_ig_max_positions", None
             ),
-            "last_tick_at": (
-                portfolio_state.get("last_tick_at")
-                if isinstance(portfolio_state, dict)
-                else None
-            ),
-            "last_tick_age_seconds": _age_seconds(
-                portfolio_state.get("last_tick_at")
-                if isinstance(portfolio_state, dict)
-                else None
-            ),
+            "last_tick_at": tick_at,
+            "last_tick_age_seconds": tick_age,
+            "stale_after_seconds": execution_stale_after,
             "last_error": (
                 portfolio_state.get("last_error")
                 if isinstance(portfolio_state, dict)
@@ -607,10 +765,9 @@ def execution_health_snapshot(
             "execution_reliability": reliability,
         },
         "live_scanner": {
-            "last_run_at": intelligence_state.get("last_run_at"),
-            "last_run_age_seconds": _age_seconds(
-                intelligence_state.get("last_run_at")
-            ),
+            "last_run_at": scan_at,
+            "last_run_age_seconds": scan_age,
+            "stale_after_seconds": scan_stale_after,
             "last_error": intelligence_state.get("last_error"),
             "live_refresh_independent": bool(
                 intelligence_state.get("live_refresh_independent")
@@ -634,6 +791,34 @@ def execution_health_snapshot(
                 )
             ),
             "execution_veto": False,
+        },
+        "signal_gate_diagnostics": {
+            "operational_blockers": dict(signal_blockers.most_common(12)),
+            "blocked_candidates": sorted(
+                blocked_candidates,
+                key=lambda row: (
+                    len(row.get("reasons") or []),
+                    -(_to_float(row.get("fast"))),
+                ),
+            )[:12],
+            "historical_only_reasons_excluded": True,
+        },
+        "broker_data_policy": {
+            "ig_historical_candles_enabled": str(
+                os.getenv("IG_DEMO_MARKET_DATA", "true")
+            ).strip().lower() not in {"0", "false", "no", "off"},
+            "ig_historical_candles_role": "DISABLED_FOR_ANALYSIS" if str(
+                os.getenv("IG_DEMO_MARKET_DATA", "true")
+            ).strip().lower() in {"0", "false", "no", "off"} else "ENABLED",
+            "ig_quotes_and_execution": "IG_DEMO_PRIMARY",
+            "historical_allowance_exhausted": historical_allowance_exhausted,
+            "positions_cache_seconds": _positions_cache_seconds(),
+            "positions_cache_hits": int(
+                getattr(broker, "_jasong_positions_cache_hits", 0) or 0
+            ) if broker is not None else 0,
+            "positions_cache_misses": int(
+                getattr(broker, "_jasong_positions_cache_misses", 0) or 0
+            ) if broker is not None else 0,
         },
         "live_money_execution": False,
     }
