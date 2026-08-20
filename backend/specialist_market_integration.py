@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 
 from category_execution_engine import CategoryExecutionEngine
+from mobile_sync import MobileSyncCache
+from trade_excursions import TradeExcursionTracker
 from category_strategy_engine import (
     CATEGORY_ORDER,
     CategoryStrategyEngine,
@@ -393,6 +395,37 @@ def install_specialist_market_system(
     )
     portfolio.start_thread()
 
+    # ========================================================
+    # ALWAYS-ON BROKER EXCURSION + MOBILE SNAPSHOT LAYER
+    # ========================================================
+    # These workers are observation/reporting only. They do not alter any
+    # trading gate, sizing rule, position, target, stop, or broker order.
+    excursion_tracker = TradeExcursionTracker(
+        broker=broker,
+        state_path=os.getenv(
+            "TRADE_EXCURSION_STATE_PATH",
+            f"{base_dir}/jasong_trade_excursions.json",
+        ),
+    )
+    excursion_tracker.install_broker_observer()
+    excursion_tracker.start_thread()
+    excursion_tracker.install_runtime_merges(
+        portfolio=portfolio,
+        compound_engine=compound_engine,
+        legacy_evidence=legacy_forward_evidence,
+    )
+
+    mobile_sync = MobileSyncCache(
+        intelligence=intelligence,
+        portfolio=portfolio,
+        forward_prime=forward_prime,
+        compound_engine=compound_engine,
+        market_data=resilient_data,
+        excursion_tracker=excursion_tracker,
+        legacy_evidence=legacy_forward_evidence,
+    )
+    mobile_sync.start_thread()
+
     app.title = (
         "Jasong AI Trader V6.9.4 Forward API"
     )
@@ -779,6 +812,40 @@ def install_specialist_market_system(
         app
     )
 
+    # ========================================================
+    # FAST MOBILE SYNC + MFE/MAE ROUTES
+    # ========================================================
+    # /mobile/sync never calls IG directly. It returns the last complete
+    # server-built snapshot, so Android resume does not fan out into a long
+    # series of category/forward/broker requests.
+    app.add_api_route(
+        "/mobile/sync",
+        mobile_sync.snapshot,
+        methods=["GET"],
+        name="jasong_mobile_sync_v694",
+    )
+
+    app.add_api_route(
+        "/mobile/sync/rebuild",
+        mobile_sync.build,
+        methods=["POST"],
+        name="jasong_mobile_sync_rebuild_v694",
+    )
+
+    app.add_api_route(
+        "/trade-excursions/status",
+        excursion_tracker.status,
+        methods=["GET"],
+        name="jasong_trade_excursions_status_v694",
+    )
+
+    app.add_api_route(
+        "/trade-excursions",
+        excursion_tracker.snapshot,
+        methods=["GET"],
+        name="jasong_trade_excursions_v694",
+    )
+
     return {
         "intelligence":
             intelligence,
@@ -788,6 +855,10 @@ def install_specialist_market_system(
             forward_prime,
         "market_data":
             resilient_data,
+        "excursion_tracker":
+            excursion_tracker,
+        "mobile_sync":
+            mobile_sync,
         "version":
             "6.9.4-forward",
     }
