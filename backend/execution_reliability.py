@@ -13,7 +13,7 @@ from category_strategy_engine import CategoryStrategyEngine
 from ig_demo_broker import IGDemoBroker
 
 
-VERSION = "6.9.4-execution-reliability-v3"
+VERSION = "6.9.4-execution-reliability-v4"
 
 
 def _now() -> float:
@@ -91,10 +91,10 @@ _ORIGINAL_IG_CLOSE_POSITION = IGDemoBroker.close_position
 
 def _positions_cache_seconds() -> float:
     try:
-        value = float(os.getenv("IG_DEMO_POSITIONS_CACHE_SECONDS", "3"))
+        value = float(os.getenv("IG_DEMO_POSITIONS_CACHE_SECONDS", "5"))
     except Exception:
-        value = 3.0
-    return max(0.5, min(10.0, value))
+        value = 5.0
+    return max(0.5, min(15.0, value))
 
 
 def _invalidate_ig_positions_cache(broker: Any) -> None:
@@ -108,6 +108,38 @@ def _invalidate_ig_positions_cache(broker: Any) -> None:
             broker._jasong_positions_cache_at = 0.0
         except Exception:
             pass
+
+
+
+def _positions_stale_fallback_seconds() -> float:
+    try:
+        value = float(
+            os.getenv("IG_DEMO_POSITIONS_STALE_FALLBACK_SECONDS", "30")
+        )
+    except Exception:
+        value = 30.0
+    return max(5.0, min(60.0, value))
+
+
+def _ig_nontrading_pressure(self: IGDemoBroker) -> tuple[int, int]:
+    """Return current locally-observed non-trading usage and configured ceiling."""
+    limit = int(getattr(self, "nontrading_rpm", 20) or 20)
+    count = 0
+    lock = getattr(self, "_rate_lock", None)
+    queue = getattr(self, "_nontrading_times", None)
+    try:
+        if lock is not None:
+            with lock:
+                now = _now()
+                if queue is not None:
+                    while queue and now - queue[0] >= 60.0:
+                        queue.popleft()
+                    count = len(queue)
+        elif queue is not None:
+            count = len(queue)
+    except Exception:
+        count = 0
+    return count, max(1, limit)
 
 
 def _cached_ig_positions(self: IGDemoBroker) -> Dict[str, Any]:
@@ -127,10 +159,32 @@ def _cached_ig_positions(self: IGDemoBroker) -> Dict[str, Any]:
     with lock:
         payload = getattr(self, "_jasong_positions_cache_payload", None)
         cached_at = float(getattr(self, "_jasong_positions_cache_at", 0.0) or 0.0)
-        if isinstance(payload, dict) and (now - cached_at) <= ttl:
+        age = max(0.0, now - cached_at) if cached_at > 0 else float("inf")
+        if isinstance(payload, dict) and age <= ttl:
             self._jasong_positions_cache_hits = int(
                 getattr(self, "_jasong_positions_cache_hits", 0) or 0
             ) + 1
+            self._jasong_positions_cache_last_mode = "FRESH"
+            return copy.deepcopy(payload)
+
+        # The broker wrapper deliberately rate-limits authenticated GET traffic.
+        # If that local queue is already near its ceiling, a recent positions
+        # snapshot is safer for reconciliation than blocking the execution loop
+        # for repeated 60-second allowance waits. Order writes invalidate this
+        # cache immediately; broker-side TP closure can therefore be delayed only
+        # by this bounded stale-fallback window.
+        pressure_count, pressure_limit = _ig_nontrading_pressure(self)
+        stale_limit = _positions_stale_fallback_seconds()
+        near_limit = pressure_count >= max(1, pressure_limit - 2)
+        if (
+            isinstance(payload, dict)
+            and age <= stale_limit
+            and near_limit
+        ):
+            self._jasong_positions_cache_stale_hits = int(
+                getattr(self, "_jasong_positions_cache_stale_hits", 0) or 0
+            ) + 1
+            self._jasong_positions_cache_last_mode = "STALE_RATE_PRESSURE"
             return copy.deepcopy(payload)
 
     payload = _ORIGINAL_IG_POSITIONS(self)
@@ -140,6 +194,7 @@ def _cached_ig_positions(self: IGDemoBroker) -> Dict[str, Any]:
         self._jasong_positions_cache_misses = int(
             getattr(self, "_jasong_positions_cache_misses", 0) or 0
         ) + 1
+        self._jasong_positions_cache_last_mode = "LIVE_IG"
     return payload
 
 
@@ -165,6 +220,7 @@ def _patch_ig_positions_cache() -> None:
     IGDemoBroker.close_position = _close_position_invalidate_cache
     IGDemoBroker._jasong_positions_cache_patch = True
 
+_ORIGINAL_CATEGORY_RECONCILE = CategoryExecutionEngine._reconcile
 _ORIGINAL_CATEGORY_OPEN_CANDIDATE = CategoryExecutionEngine._open_candidate
 _ORIGINAL_CATEGORY_TICK = CategoryExecutionEngine.tick
 _ORIGINAL_CATEGORY_STATUS = CategoryExecutionEngine.status
@@ -175,7 +231,7 @@ _INSTALLED = False
 
 def _execution_health_state(engine: CategoryExecutionEngine) -> Dict[str, Any]:
     state = engine._state.setdefault("execution_reliability", {})
-    state.setdefault("version", VERSION)
+    state["version"] = VERSION
     state.setdefault("candidate_error_cooldowns", {})
     state.setdefault("recent_errors", [])
     state.setdefault("recent_blockers", {})
@@ -185,6 +241,196 @@ def _execution_health_state(engine: CategoryExecutionEngine) -> Dict[str, Any]:
     state.setdefault("tick_count", 0)
     return state
 
+
+
+
+def _norm_key(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _cached_evaluation_tag_index(intelligence: Any) -> Dict[str, List[str]]:
+    """Build exposure-tag lookups directly from cached strategy evaluations.
+
+    This deliberately does NOT call intelligence.candidates() or forward
+    validator metrics. Exposure tagging must be cheap enough to use inside the
+    30-second execution loop.
+    """
+    state = getattr(intelligence, "_state", {}) or {}
+    evaluations = state.get("evaluations") if isinstance(state, dict) else {}
+    if not isinstance(evaluations, dict):
+        evaluations = {}
+
+    index: Dict[str, List[str]] = {}
+    for raw in evaluations.values():
+        if not isinstance(raw, dict):
+            continue
+        tags = [str(x) for x in (raw.get("exposure_tags") or []) if str(x or "")]
+        if not tags:
+            continue
+        epic = str(raw.get("ig_epic") or "").upper().strip()
+        symbol = _norm_key(raw.get("symbol") or raw.get("key"))
+        market = _norm_key(raw.get("market") or raw.get("name"))
+        if epic:
+            index["E:" + epic] = list(tags)
+        if symbol:
+            index["S:" + symbol] = list(tags)
+        if market:
+            index["S:" + market] = list(tags)
+    return index
+
+
+def _make_light_external_positions_source(
+    *,
+    broker: Any,
+    intelligence: Any,
+) -> Any:
+    """Return a broker-position source with no forward-ranking dependency."""
+    def _source() -> List[Dict[str, Any]]:
+        try:
+            payload = broker.positions() or {}
+        except Exception:
+            return []
+
+        tag_index = _cached_evaluation_tag_index(intelligence)
+        rows: List[Dict[str, Any]] = []
+        for item in payload.get("positions", []) or []:
+            if not isinstance(item, dict):
+                continue
+            position = item.get("position") or {}
+            market = item.get("market") or {}
+            if not isinstance(position, dict) or not isinstance(market, dict):
+                continue
+
+            ref = str(position.get("dealReference") or "").upper().strip()
+            if ref.startswith("JSCAT_"):
+                continue
+
+            epic = str(
+                market.get("epic")
+                or position.get("epic")
+                or ""
+            ).upper().strip()
+            market_name = str(
+                market.get("instrumentName")
+                or market.get("marketName")
+                or ""
+            )
+            symbol_key = _norm_key(market_name)
+            tags = tag_index.get(
+                "E:" + epic,
+                tag_index.get("S:" + symbol_key, []),
+            )
+
+            if ref.startswith("JSCMP_"):
+                track = "COMPOUND"
+            elif ref.startswith(
+                ("JASONG_", "JSBND_", "JSLRN_", "JSELT_")
+            ):
+                track = "JASONG_LEARNING"
+            else:
+                track = "EXTERNAL_MANUAL"
+
+            rows.append(
+                {
+                    "track": track,
+                    "deal_id": position.get("dealId"),
+                    "deal_reference": position.get("dealReference"),
+                    "epic": epic,
+                    "market_name": market_name,
+                    "direction": str(position.get("direction") or "").upper(),
+                    "size": (
+                        position.get("size")
+                        if position.get("size") is not None
+                        else position.get("dealSize")
+                    ),
+                    "market_status": market.get("marketStatus"),
+                    "exposure_tags": list(tags),
+                }
+            )
+        return rows
+
+    return _source
+
+
+def _optimized_category_reconcile(
+    self: CategoryExecutionEngine,
+) -> List[Dict[str, Any]]:
+    """Reconcile with one broker snapshot + one external snapshot per tick.
+
+    The original implementation recalculated external positions once for every
+    tracked open Category position. That external source itself performed full
+    forward rankings, so a simple reconciliation could expand into several
+    expensive validator/ranking passes and repeated broker GETs.
+    """
+    health = _execution_health_state(self)
+    health["phase"] = "RECONCILE_BROKER_POSITIONS"
+    health["phase_started_at"] = _now()
+
+    broker_payload = self.broker.positions()
+    broker_rows = self._broker_rows(broker_payload)
+    by_deal = {
+        str(row.get("deal_id") or ""): row
+        for row in broker_rows
+    }
+
+    health["phase"] = "RECONCILE_EXTERNAL_POSITIONS"
+    external = self._external_positions()
+    self._jasong_last_external_positions = [
+        dict(row) for row in external if isinstance(row, dict)
+    ]
+    self._jasong_last_external_positions_at = _now()
+
+    tracked = self._state.setdefault("positions", [])
+    now = _now()
+    for item in tracked:
+        if item.get("status") != "OPEN":
+            continue
+        deal_id = str(item.get("deal_id") or "")
+        broker_row = by_deal.get(deal_id)
+        if broker_row:
+            item["broker"] = broker_row
+            item["last_seen_at"] = now
+            item["dual_track"] = self._is_dual_track(
+                item.get("epic"),
+                self._jasong_last_external_positions,
+            )
+        else:
+            item["status"] = "CLOSED_RECONCILED"
+            item["closed_at"] = now
+            self._state["closes"] = int(self._state.get("closes") or 0) + 1
+            try:
+                self._journal(
+                    "CLOSE_RECONCILED",
+                    deal_id=deal_id,
+                    symbol=item.get("symbol"),
+                    category=item.get("category"),
+                )
+            except Exception:
+                pass
+
+    self._jasong_last_broker_rows = [dict(row) for row in broker_rows]
+    self._jasong_last_broker_rows_at = now
+    health["last_reconcile_completed_at"] = _now()
+    health["last_reconcile_broker_positions"] = len(broker_rows)
+    health["last_reconcile_external_positions"] = len(
+        self._jasong_last_external_positions
+    )
+    return broker_rows
+
+
+def _cached_external_for_tick(
+    self: CategoryExecutionEngine,
+    *,
+    max_age: float = 15.0,
+) -> List[Dict[str, Any]]:
+    rows = getattr(self, "_jasong_last_external_positions", None)
+    at = _to_float(
+        getattr(self, "_jasong_last_external_positions_at", 0.0),
+        0.0,
+    )
+    if isinstance(rows, list) and (_now() - at) <= max_age:
+        return [dict(row) for row in rows if isinstance(row, dict)]
+    return self._external_positions()
 
 
 def _category_downsize_candidates(
@@ -523,7 +769,12 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
         blockers: Counter[str] = Counter()
 
         try:
+            health["phase"] = "RECONCILE"
+            health["phase_started_at"] = _now()
             self._reconcile()
+
+            health["phase"] = "DUE_CLOSES"
+            health["phase_started_at"] = _now()
             self._due_closes()
 
             configured = bool(
@@ -543,8 +794,14 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
             elif not configured:
                 health["last_open_result"] = "IG_DEMO_NOT_CONFIGURED"
             else:
-                external = self._external_positions()
+                health["phase"] = "EXTERNAL_SNAPSHOT"
+                health["phase_started_at"] = _now()
+                external = _cached_external_for_tick(self)
+
+                health["phase"] = "RANKINGS"
+                health["phase_started_at"] = _now()
                 rankings = self.ranking_source() or {}
+                health["rankings_ready_at"] = _now()
                 cooldowns = health.setdefault("candidate_error_cooldowns", {})
                 retry_seconds = max(
                     15,
@@ -663,7 +920,32 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
                             recent = health.setdefault("recent_errors", [])
                             recent.append(dict(health["last_candidate_error"]))
                             health["recent_errors"] = recent[-20:]
-                            cooldowns[key] = _now() + retry_seconds
+                            size_plan = health.get("last_size_plan")
+                            if (
+                                label == "INSUFFICIENT_FUNDS"
+                                and isinstance(size_plan, dict)
+                                and size_plan.get("candidate") == key
+                                and size_plan.get("final_result")
+                                == "MINIMUM_DEAL_UNAFFORDABLE"
+                            ):
+                                label = "MINIMUM_DEAL_UNAFFORDABLE"
+                                health["last_open_result"] = label
+                                health["last_candidate_error"]["classification"] = label
+                                recent[-1]["classification"] = label
+                                try:
+                                    funds_cooldown = int(
+                                        os.getenv(
+                                            "CATEGORY_EXECUTION_FUNDS_COOLDOWN_SECONDS",
+                                            "300",
+                                        )
+                                    )
+                                except Exception:
+                                    funds_cooldown = 300
+                                cooldown_for = max(60, min(1800, funds_cooldown))
+                            else:
+                                cooldown_for = retry_seconds
+
+                            cooldowns[key] = _now() + cooldown_for
                             blockers[label] += 1
                             try:
                                 self._journal(
@@ -687,6 +969,8 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
                 }
 
             health["recent_blockers"] = dict(blockers)
+            health["phase"] = "COMPLETE"
+            health["phase_started_at"] = _now()
             health["last_tick_completed_at"] = _now()
             health["last_tick_duration_seconds"] = round(
                 health["last_tick_completed_at"] - now, 3
@@ -703,7 +987,19 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
 
         self._state["last_tick_at"] = _now()
         self._persist()
-        return self.status()
+
+        # The background loop ignores tick()'s return value. Calling the full
+        # status() here would trigger another external-position/broker read after
+        # every tick, so return a cache-only summary instead.
+        return {
+            "version": getattr(self, "VERSION", "6.9.4"),
+            "enabled": bool(self.enabled),
+            "open_positions": len(self._open_positions()),
+            "last_tick_at": self._state.get("last_tick_at"),
+            "last_error": self._state.get("last_error"),
+            "execution_health": copy.deepcopy(health),
+            "live_money_execution": False,
+        }
 
 
 def _reliable_category_status(self: CategoryExecutionEngine) -> Dict[str, Any]:
@@ -814,7 +1110,12 @@ def _reliable_strategy_loop(self: CategoryStrategyEngine) -> None:
                 self._state["historical_refresh_execution_veto"] = False
                 self._persist()
 
-        self._stop.wait(self.scan_interval_seconds)
+        elapsed = max(0.0, _now() - cycle_started)
+        wait_for = max(
+            5.0,
+            float(self.scan_interval_seconds) - elapsed,
+        )
+        self._stop.wait(wait_for)
 
 
 def install_execution_reliability() -> Dict[str, Any]:
@@ -829,6 +1130,7 @@ def install_execution_reliability() -> Dict[str, Any]:
 
         _patch_ig_demo_marker()
         _patch_ig_positions_cache()
+        CategoryExecutionEngine._reconcile = _optimized_category_reconcile
         CategoryExecutionEngine._open_candidate = _adaptive_category_open_candidate
         CategoryExecutionEngine.tick = _reliable_category_tick
         CategoryExecutionEngine.status = _reliable_category_status
@@ -840,6 +1142,7 @@ def install_execution_reliability() -> Dict[str, Any]:
             "installed": True,
             "ig_demo_marker_fixed": True,
             "ig_positions_short_cache": True,
+            "single_snapshot_reconciliation": True,
             "candidate_exception_isolation": True,
             "adaptive_category_size_downshift": True,
             "minimum_deal_size_floor_enforced": True,
@@ -848,6 +1151,94 @@ def install_execution_reliability() -> Dict[str, Any]:
             "live_money_execution": False,
         }
 
+
+
+
+_RUNTIME_OPT_LOCK = threading.RLock()
+_RUNTIME_OPTIMIZED_IDS: set[int] = set()
+
+
+def _install_runtime_execution_optimizations(
+    *,
+    system: Optional[Dict[str, Any]],
+    broker: Any,
+) -> Dict[str, Any]:
+    """Wire lightweight exposure reads and freshness-compatible scan cadence."""
+    system = system or {}
+    portfolio = system.get("portfolio")
+    intelligence = system.get("intelligence")
+    if portfolio is None or intelligence is None or broker is None:
+        return {
+            "installed": False,
+            "reason": "specialist runtime not ready",
+        }
+
+    marker = id(portfolio)
+    with _RUNTIME_OPT_LOCK:
+        if marker in _RUNTIME_OPTIMIZED_IDS:
+            return {
+                "installed": True,
+                "already_installed": True,
+            }
+
+        portfolio.external_positions_source = _make_light_external_positions_source(
+            broker=broker,
+            intelligence=intelligence,
+        )
+
+        # Forward execution rejects signals older than 300s. The legacy scanner
+        # default is one market/category every 180s, which can leave a 9-10
+        # market category unrefreshed for ~27-30 minutes. Tighten the rolling
+        # cadence while leaving the strategy itself unchanged.
+        try:
+            scan_seconds = int(
+                os.getenv("JASONG_LIVE_SCAN_INTERVAL_SECONDS", "90")
+            )
+        except Exception:
+            scan_seconds = 90
+        scan_seconds = max(60, min(180, scan_seconds))
+        intelligence.scan_interval_seconds = scan_seconds
+
+        try:
+            candidate_ttl = int(
+                os.getenv("JASONG_EXECUTION_CANDIDATE_TTL_SECONDS", "300")
+            )
+        except Exception:
+            candidate_ttl = 300
+        candidate_ttl = max(180, min(300, candidate_ttl))
+        intelligence.candidate_ttl_seconds = candidate_ttl
+
+        _RUNTIME_OPTIMIZED_IDS.add(marker)
+
+        state = getattr(portfolio, "_state", None)
+        if isinstance(state, dict):
+            health = state.setdefault("execution_reliability", {})
+            health["lightweight_external_positions_source"] = True
+            health["single_snapshot_reconciliation"] = True
+            health["network_free_tick_return"] = True
+            health["scanner_interval_seconds"] = scan_seconds
+            health["execution_candidate_ttl_seconds"] = candidate_ttl
+            health["funds_rejection_cooldown_seconds"] = max(
+                60,
+                min(
+                    1800,
+                    int(
+                        os.getenv(
+                            "CATEGORY_EXECUTION_FUNDS_COOLDOWN_SECONDS",
+                            "300",
+                        )
+                    ),
+                ),
+            )
+
+        return {
+            "installed": True,
+            "lightweight_external_positions_source": True,
+            "single_snapshot_reconciliation": True,
+            "network_free_tick_return": True,
+            "scanner_interval_seconds": scan_seconds,
+            "execution_candidate_ttl_seconds": candidate_ttl,
+        }
 
 
 def _age_seconds(timestamp: Any) -> Optional[float]:
@@ -888,6 +1279,16 @@ def execution_health_snapshot(
         except Exception:
             reliability = {}
     reliability.pop("candidate_error_cooldowns", None)
+    tick_started_at = reliability.get("last_tick_started_at")
+    tick_completed_at = reliability.get("last_tick_completed_at")
+    active_tick_age = None
+    try:
+        started = float(tick_started_at or 0.0)
+        completed = float(tick_completed_at or 0.0)
+        if started > 0 and started > completed:
+            active_tick_age = round(max(0.0, _now() - started), 2)
+    except Exception:
+        active_tick_age = None
 
     intelligence_state = (
         getattr(intelligence, "_state", {}) if intelligence is not None else {}
@@ -1069,6 +1470,9 @@ def execution_health_snapshot(
             ),
             "last_tick_at": tick_at,
             "last_tick_age_seconds": tick_age,
+            "active_tick_age_seconds": active_tick_age,
+            "active_tick_phase": reliability.get("phase"),
+            "active_tick_phase_started_at": reliability.get("phase_started_at"),
             "stale_after_seconds": execution_stale_after,
             "last_error": (
                 portfolio_state.get("last_error")
@@ -1093,6 +1497,9 @@ def execution_health_snapshot(
                 "last_independent_live_refresh_at"
             ),
             "historical_refresh_execution_veto": False,
+            "scan_interval_seconds": getattr(intelligence, "scan_interval_seconds", None),
+            "candidate_ttl_seconds": getattr(intelligence, "candidate_ttl_seconds", None),
+            "last_loop_duration_seconds": intelligence_state.get("last_loop_duration_seconds"),
         },
         "historical_refresh": {
             "status": full_refresh.get("status"),
@@ -1120,6 +1527,26 @@ def execution_health_snapshot(
             )[:12],
             "historical_only_reasons_excluded": True,
         },
+        "runtime_architecture": {
+            "lightweight_external_positions_source": bool(
+                reliability.get("lightweight_external_positions_source")
+            ),
+            "single_snapshot_reconciliation": bool(
+                reliability.get("single_snapshot_reconciliation")
+            ),
+            "network_free_tick_return": bool(
+                reliability.get("network_free_tick_return")
+            ),
+            "scanner_interval_seconds": getattr(
+                intelligence, "scan_interval_seconds", None
+            ),
+            "execution_candidate_ttl_seconds": getattr(
+                intelligence, "candidate_ttl_seconds", None
+            ),
+            "funds_rejection_cooldown_seconds": reliability.get(
+                "funds_rejection_cooldown_seconds"
+            ),
+        },
         "broker_data_policy": {
             "ig_historical_candles_enabled": str(
                 os.getenv("IG_DEMO_MARKET_DATA", "true")
@@ -1130,12 +1557,25 @@ def execution_health_snapshot(
             "ig_quotes_and_execution": "IG_DEMO_PRIMARY",
             "historical_allowance_exhausted": historical_allowance_exhausted,
             "positions_cache_seconds": _positions_cache_seconds(),
+            "positions_stale_fallback_seconds": _positions_stale_fallback_seconds(),
             "positions_cache_hits": int(
                 getattr(broker, "_jasong_positions_cache_hits", 0) or 0
+            ) if broker is not None else 0,
+            "positions_cache_stale_hits": int(
+                getattr(broker, "_jasong_positions_cache_stale_hits", 0) or 0
             ) if broker is not None else 0,
             "positions_cache_misses": int(
                 getattr(broker, "_jasong_positions_cache_misses", 0) or 0
             ) if broker is not None else 0,
+            "positions_cache_last_mode": (
+                getattr(broker, "_jasong_positions_cache_last_mode", None)
+                if broker is not None else None
+            ),
+            "category_size_policy":
+                "DEFAULT_THEN_DEMO_ONLY_DOWNSHIFT_ON_EXPLICIT_INSUFFICIENT_FUNDS",
+            "category_default_size": getattr(portfolio, "default_size", None),
+            "never_below_ig_minimum": True,
+            "never_increases_size_on_funds_rejection": True,
         },
         "live_money_execution": False,
     }
@@ -1147,6 +1587,11 @@ def install_execution_health_route(
     system: Optional[Dict[str, Any]] = None,
     broker: Any = None,
 ) -> None:
+    _install_runtime_execution_optimizations(
+        system=system,
+        broker=broker,
+    )
+
     if any(
         getattr(route, "path", "") == "/execution-health"
         for route in getattr(app, "routes", [])
