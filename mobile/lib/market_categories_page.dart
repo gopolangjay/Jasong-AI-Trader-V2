@@ -40,9 +40,11 @@ class _MarketCategoriesPageState
 
   String selected = 'FOREX';
   List<Map<String, dynamic>> selections = [];
+  Map<String, List<Map<String, dynamic>>> cachedRankings = {};
   Map<String, dynamic> portfolioStatus = {};
   Map<String, dynamic> forwardStatus = {};
   Map<String, dynamic> dataHealth = {};
+  Map<String, dynamic> mobileSyncStatus = {};
 
   bool busy = false;
   bool refreshInFlight = false;
@@ -57,7 +59,7 @@ class _MarketCategoriesPageState
     Future.microtask(() => refreshAll());
 
     pollTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(seconds: 10),
       (_) {
         if (!refreshInFlight) {
           refreshAll(silent: true);
@@ -246,48 +248,69 @@ class _MarketCategoriesPageState
       setState(() {
         busy = true;
         if (!silent) error = null;
+        loadingStep = '/mobile/sync';
       });
     }
 
     try {
-      // Critical UX change:
-      // selected market ranking is applied immediately.
-      await _loadStep(
-        '/market-categories/$selected',
-        (payload) {
-          selections = _mapList(
-            payload['selections'],
-          );
-        },
-        timeoutSeconds: 25,
-        silent: silent,
+      final payload = await _getRetry(
+        '/mobile/sync',
+        attempts: 2,
+        timeoutSeconds: 12,
       );
 
-      // These status calls fill summary badges later.
-      // They do NOT block the selected market rows.
-      await _loadStep(
-        '/category-portfolio/status',
-        (payload) =>
-            portfolioStatus = payload,
-        timeoutSeconds: 15,
-        silent: true,
-      );
+      if (!mounted) return;
 
-      await _loadStep(
-        '/forward-validation/status',
-        (payload) =>
-            forwardStatus = payload,
-        timeoutSeconds: 20,
-        silent: true,
-      );
+      final rankingsRaw = payload['category_rankings'];
+      final parsed = <String, List<Map<String, dynamic>>>{};
+      if (rankingsRaw is Map) {
+        for (final category in categories) {
+          parsed[category] = _mapList(rankingsRaw[category]);
+        }
+      }
 
-      await _loadStep(
-        '/market-categories/data-health',
-        (payload) =>
-            dataHealth = payload,
-        timeoutSeconds: 15,
-        silent: true,
-      );
+      setState(() {
+        cachedRankings = parsed;
+        selections = List<Map<String, dynamic>>.from(
+          parsed[selected] ?? const <Map<String, dynamic>>[],
+        );
+
+        final portfolio = payload['category_portfolio_status'];
+        if (portfolio is Map) {
+          portfolioStatus = Map<String, dynamic>.from(portfolio);
+        }
+        final forward = payload['forward_validation_status'];
+        if (forward is Map) {
+          forwardStatus = Map<String, dynamic>.from(forward);
+        }
+        final health = payload['market_data_health'];
+        if (health is Map) {
+          dataHealth = Map<String, dynamic>.from(health);
+        }
+        mobileSyncStatus = payload;
+        lastUpdated = DateTime.now();
+        error = null;
+      });
+    } catch (e) {
+      // Compatibility fallback during deployment: keep the original endpoint
+      // path available, but only when the unified snapshot is unavailable.
+      try {
+        await _loadStep(
+          '/market-categories/$selected',
+          (payload) {
+            selections = _mapList(payload['selections']);
+          },
+          timeoutSeconds: 25,
+          silent: silent,
+        );
+      } catch (_) {}
+
+      if (!mounted) return;
+      if (!silent && selections.isEmpty) {
+        setState(() {
+          error = _friendlyError('/mobile/sync', e);
+        });
+      }
     } finally {
       refreshInFlight = false;
       if (mounted) {
@@ -306,11 +329,15 @@ class _MarketCategoriesPageState
 
     setState(() {
       selected = category;
-      selections = [];
+      selections = List<Map<String, dynamic>>.from(
+        cachedRankings[category] ?? const <Map<String, dynamic>>[],
+      );
       error = null;
     });
 
-    await refreshAll();
+    // Cached switch is instant; refresh the single coherent server snapshot
+    // in the background so the selected category stays current.
+    await refreshAll(silent: selections.isNotEmpty);
   }
 
   double _num(dynamic value) {
