@@ -12,11 +12,15 @@ from typing import Any, Dict, List, Optional
 
 
 class TradeExcursionTracker:
-    """Persist broker-observed MFE/MAE for every open IG DEMO position.
+    """Persist broker-observed MFE/MAE and enforce a Jasong-owned profit target.
 
-    The tracker is observation-only. It never opens, closes, resizes or modifies
-    a broker position. Price extremes are based on the executable IG quote seen
-    by periodic REST reconciliation:
+    Price extremes are based on the executable IG quote seen by periodic REST
+    reconciliation. The MFE/MAE recorder itself never changes entries, stops,
+    sizes, qualification gates or strategy selection. A separate close-only
+    rule inside this tracker can close Jasong-owned IG DEMO positions when the
+    configured favourable price move reaches the requested take-profit target.
+
+    Price basis:
       * BUY uses bid as the observable exit-side price.
       * SELL uses offer as the observable exit-side price.
 
@@ -27,7 +31,7 @@ class TradeExcursionTracker:
     Therefore MFE is normally >= 0 and MAE is normally <= 0.
     """
 
-    VERSION = "6.9.4-sync-excursions"
+    VERSION = "6.9.4-sync-excursions-tp30"
     OWNED_PREFIXES = (
         "JSCAT_",
         "JSCMP_",
@@ -70,6 +74,24 @@ class TradeExcursionTracker:
                 int(os.getenv("TRADE_EXCURSION_CLOSE_CONFIRM_MISSES", "2")),
             ),
         )
+        self.take_profit_enabled = str(
+            os.getenv("TRADE_TAKE_PROFIT_ENABLED", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            raw_tp = float(os.getenv("TRADE_TAKE_PROFIT_PCT", "30"))
+        except Exception:
+            raw_tp = 30.0
+        self.take_profit_pct = max(0.01, min(500.0, raw_tp))
+        try:
+            raw_retry = int(os.getenv("TRADE_TAKE_PROFIT_RETRY_SECONDS", "60"))
+        except Exception:
+            raw_retry = 60
+        self.take_profit_retry_seconds = max(10, min(900, raw_retry))
+        try:
+            raw_native_retry = int(os.getenv("TRADE_TAKE_PROFIT_NATIVE_RETRY_SECONDS", "300"))
+        except Exception:
+            raw_native_retry = 300
+        self.take_profit_native_retry_seconds = max(30, min(3600, raw_native_retry))
         self._lock = threading.RLock()
         self._sync_lock = threading.Lock()
         self._stop = threading.Event()
@@ -225,6 +247,202 @@ class TradeExcursionTracker:
             6,
         )
 
+    @staticmethod
+    def _current_favourable_pct(record: Dict[str, Any]) -> Optional[float]:
+        entry = TradeExcursionTracker._safe_float(record.get("entry_price"))
+        current = TradeExcursionTracker._safe_float(record.get("current_price"))
+        direction = str(record.get("direction") or "").upper().strip()
+        if entry is None or entry <= 0 or current is None:
+            return None
+        if direction == "BUY":
+            return ((current - entry) / entry) * 100.0
+        if direction == "SELL":
+            return ((entry - current) / entry) * 100.0
+        return None
+
+    def _update_take_profit_fields(self, record: Dict[str, Any], now: float) -> bool:
+        """Update TP telemetry and return True when a close should be attempted."""
+        entry = self._safe_float(record.get("entry_price"))
+        direction = str(record.get("direction") or "").upper().strip()
+        current = self._safe_float(record.get("current_price"))
+        target_pct = float(self.take_profit_pct)
+        record["take_profit_enabled"] = bool(self.take_profit_enabled)
+        record["take_profit_target_pct"] = self._round(target_pct, 6)
+        record["take_profit_basis"] = "ENTRY_PRICE_FAVOURABLE_MOVE_PCT"
+
+        if entry is not None and entry > 0:
+            if direction == "BUY":
+                target_price = entry * (1.0 + target_pct / 100.0)
+            elif direction == "SELL":
+                target_price = entry * (1.0 - target_pct / 100.0)
+            else:
+                target_price = None
+            record["take_profit_target_price"] = self._round(target_price)
+
+        favourable = self._current_favourable_pct(record)
+        record["current_favourable_pct"] = self._round(favourable, 6)
+
+        mfe_pct = self._safe_float(record.get("mfe_pct"))
+        reached_ever = bool(mfe_pct is not None and mfe_pct >= target_pct)
+        record["take_profit_reached"] = reached_ever
+        if reached_ever and record.get("take_profit_reached_at") is None:
+            record["take_profit_reached_at"] = now
+            record["take_profit_first_reached_price"] = self._round(current)
+
+        if not self.take_profit_enabled:
+            return False
+        if not bool(record.get("jasong_owned")):
+            return False
+        if str(record.get("status") or "").upper() != "OPEN":
+            return False
+        if favourable is None or favourable < target_pct:
+            return False
+
+        state = str(record.get("take_profit_close_state") or "").upper()
+        last_attempt = self._safe_float(record.get("take_profit_last_attempt_at")) or 0.0
+        if state in {"CLOSED", "CLOSE_VERIFIED"}:
+            return False
+        if state in {"TRIGGERED", "CLOSE_SENT", "CLOSE_PENDING"} and (now - last_attempt) < self.take_profit_retry_seconds:
+            return False
+        if state in {"ERROR", "DEFERRED_MARKET_CLOSED"} and (now - last_attempt) < self.take_profit_retry_seconds:
+            return False
+
+        record["take_profit_close_state"] = "TRIGGERED"
+        record["take_profit_triggered_at"] = record.get("take_profit_triggered_at") or now
+        record["take_profit_trigger_price"] = self._round(current)
+        record["take_profit_trigger_favourable_pct"] = self._round(favourable, 6)
+        return True
+
+    def _native_take_profit_needed(self, record: Dict[str, Any], now: float) -> bool:
+        if not self.take_profit_enabled or not bool(record.get("jasong_owned")):
+            return False
+        if str(record.get("status") or "").upper() != "OPEN":
+            return False
+        target = self._safe_float(record.get("take_profit_target_price"))
+        if target is None or target <= 0:
+            return False
+        favourable = self._safe_float(record.get("current_favourable_pct"))
+        if favourable is not None and favourable >= self.take_profit_pct:
+            # Already at/through the target: close immediately rather than trying
+            # to install a limit behind the executable market.
+            return False
+        state = str(record.get("native_take_profit_state") or "").upper()
+        if state in {"CONFIRMED", "ATTACHED"}:
+            attached = self._safe_float(record.get("native_take_profit_level"))
+            if attached is not None and abs(attached - target) <= max(1e-8, abs(target) * 1e-9):
+                return False
+        last_attempt = self._safe_float(record.get("native_take_profit_last_attempt_at")) or 0.0
+        return (now - last_attempt) >= self.take_profit_native_retry_seconds
+
+    def _attach_native_take_profit(self, deal_id: str) -> None:
+        """Attach an IG DEMO native limitLevel so TP survives app/server gaps."""
+        now = time.time()
+        with self._lock:
+            record = self._state.setdefault("trades", {}).get(str(deal_id))
+            if not isinstance(record, dict):
+                return
+            target = self._safe_float(record.get("take_profit_target_price"))
+            if target is None or target <= 0:
+                return
+            record["native_take_profit_last_attempt_at"] = now
+            record["native_take_profit_attempts"] = int(record.get("native_take_profit_attempts") or 0) + 1
+            record["native_take_profit_state"] = "ATTACHING"
+            self._persist()
+
+        try:
+            request_fn = getattr(self.broker, "_request", None)
+            if not callable(request_fn):
+                raise RuntimeError("IG broker update-position request method unavailable")
+            acknowledgement = request_fn(
+                "PUT",
+                f"/positions/otc/{deal_id}",
+                version=2,
+                payload={"limitLevel": float(target)},
+            ) or {}
+            ref = str(acknowledgement.get("dealReference") or "").strip()
+            confirmation = {}
+            confirm_fn = getattr(self.broker, "confirm", None)
+            if ref and callable(confirm_fn):
+                confirmation = confirm_fn(ref) or {}
+            deal_status = str(confirmation.get("dealStatus") or "").upper().strip()
+            rejected = deal_status == "REJECTED"
+            with self._lock:
+                record = self._state.setdefault("trades", {}).get(str(deal_id))
+                if not isinstance(record, dict):
+                    return
+                record["native_take_profit_deal_reference"] = ref or None
+                record["native_take_profit_level"] = self._round(target)
+                record["native_take_profit_confirmation"] = {
+                    "dealStatus": confirmation.get("dealStatus"),
+                    "reason": confirmation.get("reason"),
+                    "limitLevel": confirmation.get("limitLevel"),
+                    "status": confirmation.get("status"),
+                }
+                if rejected:
+                    record["native_take_profit_state"] = "REJECTED"
+                    record["native_take_profit_error"] = str(confirmation.get("reason") or confirmation)
+                else:
+                    record["native_take_profit_state"] = "CONFIRMED" if confirmation else "ATTACHED"
+                    record["native_take_profit_attached_at"] = time.time()
+                self._persist()
+        except Exception as exc:
+            with self._lock:
+                record = self._state.setdefault("trades", {}).get(str(deal_id))
+                if isinstance(record, dict):
+                    record["native_take_profit_state"] = "ERROR"
+                    record["native_take_profit_error"] = f"{type(exc).__name__}: {exc}"
+                    record["native_take_profit_last_attempt_at"] = time.time()
+                    self._persist()
+
+    def _execute_take_profit_close(self, deal_id: str) -> None:
+        now = time.time()
+        with self._lock:
+            record = self._state.setdefault("trades", {}).get(str(deal_id))
+            if not isinstance(record, dict):
+                return
+            record["take_profit_last_attempt_at"] = now
+            record["take_profit_close_attempts"] = int(record.get("take_profit_close_attempts") or 0) + 1
+            record["take_profit_close_state"] = "CLOSE_PENDING"
+            self._persist()
+
+        try:
+            result = self.broker.close_position(str(deal_id)) or {}
+            status = str(result.get("status") or result.get("dealStatus") or "").upper().strip()
+            verified = bool(result.get("closeVerified"))
+            success = verified or status in {"ACCEPTED", "ALREADY_CLOSED_OR_NOT_FOUND"}
+            deferred = status == "CLOSE_DEFERRED_MARKET_CLOSED"
+            compact_result = {
+                "status": status or None,
+                "dealStatus": result.get("dealStatus"),
+                "reason": result.get("reason"),
+                "closeVerified": verified,
+                "level": result.get("level"),
+                "profit": result.get("profit"),
+                "profitCurrency": result.get("profitCurrency"),
+            }
+            with self._lock:
+                record = self._state.setdefault("trades", {}).get(str(deal_id))
+                if not isinstance(record, dict):
+                    return
+                record["take_profit_close_result"] = compact_result
+                if success:
+                    record["take_profit_close_state"] = "CLOSE_VERIFIED" if verified else "CLOSE_SENT"
+                    record["take_profit_closed_at"] = time.time()
+                    record["close_reason"] = f"TAKE_PROFIT_{self.take_profit_pct:g}_PCT"
+                elif deferred:
+                    record["take_profit_close_state"] = "DEFERRED_MARKET_CLOSED"
+                else:
+                    record["take_profit_close_state"] = status or "CLOSE_PENDING"
+                self._persist()
+        except Exception as exc:
+            with self._lock:
+                record = self._state.setdefault("trades", {}).get(str(deal_id))
+                if isinstance(record, dict):
+                    record["take_profit_close_state"] = "ERROR"
+                    record["take_profit_close_error"] = f"{type(exc).__name__}: {exc}"
+                    record["take_profit_last_attempt_at"] = time.time()
+                    self._persist()
+
     def observe_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Update excursion state from an already-fetched IG positions payload.
 
@@ -238,6 +456,8 @@ class TradeExcursionTracker:
             now = time.time()
             broker_rows = self._broker_rows(payload or {})
             seen = {row["deal_id"] for row in broker_rows}
+            take_profit_candidates: List[str] = []
+            native_take_profit_candidates: List[str] = []
 
             with self._lock:
                 trades = self._state.setdefault("trades", {})
@@ -296,6 +516,10 @@ class TradeExcursionTracker:
                         record["highest_price_since_entry"] = max(high, current)
                         record["lowest_price_since_entry"] = min(low, current)
                     self._calculate(record)
+                    if self._update_take_profit_fields(record, now):
+                        take_profit_candidates.append(deal_id)
+                    elif self._native_take_profit_needed(record, now):
+                        native_take_profit_candidates.append(deal_id)
 
                 for deal_id, record in list(trades.items()):
                     if not isinstance(record, dict):
@@ -335,6 +559,14 @@ class TradeExcursionTracker:
                     self._state.get("sync_count") or 0
                 ) + 1
                 self._persist()
+
+            # Execute closes outside the state lock. The enclosing sync lock stays
+            # held so a close-triggered broker reconciliation cannot recursively
+            # start another TP pass.
+            for deal_id in native_take_profit_candidates:
+                self._attach_native_take_profit(deal_id)
+            for deal_id in take_profit_candidates:
+                self._execute_take_profit_close(deal_id)
             return self.status()
         except Exception as exc:
             with self._lock:
@@ -370,6 +602,7 @@ class TradeExcursionTracker:
 
         self.broker.positions = MethodType(observed_positions, self.broker)
         self.broker._trade_excursion_observer_installed = True
+        self.broker._trade_excursion_tracker = self
 
     def sync_once(self) -> Dict[str, Any]:
         """Safety refresh when no other engine has reconciled broker positions."""
@@ -446,6 +679,27 @@ class TradeExcursionTracker:
             "highest_price_vs_entry_pct",
             "highest_price_as_pct_of_entry",
             "lowest_price_vs_entry_pct",
+            "current_favourable_pct",
+            "take_profit_enabled",
+            "take_profit_target_pct",
+            "take_profit_basis",
+            "take_profit_target_price",
+            "take_profit_reached",
+            "take_profit_reached_at",
+            "take_profit_first_reached_price",
+            "take_profit_triggered_at",
+            "take_profit_trigger_price",
+            "take_profit_trigger_favourable_pct",
+            "take_profit_close_state",
+            "take_profit_close_attempts",
+            "take_profit_closed_at",
+            "take_profit_close_error",
+            "native_take_profit_state",
+            "native_take_profit_level",
+            "native_take_profit_attached_at",
+            "native_take_profit_attempts",
+            "native_take_profit_error",
+            "close_reason",
             "last_observed_at",
         ):
             if excursion.get(field) is not None:
@@ -455,6 +709,11 @@ class TradeExcursionTracker:
             "poll_seconds": self.poll_seconds,
             "price_basis": excursion.get("price_basis"),
             "last_observed_at": excursion.get("last_observed_at"),
+            "take_profit_enabled": excursion.get("take_profit_enabled"),
+            "take_profit_target_pct": excursion.get("take_profit_target_pct"),
+            "take_profit_close_state": excursion.get("take_profit_close_state"),
+            "native_take_profit_state": excursion.get("native_take_profit_state"),
+            "native_take_profit_level": excursion.get("native_take_profit_level"),
         }
         return out
 
@@ -488,7 +747,7 @@ class TradeExcursionTracker:
         compound_engine: Optional[Any] = None,
         legacy_evidence: Optional[Any] = None,
     ) -> None:
-        """Expose excursion fields through existing read surfaces only."""
+        """Expose excursion and take-profit telemetry through existing read surfaces."""
         if portfolio is not None and not getattr(
             portfolio, "_excursion_positions_patch", False
         ):
@@ -561,7 +820,13 @@ class TradeExcursionTracker:
         return {
             "version": self.VERSION,
             "enabled": True,
-            "observation_only": True,
+            "mfe_mae_observation_only": True,
+            "take_profit_execution_enabled": bool(self.take_profit_enabled),
+            "take_profit_target_pct": self.take_profit_pct,
+            "take_profit_basis": "ENTRY_PRICE_FAVOURABLE_MOVE_PCT",
+            "take_profit_scope": "JASONG_OWNED_IG_DEMO_POSITIONS_ONLY",
+            "take_profit_primary_execution": "IG_DEMO_NATIVE_LIMIT_LEVEL",
+            "take_profit_fallback_execution": "SERVER_OBSERVED_CLOSE_POSITION",
             "poll_seconds": self.poll_seconds,
             "price_extreme_basis": "BROKER_OBSERVED_EXIT_SIDE_QUOTES",
             "formulas": {
@@ -577,6 +842,19 @@ class TradeExcursionTracker:
             "tracked_trades": len(rows),
             "open_trades": sum(
                 1 for row in rows if str(row.get("status") or "").upper() == "OPEN"
+            ),
+            "take_profit_reached_trades": sum(
+                1 for row in rows if bool(row.get("take_profit_reached"))
+            ),
+            "take_profit_close_sent_trades": sum(
+                1 for row in rows
+                if str(row.get("take_profit_close_state") or "").upper()
+                in {"CLOSE_SENT", "CLOSE_VERIFIED"}
+            ),
+            "native_take_profit_attached_trades": sum(
+                1 for row in rows
+                if str(row.get("native_take_profit_state") or "").upper()
+                in {"ATTACHED", "CONFIRMED"}
             ),
             "last_sync_at": self._state.get("last_sync_at"),
             "last_error": self._state.get("last_error"),
