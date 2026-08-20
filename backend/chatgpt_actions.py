@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 VERSION = "6.9.4-forward-compact-actions-tp30"
-HEADER_NAME = "orapelengjasongandgalalelojasong"
+HEADER_NAME = "X-Jasong-Action-Key"
 OWNED_CATEGORY_PREFIX = "JSCAT_"
 
 _WRITE_LOCK = threading.RLock()
