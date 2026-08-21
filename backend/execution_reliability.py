@@ -17,7 +17,7 @@ from prime_policy import ForwardPrimeArchitecture
 from trade_excursions import TradeExcursionTracker
 
 
-VERSION = "6.9.4-wr-guard-v5"
+VERSION = "6.9.4-wr-guard-v5.1-health-cache"
 
 
 def _now() -> float:
@@ -1943,6 +1943,29 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
                 health["phase_started_at"] = _now()
                 rankings = self.ranking_source() or {}
                 health["rankings_ready_at"] = _now()
+
+                # V5.1: execution-health must never recalculate forward rankings.
+                # Cache only the already-completed execution ranking snapshot in
+                # memory. The health route reads this snapshot without touching
+                # validator.sync(), broker evidence, bootstrap metrics or market
+                # analysis. This keeps diagnostics instant even with hundreds of
+                # settled forward trades.
+                try:
+                    self._jasong_health_rankings_cache = {
+                        str(category): [
+                            copy.deepcopy(row)
+                            for row in (rows or [])[:5]
+                            if isinstance(row, dict)
+                        ]
+                        for category, rows in rankings.items()
+                        if isinstance(rows, list)
+                    }
+                    self._jasong_health_rankings_cache_at = _now()
+                    health["health_rankings_cache_at"] = (
+                        self._jasong_health_rankings_cache_at
+                    )
+                except Exception:
+                    pass
                 cooldowns = health.setdefault("candidate_error_cooldowns", {})
                 retry_seconds = max(
                     15,
@@ -2541,16 +2564,25 @@ def execution_health_snapshot(
         "SELECTION_UNSTABLE",
         "FORWARD_VALIDATION_NOT_YET_PRIME",
     )
+    # V5.1: health is a cache-only diagnostic surface. Do NOT call
+    # forward_prime.category_rankings() here: that path performs validator.sync(),
+    # forward metrics/bootstrap work and evidence merging. With a large forward
+    # ledger, a browser health request could therefore take a very long time.
+    # The execution thread already computes the authoritative rankings; consume
+    # only its last completed snapshot.
+    rankings_cache_at = None
+    rankings_cache_age = None
+    rankings_cache_state = "WARMING_UP"
     try:
-        rankings = (
-            forward_prime.category_rankings()
-            if forward_prime is not None
-            else (
-                portfolio.ranking_source()
-                if portfolio is not None
-                else {}
-            )
-        ) or {}
+        rankings = getattr(portfolio, "_jasong_health_rankings_cache", None)
+        rankings_cache_at = getattr(
+            portfolio, "_jasong_health_rankings_cache_at", None
+        )
+        if not isinstance(rankings, dict):
+            rankings = {}
+        if rankings_cache_at is not None:
+            rankings_cache_age = _age_seconds(rankings_cache_at)
+        rankings_cache_state = "READY" if rankings else "WARMING_UP"
         for category in (
             "FOREX",
             "INDICES",
@@ -2662,6 +2694,8 @@ def execution_health_snapshot(
         flow_state = "EXECUTION_LOOP_STALE"
     elif scan_age is not None and scan_age > scan_stale_after:
         flow_state = "LIVE_SCANNER_STALE"
+    elif rankings_cache_state == "WARMING_UP":
+        flow_state = "HEALTH_CACHE_WARMING_UP"
     elif standard <= 0 and live_strong > 0:
         flow_state = "WAITING_FOR_VALIDATED_STANDARD"
     elif live_strong <= 0:
@@ -2727,6 +2761,9 @@ def execution_health_snapshot(
             "standard_eligible_candidates": standard,
             "strong_candidates": live_strong,
             "prime_candidates": prime,
+            "health_rankings_cache_state": rankings_cache_state,
+            "health_rankings_cache_at": rankings_cache_at,
+            "health_rankings_cache_age_seconds": rankings_cache_age,
             "by_category": by_category,
             "execution_reliability": reliability,
         },
@@ -2798,6 +2835,8 @@ def execution_health_snapshot(
             "continuation_confirmation_required": True,
             "post_trade_reentry_reset_required": True,
             "category_exit_policy": "VOLATILITY_R",
+            "execution_health_cache_only": True,
+            "execution_health_recomputes_forward_rankings": False,
         },
         "broker_data_policy": {
             "ig_historical_candles_enabled": str(
@@ -2864,4 +2903,3 @@ def install_execution_health_route(
 
 
 INSTALL_STATUS = install_execution_reliability()
-
