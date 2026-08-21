@@ -20,7 +20,7 @@ from forward_validation import ForwardValidationEngine
 from trade_excursions import TradeExcursionTracker
 
 
-VERSION = "6.9.4-wr-guard-v5.2-forward-cache"
+VERSION = "6.9.4-adaptive-forward-v6"
 
 
 def _now() -> float:
@@ -3299,3 +3299,1659 @@ def install_execution_health_route(
 
 
 INSTALL_STATUS = install_execution_reliability()
+
+
+# ===========================================================================
+# V6 ADAPTIVE FORWARD TRADER
+# ===========================================================================
+#
+# V5.2 fixed execution reliability and restored the strict validated-standard
+# gate. V6 keeps those protections, but adds a controlled path for genuinely
+# improved strategies to build fresh broker-settled evidence:
+#
+#   WATCH -> PROBATION -> VALIDATED -> PRIME
+#
+# Probation is IG DEMO only, minimum-legal-size biased, continuation-confirmed,
+# exposure-capped, and cannot enter Compound. Promotion/quarantine is computed
+# from NEW V6 broker-settled evidence so legacy poor execution does not make
+# recovery mathematically impossible. Seeded failed strategy families remain
+# hard-quarantined from new optimizer selection.
+# ===========================================================================
+
+V6_POLICY_VERSION = "V6_ADAPTIVE_FORWARD"
+V6_POLICY_LABEL = "WATCH_PROBATION_VALIDATED_PRIME"
+
+V6_PROBATION_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "FOREX": {"quant": 0.45, "ai": 0.50, "fast": 72.0},
+    "INDICES": {"quant": 0.45, "ai": 0.55, "fast": 75.0},
+    "CRYPTO": {"quant": 0.40, "ai": 0.50, "fast": 70.0},
+    "METALS": {"quant": 0.50, "ai": 0.55, "fast": 78.0},
+    "ENERGY": {"quant": 0.50, "ai": 0.55, "fast": 78.0},
+    "SHARES": {"quant": 0.45, "ai": 0.55, "fast": 75.0},
+}
+
+V6_SOFT_HIST_WR_MIN = 0.45
+V6_SOFT_HIST_PF_MIN = 0.90
+V6_PROBATION_SCORE_MIN = 0.58
+V6_VALIDATED_SCORE_MIN = 0.62
+V6_PROBATION_REVIEW_MIN = 10
+V6_PROBATION_PROMOTION_MIN = 15
+V6_PROBATION_MAX_SETTLED = 30
+V6_PROMOTION_WR_MIN = 0.55
+V6_PROMOTION_PF_MIN = 1.20
+V6_PROMOTION_EXPECTANCY_MIN = 0.05
+V6_PROMOTION_MAX_DD_R = 4.0
+V6_PROMOTION_BOOTSTRAP_MIN = 0.65
+V6_QUARANTINE_WR_FLOOR = 0.45
+V6_QUARANTINE_PF_FLOOR = 0.85
+V6_QUARANTINE_EXPECTANCY_FLOOR = -0.10
+V6_PRIME_MIN_SETTLED = 20
+V6_PRIME_WR_MIN = 0.55
+V6_PRIME_PF_MIN = 1.25
+V6_PRIME_EXPECTANCY_MIN = 0.08
+V6_PRIME_MAX_DD_R = 4.0
+V6_PRIME_BOOTSTRAP_MIN = 0.75
+
+_V6_BASE_FORWARD_ENRICH = ForwardPrimeArchitecture.enrich
+_V6_BASE_FORWARD_METRICS = ForwardValidationEngine.metrics
+_V6_BASE_CATEGORY_MAY_OPEN = CategoryExecutionEngine._may_open
+_V6_BASE_TRACKER_UPDATE = TradeExcursionTracker._update_take_profit_fields
+_V6_BASE_TRACKER_MERGE = TradeExcursionTracker.merge
+_V6_BASE_TRACKER_STATUS = TradeExcursionTracker.status
+_V6_BASE_CATEGORY_STATUS = CategoryExecutionEngine.status
+_V6_BASE_HEALTH_SNAPSHOT = execution_health_snapshot
+_V6_BASE_RUNTIME_OPTIMIZATIONS = _install_runtime_execution_optimizations
+_V6_BASE_AGE_CACHED_RANKINGS = _age_cached_rankings
+_V6_BASE_IG_ACCOUNTS = IGDemoBroker.accounts
+_V6_BASE_IG_OPEN = IGDemoBroker.open_epic_position
+_V6_BASE_IG_CLOSE = IGDemoBroker.close_position
+
+
+def _v6_env_float(name: str, default: float, lo: float, hi: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except Exception:
+        value = default
+    return max(lo, min(hi, value))
+
+
+def _v6_env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        value = default
+    return max(lo, min(hi, value))
+
+
+def _v6_nested_raw(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = row.get("raw")
+    out = dict(raw) if isinstance(raw, dict) else {}
+    for key, value in row.items():
+        if key not in {"raw", "raw_json", "entry_snapshot_json", "provenance_json"}:
+            out.setdefault(key, value)
+    return out
+
+
+def _v6_metric_pf(values: List[float]) -> float:
+    gains = sum(v for v in values if v > 0)
+    losses = abs(sum(v for v in values if v < 0))
+    if losses <= 0:
+        return 99.0 if gains > 0 else 0.0
+    return gains / losses
+
+
+def _v6_metric_drawdown(values: List[float]) -> float:
+    equity = 0.0
+    peak = 0.0
+    maximum = 0.0
+    for value in reversed(values):
+        equity += value
+        peak = max(peak, equity)
+        maximum = max(maximum, peak - equity)
+    return maximum
+
+
+def _v6_summary_for_rows(
+    validator: ForwardValidationEngine,
+    rows: List[Dict[str, Any]],
+    *,
+    key: str,
+    bootstrap: bool = True,
+) -> Dict[str, Any]:
+    values = [_to_float(row.get("r_multiple"), 0.0) for row in rows]
+    settled = len(rows)
+    wins = sum(
+        1 for row in rows
+        if str(row.get("broker_result") or "").upper() == "WIN"
+    )
+    wr = wins / settled if settled else 0.0
+    pf = _v6_metric_pf(values)
+    expectancy = sum(values) / settled if settled else 0.0
+    drawdown = _v6_metric_drawdown(values)
+    probability = 0.0
+    if bootstrap and settled >= 8:
+        try:
+            probability = validator._bootstrap_positive_probability(values, key)
+        except Exception:
+            probability = 0.0
+    r_sources: Counter[str] = Counter(
+        str(row.get("r_source") or "UNKNOWN") for row in rows
+    )
+    return {
+        "settled_trades": settled,
+        "wins": wins,
+        "losses": settled - wins,
+        "win_rate": round(wr, 6),
+        "win_rate_pct": round(wr * 100.0, 2),
+        "profit_factor": round(pf, 6),
+        "expectancy_r": round(expectancy, 6),
+        "max_drawdown_r": round(drawdown, 6),
+        "bootstrap_probability_positive_expectancy": round(probability, 6),
+        "bootstrap_probability_positive_expectancy_pct": round(probability * 100.0, 2),
+        "r_sources": dict(r_sources),
+    }
+
+
+def _v6_behavior_profile(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    mfe_r_values: List[float] = []
+    mae_r_values: List[float] = []
+    winner_capture: List[float] = []
+    loss_count = 0
+    bad_entry_losses = 0
+    observed = 0
+
+    for row in rows:
+        raw = _v6_nested_raw(row)
+        stop_pct = abs(_to_float(
+            raw.get("planned_stop_pct")
+            or raw.get("protective_stop_pct"),
+            0.0,
+        ))
+        mfe_pct = _to_float(raw.get("mfe_pct"), float("nan"))
+        mae_pct = abs(_to_float(
+            raw.get("mae_abs_pct")
+            if raw.get("mae_abs_pct") is not None
+            else raw.get("mae_pct"),
+            float("nan"),
+        ))
+        if stop_pct <= 0:
+            continue
+        if mfe_pct != mfe_pct or mae_pct != mae_pct:
+            continue
+
+        observed += 1
+        mfe_r = max(0.0, mfe_pct) / stop_pct
+        mae_r = max(0.0, mae_pct) / stop_pct
+        mfe_r_values.append(mfe_r)
+        mae_r_values.append(mae_r)
+        result = str(row.get("broker_result") or "").upper()
+        if result == "LOSS":
+            loss_count += 1
+            if mfe_r < 0.15 and mae_r >= 0.50:
+                bad_entry_losses += 1
+        elif result == "WIN" and mfe_r > 0:
+            source = str(row.get("r_source") or "").upper()
+            if "BINARY_OUTCOME" not in source:
+                realised_r = max(0.0, _to_float(row.get("r_multiple"), 0.0))
+                winner_capture.append(max(0.0, min(1.5, realised_r / mfe_r)))
+
+    bad_rate = bad_entry_losses / loss_count if loss_count else 0.0
+    capture = (
+        sum(winner_capture) / len(winner_capture)
+        if winner_capture else None
+    )
+    entry_quality = 1.0 - bad_rate if loss_count >= 3 else 0.50
+    exit_quality = max(0.0, min(1.0, capture)) if capture is not None else 0.50
+    score = 0.65 * entry_quality + 0.35 * exit_quality
+    return {
+        "observed_trades": observed,
+        "losses_with_excursion": loss_count,
+        "bad_entry_losses": bad_entry_losses,
+        "bad_entry_loss_rate": round(bad_rate, 6),
+        "bad_entry_loss_rate_pct": round(bad_rate * 100.0, 2),
+        "avg_mfe_r": round(sum(mfe_r_values) / len(mfe_r_values), 6) if mfe_r_values else None,
+        "avg_mae_r": round(sum(mae_r_values) / len(mae_r_values), 6) if mae_r_values else None,
+        "winner_capture_efficiency": round(capture, 6) if capture is not None else None,
+        "winner_capture_efficiency_pct": round(capture * 100.0, 2) if capture is not None else None,
+        "entry_quality_score": round(entry_quality, 6),
+        "exit_quality_score": round(exit_quality, 6),
+        "behavior_score": round(score, 6),
+    }
+
+
+def _v6_regime_profiles(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        raw = _v6_nested_raw(row)
+        regime = str(
+            raw.get("market_regime")
+            or raw.get("regime")
+            or "UNKNOWN"
+        ).upper().strip()
+        buckets.setdefault(regime, []).append(row)
+    output: Dict[str, Dict[str, Any]] = {}
+    for regime, bucket in buckets.items():
+        values = [_to_float(row.get("r_multiple"), 0.0) for row in bucket]
+        wins = sum(
+            1 for row in bucket
+            if str(row.get("broker_result") or "").upper() == "WIN"
+        )
+        settled = len(bucket)
+        output[regime] = {
+            "settled_trades": settled,
+            "win_rate": round(wins / settled, 6) if settled else 0.0,
+            "win_rate_pct": round((wins / settled) * 100.0, 2) if settled else 0.0,
+            "profit_factor": round(_v6_metric_pf(values), 6),
+            "expectancy_r": round(sum(values) / settled, 6) if settled else 0.0,
+        }
+    return output
+
+
+def _v6_forward_metrics(
+    self: ForwardValidationEngine,
+    *,
+    strategy_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    sync: bool = True,
+) -> Dict[str, Any]:
+    base = _V6_BASE_FORWARD_METRICS(
+        self,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        sync=sync,
+    )
+    try:
+        rows = self.store.rows(
+            strategy_id=strategy_id,
+            symbol=symbol,
+            limit=max(80, int(self.config.rolling_window_trades)),
+        )
+    except Exception:
+        rows = []
+
+    v6_rows: List[Dict[str, Any]] = []
+    probation_rows: List[Dict[str, Any]] = []
+    validated_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        raw = _v6_nested_raw(row)
+        policy = str(
+            raw.get("policy_version")
+            or raw.get("execution_policy_version")
+            or ""
+        ).upper()
+        lane = str(
+            raw.get("execution_lane")
+            or raw.get("trade_class")
+            or ""
+        ).upper()
+        if policy.startswith(V6_POLICY_VERSION):
+            v6_rows.append(row)
+            if lane == "PROBATION":
+                probation_rows.append(row)
+            elif lane in {"VALIDATED", "PRIME", "VALIDATED_STRONG"}:
+                validated_rows.append(row)
+
+    adaptive = _v6_summary_for_rows(
+        self,
+        v6_rows[:40],
+        key=f"{strategy_id or symbol or 'ALL'}|V6_ADAPTIVE",
+        bootstrap=True,
+    )
+    probation = _v6_summary_for_rows(
+        self,
+        probation_rows[:40],
+        key=f"{strategy_id or symbol or 'ALL'}|V6_PROBATION",
+        bootstrap=True,
+    )
+    validated = _v6_summary_for_rows(
+        self,
+        validated_rows[:40],
+        key=f"{strategy_id or symbol or 'ALL'}|V6_VALIDATED",
+        bootstrap=True,
+    )
+    behavior_source = v6_rows[:40] if v6_rows else rows[:40]
+    behavior = _v6_behavior_profile(behavior_source)
+    regimes = _v6_regime_profiles(v6_rows[:40] if v6_rows else rows[:40])
+
+    adaptive_prime_checks = {
+        "minimum_settled_trades": adaptive["settled_trades"] >= V6_PRIME_MIN_SETTLED,
+        "win_rate": adaptive["win_rate"] >= V6_PRIME_WR_MIN,
+        "profit_factor": adaptive["profit_factor"] >= V6_PRIME_PF_MIN,
+        "expectancy_r": adaptive["expectancy_r"] >= V6_PRIME_EXPECTANCY_MIN,
+        "bootstrap_positive_expectancy": (
+            adaptive["bootstrap_probability_positive_expectancy"]
+            >= V6_PRIME_BOOTSTRAP_MIN
+        ),
+        "max_drawdown_r": adaptive["max_drawdown_r"] <= V6_PRIME_MAX_DD_R,
+    }
+    adaptive["prime_checks"] = adaptive_prime_checks
+    adaptive["prime_eligible"] = all(adaptive_prime_checks.values())
+
+    base = dict(base)
+    base["adaptive_v6"] = adaptive
+    base["probation_v6"] = probation
+    base["validated_v6"] = validated
+    base["behavior"] = behavior
+    base["regime_profiles"] = regimes
+    base["adaptive_policy_version"] = V6_POLICY_VERSION
+    return base
+
+
+def _v6_soft_historical_gate(row: Dict[str, Any]) -> tuple[bool, List[str]]:
+    reasons: List[str] = []
+    sample = int(_to_float(row.get("historical_trades"), 0.0))
+    wr = _to_float(row.get("historical_win_rate"), 0.0)
+    pf = _to_float(row.get("historical_profit_factor"), 0.0)
+    stable = bool(row.get("optimizer_selection_stable"))
+    if sample < 10:
+        reasons.append("PROBATION_HIST_SAMPLE_BELOW_10")
+    if wr < V6_SOFT_HIST_WR_MIN:
+        reasons.append("PROBATION_HIST_WR_BELOW_45")
+    if pf < V6_SOFT_HIST_PF_MIN:
+        reasons.append("PROBATION_HIST_PF_BELOW_0_90")
+    if not stable:
+        reasons.append("PROBATION_SELECTION_NOT_STABLE")
+    return len(reasons) == 0, reasons
+
+
+def _v6_probation_live_gate(row: Dict[str, Any]) -> tuple[bool, List[str]]:
+    category = str(row.get("category") or "UNKNOWN").upper().strip()
+    thresholds = V6_PROBATION_THRESHOLDS.get(
+        category,
+        {"quant": 0.45, "ai": 0.55, "fast": 75.0},
+    )
+    reasons: List[str] = []
+    direction = str(row.get("direction") or "").upper().strip()
+    quant = _to_float(row.get("quant_confidence"), 0.0)
+    ai = _to_float(row.get("model_ai_confidence"), 0.0)
+    fast = _to_float(
+        row.get("live_fast_score")
+        if row.get("live_fast_score") is not None
+        else row.get("smart_fast_score"),
+        0.0,
+    )
+    if direction not in {"BUY", "SELL"}:
+        reasons.append("PROBATION_NO_DIRECTION")
+    if quant < thresholds["quant"]:
+        reasons.append("PROBATION_QUANT_BELOW_CATEGORY_FLOOR")
+    if ai < thresholds["ai"]:
+        reasons.append("PROBATION_AI_BELOW_CATEGORY_FLOOR")
+    if fast < thresholds["fast"]:
+        reasons.append("PROBATION_FAST_BELOW_CATEGORY_FLOOR")
+    if not bool(row.get("ig_tradeable")):
+        reasons.append("PROBATION_IG_NOT_TRADEABLE")
+    if row.get("spread_pass") is not True:
+        reasons.append("PROBATION_SPREAD_GATE_FAIL")
+    provenance = row.get("provenance")
+    if isinstance(provenance, dict) and not bool(provenance.get("fresh")):
+        reasons.append("PROBATION_PROVENANCE_NOT_FRESH")
+    return len(reasons) == 0, reasons
+
+
+def _v6_promotion_state(metrics: Dict[str, Any]) -> tuple[bool, List[str]]:
+    probation = metrics.get("probation_v6")
+    probation = probation if isinstance(probation, dict) else {}
+    reasons: List[str] = []
+    if int(probation.get("settled_trades") or 0) < V6_PROBATION_PROMOTION_MIN:
+        reasons.append("PROBATION_SAMPLE_BELOW_PROMOTION_MIN")
+    if _to_float(probation.get("win_rate"), 0.0) < V6_PROMOTION_WR_MIN:
+        reasons.append("PROBATION_WR_BELOW_55")
+    if _to_float(probation.get("profit_factor"), 0.0) < V6_PROMOTION_PF_MIN:
+        reasons.append("PROBATION_PF_BELOW_1_20")
+    if _to_float(probation.get("expectancy_r"), 0.0) < V6_PROMOTION_EXPECTANCY_MIN:
+        reasons.append("PROBATION_EXPECTANCY_BELOW_0_05R")
+    if _to_float(probation.get("max_drawdown_r"), 999.0) > V6_PROMOTION_MAX_DD_R:
+        reasons.append("PROBATION_DRAWDOWN_ABOVE_4R")
+    if (
+        _to_float(probation.get("bootstrap_probability_positive_expectancy"), 0.0)
+        < V6_PROMOTION_BOOTSTRAP_MIN
+    ):
+        reasons.append("PROBATION_BOOTSTRAP_BELOW_65")
+    return len(reasons) == 0, reasons
+
+
+def _v6_dynamic_quarantine_state(metrics: Dict[str, Any]) -> tuple[bool, List[str]]:
+    adaptive = metrics.get("adaptive_v6")
+    adaptive = adaptive if isinstance(adaptive, dict) else {}
+    behavior = metrics.get("behavior")
+    behavior = behavior if isinstance(behavior, dict) else {}
+    settled = int(adaptive.get("settled_trades") or 0)
+    reasons: List[str] = []
+    if settled >= V6_PROBATION_REVIEW_MIN:
+        if _to_float(adaptive.get("win_rate"), 0.0) < V6_QUARANTINE_WR_FLOOR:
+            reasons.append("ADAPTIVE_WR_BELOW_45")
+        if _to_float(adaptive.get("profit_factor"), 0.0) < V6_QUARANTINE_PF_FLOOR:
+            reasons.append("ADAPTIVE_PF_BELOW_0_85")
+        if _to_float(adaptive.get("expectancy_r"), 0.0) < V6_QUARANTINE_EXPECTANCY_FLOOR:
+            reasons.append("ADAPTIVE_EXPECTANCY_BELOW_MINUS_0_10R")
+    if settled >= V6_PROBATION_MAX_SETTLED:
+        promoted, _ = _v6_promotion_state(metrics)
+        if not promoted:
+            reasons.append("ADAPTIVE_MAX_PROBATION_SAMPLE_WITHOUT_PROMOTION")
+    if (
+        int(behavior.get("losses_with_excursion") or 0) >= 5
+        and _to_float(behavior.get("bad_entry_loss_rate"), 0.0) >= 0.65
+    ):
+        reasons.append("ADAPTIVE_BAD_ENTRY_RATE_ABOVE_65")
+    return len(reasons) > 0, reasons
+
+
+def _v6_regime_score(row: Dict[str, Any], metrics: Dict[str, Any]) -> tuple[float, Dict[str, Any]]:
+    regime = str(
+        row.get("market_regime")
+        or row.get("regime")
+        or "UNKNOWN"
+    ).upper().strip()
+    profiles = metrics.get("regime_profiles")
+    profiles = profiles if isinstance(profiles, dict) else {}
+    profile = profiles.get(regime)
+    if not isinstance(profile, dict) or int(profile.get("settled_trades") or 0) < 3:
+        return 0.50, {}
+    wr = max(0.0, min(1.0, _to_float(profile.get("win_rate"), 0.0)))
+    pf = max(0.0, min(1.0, _to_float(profile.get("profit_factor"), 0.0) / 1.50))
+    return round(0.70 * wr + 0.30 * pf, 6), dict(profile)
+
+
+def _v6_forward_calibrated_score(row: Dict[str, Any], metrics: Dict[str, Any]) -> float:
+    hist_wr = max(0.0, min(1.0, _to_float(row.get("historical_win_rate"), 0.0)))
+    hist_pf = max(0.0, min(1.0, _to_float(row.get("historical_profit_factor"), 0.0) / 1.50))
+    hist_score = 0.65 * hist_wr + 0.35 * hist_pf
+
+    quant = max(0.0, min(1.0, _to_float(row.get("quant_confidence"), 0.0)))
+    ai = max(0.0, min(1.0, _to_float(row.get("model_ai_confidence"), 0.0)))
+    fast = max(0.0, min(1.0, _to_float(
+        row.get("live_fast_score")
+        if row.get("live_fast_score") is not None
+        else row.get("smart_fast_score"),
+        0.0,
+    ) / 100.0))
+    live_score = 0.25 * quant + 0.45 * ai + 0.30 * fast
+
+    adaptive = metrics.get("adaptive_v6")
+    adaptive = adaptive if isinstance(adaptive, dict) else {}
+    settled = int(adaptive.get("settled_trades") or 0)
+    source = adaptive if settled >= 5 else metrics
+    forward_wr = max(0.0, min(1.0, _to_float(source.get("win_rate"), hist_wr)))
+    forward_pf = max(0.0, min(1.0, _to_float(source.get("profit_factor"), 0.0) / 1.50))
+    expectancy = _to_float(source.get("expectancy_r"), 0.0)
+    expectancy_score = max(0.0, min(1.0, (expectancy + 0.20) / 0.50))
+    forward_score = 0.45 * forward_wr + 0.35 * forward_pf + 0.20 * expectancy_score
+
+    behavior = metrics.get("behavior")
+    behavior = behavior if isinstance(behavior, dict) else {}
+    behavior_score = max(0.0, min(1.0, _to_float(behavior.get("behavior_score"), 0.50)))
+    regime_score, _ = _v6_regime_score(row, metrics)
+
+    sample_weight = max(0.0, min(1.0, settled / 20.0))
+    early = 0.45 * hist_score + 0.45 * live_score + 0.10 * behavior_score
+    mature = (
+        0.20 * hist_score
+        + 0.25 * live_score
+        + 0.35 * forward_score
+        + 0.10 * behavior_score
+        + 0.10 * regime_score
+    )
+    score = (1.0 - sample_weight) * early + sample_weight * mature
+    return round(max(0.0, min(1.0, score)), 6)
+
+
+def _v6_adaptive_forward_enrich(
+    self: ForwardPrimeArchitecture,
+    raw: Dict[str, Any],
+    *,
+    forward_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    row = _V6_BASE_FORWARD_ENRICH(
+        self,
+        raw,
+        forward_metrics=forward_metrics,
+    )
+    metrics = row.get("forward_validation")
+    metrics = metrics if isinstance(metrics, dict) else (forward_metrics or {})
+
+    live_strong = bool(row.get("strong_qualified"))
+    strategy_unknown = _strategy_id(row) == "UNKNOWN"
+    seeded_quarantine = bool(row.get("strategy_quarantined"))
+    strict_validated = bool(row.get("validated_execution_gate"))
+    soft_ok, soft_reasons = _v6_soft_historical_gate(row)
+    probation_live_ok, probation_live_reasons = _v6_probation_live_gate(row)
+    promoted, promotion_reasons = _v6_promotion_state(metrics)
+    dynamic_quarantine, dynamic_reasons = _v6_dynamic_quarantine_state(metrics)
+    adaptive = metrics.get("adaptive_v6")
+    adaptive = adaptive if isinstance(adaptive, dict) else {}
+    legacy_settled = int(metrics.get("settled_trades") or 0)
+    legacy_wr = _to_float(metrics.get("win_rate"), 0.0)
+    legacy_hard_fail = bool(legacy_settled >= 30 and legacy_wr < 0.40 and not adaptive.get("settled_trades"))
+    if legacy_hard_fail:
+        dynamic_quarantine = True
+        dynamic_reasons.append("LEGACY_FORWARD_WR_BELOW_40_WITH_30_PLUS_TRADES")
+
+    score = _v6_forward_calibrated_score(row, metrics)
+    regime_score, regime_profile = _v6_regime_score(row, metrics)
+    weak_regime = bool(
+        int(regime_profile.get("settled_trades") or 0) >= 5
+        and _to_float(regime_profile.get("win_rate"), 0.0) < 0.40
+    )
+    if weak_regime:
+        dynamic_quarantine = True
+        dynamic_reasons.append("CURRENT_REGIME_FORWARD_WR_BELOW_40")
+
+    quarantine = bool(
+        seeded_quarantine
+        or dynamic_quarantine
+        or strategy_unknown
+    )
+
+    validated = bool(
+        live_strong
+        and not quarantine
+        and score >= V6_VALIDATED_SCORE_MIN
+        and (strict_validated or promoted)
+    )
+
+    probation = bool(
+        live_strong
+        and not validated
+        and not quarantine
+        and soft_ok
+        and probation_live_ok
+        and score >= V6_PROBATION_SCORE_MIN
+        and int((metrics.get("probation_v6") or {}).get("settled_trades") or 0)
+        < V6_PROBATION_MAX_SETTLED
+    )
+
+    base_prime = bool(row.get("prime_qualified"))
+    adaptive_prime = bool(adaptive.get("prime_eligible"))
+    prime = bool(validated and (base_prime or adaptive_prime))
+
+    if prime:
+        lane = "PRIME"
+    elif validated:
+        lane = "VALIDATED"
+    elif probation:
+        lane = "PROBATION"
+    elif live_strong:
+        lane = "WATCH"
+    else:
+        lane = "OBSERVE"
+
+    v5_reasons = list(row.get("rejection_reasons") or [])
+    adaptive_reasons: List[str] = []
+    adaptive_reasons.extend(soft_reasons)
+    adaptive_reasons.extend(probation_live_reasons)
+    if dynamic_quarantine:
+        adaptive_reasons.extend(dynamic_reasons)
+    if strategy_unknown:
+        adaptive_reasons.append("UNKNOWN_STRATEGY_ATTRIBUTION")
+    if score < V6_PROBATION_SCORE_MIN:
+        adaptive_reasons.append("ADAPTIVE_SCORE_BELOW_PROBATION_58")
+    if live_strong and not validated and not probation and not quarantine:
+        adaptive_reasons.append("WATCH_ONLY_NO_EXECUTION_LANE")
+
+    if lane in {"PROBATION", "VALIDATED", "PRIME"}:
+        rejection_reasons: List[str] = []
+    else:
+        rejection_reasons = list(dict.fromkeys(v5_reasons + adaptive_reasons))
+
+    row.update({
+        "policy_version": V6_POLICY_VERSION,
+        "adaptive_forward_policy": V6_POLICY_LABEL,
+        "execution_lane": lane,
+        "trade_class": lane,
+        "probation_eligible": probation,
+        "adaptive_validated": validated,
+        "validated_execution_gate": validated,
+        "standard_eligible": validated,
+        "trade_eligible": bool(validated or probation),
+        "learning_eligible": probation,
+        "ig_demo_learning_eligible": bool(validated or probation),
+        "prime_qualified": prime,
+        "execution_eligible": prime,
+        "eligible": prime,
+        "compound_eligible": bool(row.get("compound_slot_candidate") and prime),
+        "forward_calibrated_score": score,
+        "forward_calibrated_score_pct": round(score * 100.0, 2),
+        "forward_calibrated_score_is_probability": False,
+        "probation_score_threshold_pct": V6_PROBATION_SCORE_MIN * 100.0,
+        "validated_score_threshold_pct": V6_VALIDATED_SCORE_MIN * 100.0,
+        "soft_historical_admission_pass": soft_ok,
+        "soft_historical_admission_reasons": soft_reasons,
+        "probation_live_gate_pass": probation_live_ok,
+        "probation_live_gate_reasons": probation_live_reasons,
+        "probation_promotion_earned": promoted,
+        "probation_promotion_reasons": promotion_reasons,
+        "dynamic_quarantine": dynamic_quarantine,
+        "dynamic_quarantine_reasons": list(dict.fromkeys(dynamic_reasons)),
+        "adaptive_quarantine": quarantine,
+        "current_regime_forward_score": regime_score,
+        "current_regime_forward_profile": regime_profile,
+        "adaptive_v6_forward": adaptive,
+        "probation_v6_forward": metrics.get("probation_v6") or {},
+        "trade_behavior": metrics.get("behavior") or {},
+        "historical_validation_mode": "STANDARD_GATE_PLUS_CONTROLLED_FORWARD_PROBATION",
+        "historical_execution_veto": True,
+        "execution_basis": (
+            "ADAPTIVE_FORWARD_PRIME"
+            if prime else
+            "ADAPTIVE_FORWARD_VALIDATED"
+            if validated else
+            "CONTROLLED_IG_DEMO_PROBATION"
+            if probation else
+            "WATCH_ONLY"
+            if live_strong else
+            "OBSERVATION_ONLY"
+        ),
+        "validation_diagnostics": list(dict.fromkeys(v5_reasons + adaptive_reasons)),
+        "rejection_reasons": rejection_reasons,
+    })
+    return row
+
+
+def _v6_compute_guarded_forward_rankings(
+    self: ForwardPrimeArchitecture,
+    *args: Any,
+    **kwargs: Any,
+) -> Dict[str, List[Dict[str, Any]]]:
+    output = _ORIGINAL_FORWARD_RANKINGS(self, *args, **kwargs) or {}
+    for category, rows in list(output.items()):
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            validated = bool(row.get("adaptive_validated"))
+            probation = bool(row.get("probation_eligible"))
+            prime = bool(row.get("prime_qualified") and validated)
+            row["standard_eligible"] = validated
+            row["trade_eligible"] = bool(validated or probation)
+            row["learning_eligible"] = probation
+            row["ig_demo_learning_eligible"] = bool(validated or probation)
+            row["prime_qualified"] = prime
+            row["execution_eligible"] = prime
+            row["eligible"] = prime
+            row["compound_eligible"] = bool(
+                row.get("compound_slot_candidate") and prime
+            )
+        lane_priority = {"PRIME": 4, "VALIDATED": 3, "PROBATION": 2, "WATCH": 1, "OBSERVE": 0}
+        rows.sort(
+            key=lambda row: (
+                lane_priority.get(str(row.get("execution_lane") or "OBSERVE").upper(), 0),
+                _to_float(row.get("forward_calibrated_score"), 0.0),
+                _to_float(row.get("live_fast_score") or row.get("smart_fast_score"), 0.0),
+                _to_float(row.get("model_ai_confidence"), 0.0),
+                _to_float(row.get("quant_confidence"), 0.0),
+            ),
+            reverse=True,
+        )
+        for idx, row in enumerate(rows, start=1):
+            row["category_rank"] = idx
+            row["rank"] = idx
+            row["source_rank"] = idx
+            row["compound_slot_candidate"] = idx <= 2
+            row["compound_eligible"] = bool(idx <= 2 and row.get("prime_qualified"))
+    return output
+
+
+def _v6_age_cached_rankings(
+    self: ForwardPrimeArchitecture,
+    rankings: Dict[str, List[Dict[str, Any]]],
+    cache_age: float,
+) -> Dict[str, List[Dict[str, Any]]]:
+    output = _V6_BASE_AGE_CACHED_RANKINGS(self, rankings, cache_age)
+    for rows in output.values():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            reasons = {str(x) for x in (row.get("rejection_reasons") or [])}
+            if {"SIGNAL_STALE", "BROKER_QUOTE_STALE"} & reasons:
+                row["probation_eligible"] = False
+                row["trade_eligible"] = False
+                row["learning_eligible"] = False
+                row["ig_demo_learning_eligible"] = False
+                if str(row.get("execution_lane") or "").upper() == "PROBATION":
+                    row["execution_lane"] = "WATCH"
+                    row["trade_class"] = "WATCH"
+    return output
+
+
+def _v6_category_may_open(
+    self: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+    external: List[Dict[str, Any]],
+) -> tuple[bool, str]:
+    if bool(candidate.get("standard_eligible")):
+        return _V6_BASE_CATEGORY_MAY_OPEN(self, candidate, external)
+    if bool(candidate.get("probation_eligible")):
+        shadow = dict(candidate)
+        shadow["standard_eligible"] = True
+        return _V6_BASE_CATEGORY_MAY_OPEN(self, shadow, external)
+    return False, "not adaptive execution eligible"
+
+
+def _v6_probation_capacity_gate(
+    engine: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+) -> tuple[bool, str]:
+    if str(candidate.get("execution_lane") or "").upper() != "PROBATION":
+        return True, "NOT_PROBATION"
+    open_rows = engine._open_positions()
+    probation_rows = [
+        row for row in open_rows
+        if str(row.get("execution_lane") or row.get("trade_class") or "").upper() == "PROBATION"
+    ]
+    global_cap = _v6_env_int("ADAPTIVE_MAX_OPEN_PROBATION", 2, 1, 5)
+    category_cap = _v6_env_int("ADAPTIVE_MAX_OPEN_PROBATION_PER_CATEGORY", 1, 1, 3)
+    strategy_cap = _v6_env_int("ADAPTIVE_MAX_OPEN_PROBATION_PER_STRATEGY", 1, 1, 2)
+    if len(probation_rows) >= global_cap:
+        return False, "PROBATION_GLOBAL_POSITION_CAP_REACHED"
+    category = str(candidate.get("category") or "").upper()
+    if sum(1 for row in probation_rows if str(row.get("category") or "").upper() == category) >= category_cap:
+        return False, "PROBATION_CATEGORY_POSITION_CAP_REACHED"
+    strategy = _strategy_id(candidate)
+    if sum(1 for row in probation_rows if _strategy_id(row) == strategy) >= strategy_cap:
+        return False, "PROBATION_STRATEGY_POSITION_CAP_REACHED"
+    return True, "PROBATION_CAPACITY_AVAILABLE"
+
+
+def _v6_account_cache_lock(broker: Any) -> threading.RLock:
+    lock = getattr(broker, "_jasong_v6_account_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        broker._jasong_v6_account_lock = lock
+    return lock
+
+
+def _v6_parse_account_payload(broker: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    accounts = payload.get("accounts") if isinstance(payload, dict) else None
+    accounts = accounts if isinstance(accounts, list) else []
+    status = broker.status() if hasattr(broker, "status") else {}
+    wanted = str((status or {}).get("account_id") or "").strip()
+    selected: Dict[str, Any] = {}
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = str(account.get("accountId") or "").strip()
+        if wanted and account_id == wanted:
+            selected = account
+            break
+    if not selected and accounts:
+        selected = next((a for a in accounts if isinstance(a, dict)), {})
+    balance_obj = selected.get("balance") if isinstance(selected, dict) else {}
+    balance_obj = balance_obj if isinstance(balance_obj, dict) else {}
+    balance = _to_float(balance_obj.get("balance"), float("nan"))
+    deposit = _to_float(balance_obj.get("deposit"), float("nan"))
+    profit_loss = _to_float(balance_obj.get("profitLoss"), float("nan"))
+    available = _to_float(balance_obj.get("available"), float("nan"))
+    equity = balance + profit_loss if balance == balance and profit_loss == profit_loss else float("nan")
+    ratio = available / equity if available == available and equity == equity and equity > 0 else float("nan")
+    return {
+        "state": "READY" if selected else "NO_ACCOUNT_ROW",
+        "account_id": selected.get("accountId") if isinstance(selected, dict) else wanted or None,
+        "account_name": selected.get("accountName") if isinstance(selected, dict) else None,
+        "account_type": selected.get("accountType") if isinstance(selected, dict) else None,
+        "currency": selected.get("currency") if isinstance(selected, dict) else None,
+        "preferred": selected.get("preferred") if isinstance(selected, dict) else None,
+        "balance": None if balance != balance else round(balance, 6),
+        "deposit_margin_used": None if deposit != deposit else round(deposit, 6),
+        "profit_loss": None if profit_loss != profit_loss else round(profit_loss, 6),
+        "equity": None if equity != equity else round(equity, 6),
+        "available_to_trade": None if available != available else round(available, 6),
+        "free_margin_ratio": None if ratio != ratio else round(ratio, 6),
+        "free_margin_ratio_pct": None if ratio != ratio else round(ratio * 100.0, 2),
+        "source": "IG_DEMO_ACCOUNTS",
+        "live_money_execution": False,
+    }
+
+
+def _v6_account_refresh_worker(broker: Any) -> None:
+    started = _now()
+    lock = _v6_account_cache_lock(broker)
+    try:
+        payload = _V6_BASE_IG_ACCOUNTS(broker) or {}
+        snapshot = _v6_parse_account_payload(broker, payload)
+        with lock:
+            broker._jasong_v6_account_snapshot = snapshot
+            broker._jasong_v6_account_snapshot_at = _now()
+            broker._jasong_v6_account_last_error = None
+            broker._jasong_v6_account_last_duration_seconds = round(_now() - started, 3)
+    except Exception as exc:
+        with lock:
+            broker._jasong_v6_account_last_error = _compact_error(exc)
+            broker._jasong_v6_account_last_duration_seconds = round(_now() - started, 3)
+    finally:
+        with lock:
+            broker._jasong_v6_account_refreshing = False
+
+
+def _v6_account_funding_snapshot(broker: Any, *, trigger_refresh: bool = True) -> Dict[str, Any]:
+    if broker is None:
+        return {"state": "BROKER_UNAVAILABLE"}
+    lock = _v6_account_cache_lock(broker)
+    now = _now()
+    ttl = _v6_env_float("IG_DEMO_ACCOUNT_CACHE_SECONDS", 30.0, 10.0, 120.0)
+    stale = _v6_env_float("IG_DEMO_ACCOUNT_STALE_SECONDS", 180.0, 30.0, 600.0)
+    with lock:
+        snapshot = getattr(broker, "_jasong_v6_account_snapshot", None)
+        at = _to_float(getattr(broker, "_jasong_v6_account_snapshot_at", 0.0), 0.0)
+        age = max(0.0, now - at) if at > 0 else float("inf")
+        refreshing = bool(getattr(broker, "_jasong_v6_account_refreshing", False))
+        if trigger_refresh and age >= ttl and not refreshing:
+            broker._jasong_v6_account_refreshing = True
+            threading.Thread(
+                target=_v6_account_refresh_worker,
+                args=(broker,),
+                name="jasong-v6-account-funding",
+                daemon=True,
+            ).start()
+            refreshing = True
+        if isinstance(snapshot, dict) and age <= stale:
+            out = copy.deepcopy(snapshot)
+            out["age_seconds"] = round(age, 2)
+            out["refreshing"] = refreshing
+            out["last_error"] = getattr(broker, "_jasong_v6_account_last_error", None)
+            return out
+        return {
+            "state": "WARMING_UP" if refreshing else "UNKNOWN",
+            "age_seconds": None if age == float("inf") else round(age, 2),
+            "refreshing": refreshing,
+            "last_error": getattr(broker, "_jasong_v6_account_last_error", None),
+            "source": "IG_DEMO_ACCOUNTS",
+        }
+
+
+def _v6_invalidate_account_snapshot(broker: Any) -> None:
+    try:
+        with _v6_account_cache_lock(broker):
+            broker._jasong_v6_account_snapshot_at = 0.0
+    except Exception:
+        pass
+
+
+def _v6_open_with_account_invalidate(self: IGDemoBroker, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        return _V6_BASE_IG_OPEN(self, *args, **kwargs)
+    finally:
+        _v6_invalidate_account_snapshot(self)
+
+
+def _v6_close_with_account_invalidate(self: IGDemoBroker, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        return _V6_BASE_IG_CLOSE(self, *args, **kwargs)
+    finally:
+        _v6_invalidate_account_snapshot(self)
+
+
+def _v6_account_funding_gate(
+    broker: Any,
+    candidate: Dict[str, Any],
+) -> tuple[bool, str, Dict[str, Any]]:
+    snapshot = _v6_account_funding_snapshot(broker, trigger_refresh=True)
+    if str(snapshot.get("state") or "").upper() != "READY":
+        return True, "ACCOUNT_FUNDING_WARMING_ALLOW_BROKER_AUTHORITY", snapshot
+    available = snapshot.get("available_to_trade")
+    equity = snapshot.get("equity")
+    if available is not None and _to_float(available, 0.0) <= 0:
+        return False, "ACCOUNT_AVAILABLE_FUNDS_NONPOSITIVE", snapshot
+    reserve = _v6_env_float("ADAPTIVE_MIN_FREE_MARGIN_RATIO", 0.10, 0.0, 0.50)
+    if equity is not None and _to_float(equity, 0.0) > 0 and available is not None:
+        ratio = _to_float(available, 0.0) / _to_float(equity, 1.0)
+        if ratio < reserve:
+            return False, "ACCOUNT_FREE_MARGIN_RESERVE_BELOW_POLICY", snapshot
+    return True, "ACCOUNT_FUNDING_OK", snapshot
+
+
+def _v6_candidate_exit_plan(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    category = str(candidate.get("category") or "UNKNOWN").upper().strip()
+    profile = _EXIT_PROFILES.get(
+        category,
+        {"min_stop": 0.10, "max_stop": 0.30, "rr": 1.25},
+    )
+    volatility_pct = _recent_volatility_pct(candidate)
+    raw_stop = volatility_pct * 2.5 if volatility_pct > 0 else profile["min_stop"]
+    stop_pct = max(profile["min_stop"], min(profile["max_stop"], raw_stop))
+    lane = str(candidate.get("execution_lane") or "VALIDATED").upper()
+    behavior = candidate.get("trade_behavior")
+    behavior = behavior if isinstance(behavior, dict) else {}
+    bad_rate = _to_float(behavior.get("bad_entry_loss_rate"), 0.0)
+    capture = behavior.get("winner_capture_efficiency")
+    capture_value = _to_float(capture, 0.50) if capture is not None else 0.50
+
+    rr = float(profile["rr"])
+    trail_activate_r = {
+        "FOREX": 0.55,
+        "INDICES": 0.55,
+        "CRYPTO": 0.75,
+        "METALS": 0.60,
+        "ENERGY": 0.55,
+        "SHARES": 0.60,
+    }.get(category, 0.60)
+    trail_lock_r = 0.15
+
+    if lane == "PROBATION":
+        rr = min(rr, 1.20)
+        trail_activate_r = min(trail_activate_r, 0.60)
+        trail_lock_r = 0.12
+    if bad_rate >= 0.50:
+        stop_pct = max(profile["min_stop"], stop_pct * 0.85)
+        rr = max(1.10, rr - 0.05)
+        trail_activate_r = min(trail_activate_r, 0.50)
+    if capture_value < 0.40:
+        rr = max(1.10, rr - 0.10)
+        trail_activate_r = min(trail_activate_r, 0.50)
+        trail_lock_r = max(trail_lock_r, 0.18)
+    adaptive = candidate.get("adaptive_v6_forward")
+    adaptive = adaptive if isinstance(adaptive, dict) else {}
+    if (
+        int(adaptive.get("settled_trades") or 0) >= 15
+        and _to_float(adaptive.get("win_rate"), 0.0) >= 0.60
+        and _to_float(adaptive.get("profit_factor"), 0.0) >= 1.50
+    ):
+        rr = min(1.45, rr + 0.10)
+
+    target_pct = stop_pct * rr
+    return {
+        "exit_policy_version": "V6_ADAPTIVE_VOLATILITY_R",
+        "entry_volatility_pct": round(volatility_pct, 6),
+        "planned_stop_pct": round(stop_pct, 6),
+        "planned_take_profit_pct": round(target_pct, 6),
+        "planned_reward_r": round(rr, 3),
+        "trailing_activate_r": round(trail_activate_r, 3),
+        "trailing_lock_r": round(trail_lock_r, 3),
+        "exit_plan_basis": "CATEGORY_VOLATILITY_PLUS_FORWARD_MFE_MAE_BEHAVIOR",
+    }
+
+
+def _v6_category_open_candidate(
+    self: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+    external: List[Dict[str, Any]],
+) -> None:
+    lane = str(candidate.get("execution_lane") or "").upper()
+    if lane in {"PRIME", "VALIDATED"}:
+        if not bool(candidate.get("standard_eligible")):
+            return
+    elif lane == "PROBATION":
+        if not bool(candidate.get("probation_eligible")):
+            return
+    else:
+        return
+
+    before = {
+        str(row.get("deal_id") or "")
+        for row in self._open_positions()
+        if row.get("deal_id")
+    }
+    original_default = float(self.default_size)
+    try:
+        if lane == "PROBATION":
+            probation_size = _v6_env_float("ADAPTIVE_PROBATION_DEFAULT_SIZE", 0.10, 0.0001, 1000.0)
+            self.default_size = min(original_default, probation_size)
+        _adaptive_category_open_candidate(self, candidate, external)
+    finally:
+        self.default_size = original_default
+
+    opened = next(
+        (
+            row for row in reversed(self._open_positions())
+            if str(row.get("deal_id") or "") not in before
+        ),
+        None,
+    )
+    if not isinstance(opened, dict):
+        return
+
+    plan = _v6_candidate_exit_plan(candidate)
+    opened.update(plan)
+    opened.update({
+        "policy_version": V6_POLICY_VERSION,
+        "execution_lane": lane,
+        "trade_class": lane,
+        "market_regime": candidate.get("market_regime") or candidate.get("regime"),
+        "entry_signal_timestamp": candidate.get("signal_timestamp") or candidate.get("evaluated_at"),
+        "entry_live_price": candidate.get("live_price"),
+        "forward_calibrated_score": candidate.get("forward_calibrated_score"),
+        "forward_calibrated_score_pct": candidate.get("forward_calibrated_score_pct"),
+        "adaptive_v6_forward_at_entry": copy.deepcopy(candidate.get("adaptive_v6_forward") or {}),
+        "probation_v6_forward_at_entry": copy.deepcopy(candidate.get("probation_v6_forward") or {}),
+        "trade_behavior_at_entry": copy.deepcopy(candidate.get("trade_behavior") or {}),
+        "historical_win_rate": candidate.get("historical_win_rate"),
+        "historical_profit_factor": candidate.get("historical_profit_factor"),
+        "walk_forward_pass": candidate.get("walk_forward_pass"),
+    })
+    opened["adaptive_entry_snapshot"] = {
+        "policy_version": V6_POLICY_VERSION,
+        "execution_lane": lane,
+        "strategy_id": candidate.get("strategy_id") or candidate.get("selected_strategy"),
+        "direction": candidate.get("direction"),
+        "quant_confidence": candidate.get("quant_confidence"),
+        "model_ai_confidence": candidate.get("model_ai_confidence"),
+        "live_fast_score": candidate.get("live_fast_score") or candidate.get("smart_fast_score"),
+        "forward_calibrated_score": candidate.get("forward_calibrated_score"),
+        "market_regime": opened.get("market_regime"),
+        "planned_stop_pct": opened.get("planned_stop_pct"),
+        "planned_take_profit_pct": opened.get("planned_take_profit_pct"),
+        "planned_reward_r": opened.get("planned_reward_r"),
+        "captured_at": _now(),
+    }
+    _attach_initial_native_risk(self, opened)
+
+
+def _v6_tracker_context(self: TradeExcursionTracker, record: Dict[str, Any]) -> None:
+    # Preserve V5 context population first.
+    original = globals().get("_V6_V5_TRACKER_CONTEXT")
+    if callable(original):
+        original(self, record)
+    portfolio = getattr(self, "_jasong_category_portfolio", None)
+    deal_id = str(record.get("deal_id") or "").strip()
+    if portfolio is None or not deal_id:
+        return
+    try:
+        with portfolio._lock:
+            match = next(
+                (
+                    row for row in (portfolio._state.get("positions") or [])
+                    if str(row.get("deal_id") or "").strip() == deal_id
+                ),
+                None,
+            )
+        if isinstance(match, dict):
+            for field in (
+                "policy_version", "execution_lane", "trade_class",
+                "forward_calibrated_score", "forward_calibrated_score_pct",
+                "trailing_activate_r", "trailing_lock_r",
+                "adaptive_entry_snapshot",
+            ):
+                if match.get(field) is not None:
+                    record[field] = copy.deepcopy(match.get(field))
+    except Exception:
+        pass
+
+
+def _v6_tracker_update(
+    self: TradeExcursionTracker,
+    record: Dict[str, Any],
+    now: float,
+) -> bool:
+    triggered = _V6_BASE_TRACKER_UPDATE(self, record, now)
+    stop_pct = _record_stop_pct(self, record)
+    entry = self._safe_float(record.get("entry_price"))
+    mfe_pct = self._safe_float(record.get("mfe_pct"))
+    direction = str(record.get("direction") or "").upper().strip()
+    if stop_pct <= 0 or entry is None or entry <= 0 or mfe_pct is None:
+        return triggered
+
+    activate_r = max(0.25, min(1.50, _to_float(record.get("trailing_activate_r"), 0.75)))
+    lock_r = max(0.0, min(0.75, _to_float(record.get("trailing_lock_r"), 0.10)))
+    mfe_r = mfe_pct / stop_pct if stop_pct > 0 else 0.0
+    desired = self._safe_float(record.get("desired_native_stop_price"))
+    if mfe_r >= 1.0:
+        lock = max(0.35, lock_r)
+        record["trailing_state"] = f"V6_LOCK_{lock:.2f}R"
+    elif mfe_r >= activate_r:
+        lock = lock_r
+        record["trailing_state"] = f"V6_TRAIL_ACTIVE_{lock:.2f}R"
+    else:
+        lock = None
+
+    if lock is not None:
+        lock_pct = stop_pct * lock
+        if direction == "BUY":
+            v6_desired = entry * (1.0 + lock_pct / 100.0)
+            if desired is None or v6_desired > desired:
+                desired = v6_desired
+        elif direction == "SELL":
+            v6_desired = entry * (1.0 - lock_pct / 100.0)
+            if desired is None or v6_desired < desired:
+                desired = v6_desired
+        record["desired_native_stop_price"] = self._round(desired)
+    record["mfe_r"] = self._round(mfe_r, 6)
+    return triggered
+
+
+def _v6_tracker_merge(self: TradeExcursionTracker, row: Dict[str, Any]) -> Dict[str, Any]:
+    out = _V6_BASE_TRACKER_MERGE(self, row)
+    key = str(
+        out.get("deal_id") or out.get("ig_deal_id") or out.get("trade_id") or ""
+    ).strip()
+    excursion = self._lookup(key) if key else None
+    if isinstance(excursion, dict):
+        for field in (
+            "policy_version", "execution_lane", "trade_class",
+            "forward_calibrated_score", "forward_calibrated_score_pct",
+            "trailing_activate_r", "trailing_lock_r", "mfe_r",
+            "adaptive_entry_snapshot",
+        ):
+            if excursion.get(field) is not None:
+                out[field] = copy.deepcopy(excursion.get(field))
+    return out
+
+
+def _v6_tracker_status(self: TradeExcursionTracker) -> Dict[str, Any]:
+    out = _V6_BASE_TRACKER_STATUS(self)
+    out.update({
+        "adaptive_forward_policy": V6_POLICY_VERSION,
+        "category_exit_policy": "CATEGORY_VOLATILITY_R_PLUS_MFE_MAE_LEARNING",
+        "adaptive_trailing_enabled": True,
+        "probation_uses_same_native_stop_protection": True,
+    })
+    return out
+
+
+def _v6_reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
+    with self._lock:
+        health = _execution_health_state(self)
+        now = _now()
+        health.update({
+            "last_tick_started_at": now,
+            "tick_count": int(health.get("tick_count") or 0) + 1,
+            "candidate_attempts_this_tick": 0,
+            "candidate_opens_this_tick": 0,
+            "candidate_errors_this_tick": 0,
+            "standard_eligible_this_tick": 0,
+            "probation_eligible_this_tick": 0,
+            "prime_eligible_this_tick": 0,
+            "ranked_candidates_this_tick": 0,
+            "blocked_eligible_this_tick": 0,
+            "skipped_error_cooldown_this_tick": 0,
+            "tick_error": None,
+            "adaptive_policy_version": V6_POLICY_VERSION,
+        })
+        blockers: Counter[str] = Counter()
+
+        try:
+            health["phase"] = "RECONCILE"
+            health["phase_started_at"] = _now()
+            self._reconcile()
+
+            health["phase"] = "DUE_CLOSES"
+            health["phase_started_at"] = _now()
+            self._due_closes()
+
+            configured = bool(getattr(self.broker, "configured", lambda: False)())
+            health["broker_configured"] = configured
+            try:
+                broker_status = self.broker.status() or {}
+            except Exception:
+                broker_status = {}
+            health["broker_connected"] = bool(broker_status.get("connected"))
+            health["broker_last_error"] = broker_status.get("last_error")
+            health["category_autotrade_enabled"] = bool(self.enabled)
+            health["account_funding"] = _v6_account_funding_snapshot(
+                self.broker, trigger_refresh=True
+            )
+
+            if not self.enabled:
+                health["last_open_result"] = "CATEGORY_AUTOTRADE_DISABLED"
+            elif not configured:
+                health["last_open_result"] = "IG_DEMO_NOT_CONFIGURED"
+            else:
+                health["phase"] = "EXTERNAL_SNAPSHOT"
+                health["phase_started_at"] = _now()
+                external = _cached_external_for_tick(self)
+
+                health["phase"] = "RANKINGS_CACHE_READ"
+                health["phase_started_at"] = _now()
+                rankings = self.ranking_source() or {}
+                health["rankings_ready_at"] = _now()
+                ranking_owner = getattr(self.ranking_source, "__self__", None)
+                if ranking_owner is not None:
+                    for target, source in (
+                        ("forward_rankings_cache_state", "_jasong_rankings_cache_state"),
+                        ("forward_rankings_cache_age_seconds", "_jasong_rankings_cache_age_seconds"),
+                        ("forward_rankings_last_refresh_duration_seconds", "_jasong_rankings_last_refresh_duration_seconds"),
+                        ("forward_rankings_last_error", "_jasong_rankings_last_error"),
+                    ):
+                        health[target] = getattr(ranking_owner, source, None)
+                    health["forward_rankings_refresh_running"] = bool(
+                        getattr(ranking_owner, "_jasong_rankings_refreshing", set())
+                    )
+                    health["forward_rankings_refresh_deferred"] = bool(
+                        getattr(ranking_owner, "_jasong_rankings_refresh_deferred", False)
+                    )
+
+                try:
+                    if rankings:
+                        self._jasong_health_rankings_cache = {
+                            str(category): [
+                                copy.deepcopy(row)
+                                for row in (rows or [])[:5]
+                                if isinstance(row, dict)
+                            ]
+                            for category, rows in rankings.items()
+                            if isinstance(rows, list)
+                        }
+                        self._jasong_health_rankings_cache_at = _now()
+                        health["health_rankings_cache_at"] = self._jasong_health_rankings_cache_at
+                except Exception:
+                    pass
+
+                cooldowns = health.setdefault("candidate_error_cooldowns", {})
+                retry_seconds = max(
+                    15,
+                    min(900, int(os.getenv("CATEGORY_EXECUTION_ERROR_COOLDOWN_SECONDS", "60"))),
+                )
+                health["error_cooldown_seconds"] = retry_seconds
+
+                for category in ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"):
+                    for raw in rankings.get(category, [])[:5]:
+                        if not isinstance(raw, dict):
+                            continue
+                        candidate = dict(raw)
+                        health["ranked_candidates_this_tick"] += 1
+                        lane = str(candidate.get("execution_lane") or "OBSERVE").upper()
+                        if lane == "PRIME":
+                            health["prime_eligible_this_tick"] += 1
+                            health["standard_eligible_this_tick"] += 1
+                        elif lane == "VALIDATED":
+                            health["standard_eligible_this_tick"] += 1
+                        elif lane == "PROBATION":
+                            health["probation_eligible_this_tick"] += 1
+                        else:
+                            blockers[f"LANE_{lane}_NOT_EXECUTABLE"] += 1
+                            continue
+
+                        key = _candidate_key(candidate)
+                        until = float(cooldowns.get(key) or 0.0)
+                        if until > now:
+                            blockers["ERROR_COOLDOWN"] += 1
+                            health["skipped_error_cooldown_this_tick"] += 1
+                            continue
+                        cooldowns.pop(key, None)
+
+                        if lane == "PROBATION":
+                            capacity_ok, capacity_reason = _v6_probation_capacity_gate(self, candidate)
+                            if not capacity_ok:
+                                blockers[capacity_reason] += 1
+                                health["blocked_eligible_this_tick"] += 1
+                                continue
+
+                        funding_ok, funding_reason, funding = _v6_account_funding_gate(
+                            self.broker, candidate
+                        )
+                        health["account_funding"] = funding
+                        if not funding_ok:
+                            blockers[funding_reason] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            health["last_blocked_candidate"] = {
+                                "at": now, "candidate": key, "reason": funding_reason,
+                            }
+                            continue
+
+                        reentry_ok, reentry_reason = _reentry_reset_gate(self, candidate)
+                        if not reentry_ok:
+                            blockers[reentry_reason] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            health["last_blocked_candidate"] = {
+                                "at": now, "candidate": key, "reason": reentry_reason,
+                            }
+                            continue
+
+                        confirmation_ok, confirmation_reason = _continuation_confirmation(self, candidate)
+                        if not confirmation_ok:
+                            blockers[confirmation_reason] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            health["last_blocked_candidate"] = {
+                                "at": now, "candidate": key, "reason": confirmation_reason,
+                            }
+                            continue
+
+                        allowed, reason = self._may_open(candidate, external)
+                        if not allowed:
+                            label = str(reason or "BLOCKED").upper().replace(" ", "_")
+                            blockers[label] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            health["last_blocked_candidate"] = {
+                                "at": now, "candidate": key, "reason": reason,
+                            }
+                            continue
+
+                        health["candidate_attempts_this_tick"] += 1
+                        health["total_isolated_candidate_attempts"] = int(
+                            health.get("total_isolated_candidate_attempts") or 0
+                        ) + 1
+                        health["last_open_attempt"] = {
+                            "at": _now(),
+                            "candidate": key,
+                            "execution_lane": lane,
+                            "category": candidate.get("category"),
+                            "symbol": candidate.get("symbol"),
+                            "direction": candidate.get("direction"),
+                            "strategy_id": candidate.get("strategy_id") or candidate.get("selected_strategy"),
+                            "fast_score": candidate.get("live_fast_score") or candidate.get("smart_fast_score"),
+                            "quant_confidence": candidate.get("quant_confidence"),
+                            "model_ai_confidence": candidate.get("model_ai_confidence"),
+                            "forward_calibrated_score_pct": candidate.get("forward_calibrated_score_pct"),
+                        }
+                        before_opens = int(self._state.get("opens") or 0)
+                        try:
+                            self._open_candidate(candidate, external)
+                            after_opens = int(self._state.get("opens") or 0)
+                            if after_opens > before_opens:
+                                health["candidate_opens_this_tick"] += 1
+                                health["total_isolated_candidate_opens"] = int(
+                                    health.get("total_isolated_candidate_opens") or 0
+                                ) + 1
+                                health["last_open_result"] = f"OPENED_{lane}"
+                                health["last_open_success_at"] = _now()
+                                health["last_open_success"] = dict(health["last_open_attempt"])
+                                cooldowns.pop(key, None)
+                            else:
+                                health["last_open_result"] = "NO_OPEN_RECORDED"
+                                blockers["NO_OPEN_RECORDED"] += 1
+                        except Exception as exc:
+                            label = _classify_broker_error(exc)
+                            message = _compact_error(exc)
+                            health["candidate_errors_this_tick"] += 1
+                            health["total_candidate_errors"] = int(
+                                health.get("total_candidate_errors") or 0
+                            ) + 1
+                            health["last_open_result"] = label
+                            health["last_candidate_error"] = {
+                                "at": _now(), "candidate": key,
+                                "execution_lane": lane,
+                                "classification": label, "error": message,
+                            }
+                            recent = health.setdefault("recent_errors", [])
+                            recent.append(dict(health["last_candidate_error"]))
+                            health["recent_errors"] = recent[-20:]
+                            size_plan = health.get("last_size_plan")
+                            if (
+                                label == "INSUFFICIENT_FUNDS"
+                                and isinstance(size_plan, dict)
+                                and size_plan.get("candidate") == key
+                                and size_plan.get("final_result") == "MINIMUM_DEAL_UNAFFORDABLE"
+                            ):
+                                label = "MINIMUM_DEAL_UNAFFORDABLE"
+                                health["last_open_result"] = label
+                                health["last_candidate_error"]["classification"] = label
+                                recent[-1]["classification"] = label
+                                cooldown_for = max(
+                                    60,
+                                    min(1800, int(os.getenv("CATEGORY_EXECUTION_FUNDS_COOLDOWN_SECONDS", "300"))),
+                                )
+                            else:
+                                cooldown_for = retry_seconds
+                            cooldowns[key] = _now() + cooldown_for
+                            blockers[label] += 1
+                            try:
+                                self._journal(
+                                    "OPEN_ERROR_ISOLATED",
+                                    candidate=key,
+                                    execution_lane=lane,
+                                    category=candidate.get("category"),
+                                    symbol=candidate.get("symbol"),
+                                    classification=label,
+                                    error=message,
+                                )
+                            except Exception:
+                                pass
+                            continue
+
+                health["candidate_error_cooldowns"] = {
+                    key: until for key, until in cooldowns.items()
+                    if float(until or 0.0) > now
+                }
+
+            health["recent_blockers"] = dict(blockers)
+            health["phase"] = "COMPLETE"
+            health["phase_started_at"] = _now()
+            health["last_tick_completed_at"] = _now()
+            health["last_tick_duration_seconds"] = round(
+                health["last_tick_completed_at"] - now, 3
+            )
+            self._state["last_error"] = None
+        except Exception as exc:
+            message = _compact_error(exc)
+            self._state["last_error"] = message
+            health["tick_error"] = message
+            health["last_open_result"] = "TICK_ERROR"
+            health["last_tick_completed_at"] = _now()
+
+        self._state["last_tick_at"] = _now()
+        self._persist()
+        return {
+            "version": VERSION,
+            "enabled": bool(self.enabled),
+            "open_positions": len(self._open_positions()),
+            "last_tick_at": self._state.get("last_tick_at"),
+            "last_error": self._state.get("last_error"),
+            "execution_health": copy.deepcopy(health),
+            "live_money_execution": False,
+        }
+
+
+def _v6_category_status(self: CategoryExecutionEngine) -> Dict[str, Any]:
+    out = _V6_BASE_CATEGORY_STATUS(self)
+    out["entry_policy"] = {
+        "policy_version": V6_POLICY_VERSION,
+        "lanes": ["WATCH", "PROBATION", "VALIDATED", "PRIME"],
+        "base_live_floors": {"quant_pct": 28.0, "ai_pct": 40.0, "fast": 45.0},
+        "probation_category_floors": copy.deepcopy(V6_PROBATION_THRESHOLDS),
+        "probation_min_settled_for_promotion": V6_PROBATION_PROMOTION_MIN,
+        "probation_promotion_wr_pct": V6_PROMOTION_WR_MIN * 100.0,
+        "probation_promotion_pf": V6_PROMOTION_PF_MIN,
+        "probation_promotion_expectancy_r": V6_PROMOTION_EXPECTANCY_MIN,
+        "validated_historical_route": "60% WR + PF>=1.20 + walk-forward",
+        "compound_requires_prime": True,
+        "execution_mode": "IG_DEMO_ONLY",
+    }
+    return out
+
+
+def _v6_execution_health_snapshot(
+    *,
+    system: Optional[Dict[str, Any]] = None,
+    broker: Any = None,
+) -> Dict[str, Any]:
+    out = _V6_BASE_HEALTH_SNAPSHOT(system=system, broker=broker)
+    system = system or {}
+    portfolio = system.get("portfolio")
+    rankings = getattr(portfolio, "_jasong_health_rankings_cache", {}) if portfolio is not None else {}
+    rankings = rankings if isinstance(rankings, dict) else {}
+
+    counts = Counter()
+    by_category: Dict[str, Counter[str]] = {}
+    quarantines: List[Dict[str, Any]] = []
+    for category, rows in rankings.items():
+        cat = Counter()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            lane = str(row.get("execution_lane") or "OBSERVE").upper()
+            counts[lane] += 1
+            cat[lane] += 1
+            if bool(row.get("adaptive_quarantine")):
+                counts["QUARANTINED"] += 1
+                cat["QUARANTINED"] += 1
+                quarantines.append({
+                    "category": category,
+                    "symbol": row.get("symbol"),
+                    "strategy_id": row.get("strategy_id") or row.get("selected_strategy"),
+                    "reasons": row.get("dynamic_quarantine_reasons") or row.get("validation_diagnostics") or [],
+                })
+        by_category[str(category)] = cat
+
+    category_execution = out.setdefault("category_execution", {})
+    category_execution.update({
+        "watch_candidates": int(counts.get("WATCH", 0)),
+        "probation_eligible_candidates": int(counts.get("PROBATION", 0)),
+        "validated_candidates": int(counts.get("VALIDATED", 0)),
+        "prime_candidates": int(counts.get("PRIME", 0)),
+        "adaptive_quarantined_candidates": int(counts.get("QUARANTINED", 0)),
+    })
+    existing_by_category = category_execution.get("by_category")
+    if isinstance(existing_by_category, dict):
+        for category, lane_counts in by_category.items():
+            target = existing_by_category.setdefault(category, {})
+            target.update({
+                "watch": int(lane_counts.get("WATCH", 0)),
+                "probation": int(lane_counts.get("PROBATION", 0)),
+                "validated": int(lane_counts.get("VALIDATED", 0)),
+                "prime": int(lane_counts.get("PRIME", 0)),
+                "adaptive_quarantined": int(lane_counts.get("QUARANTINED", 0)),
+            })
+
+    funding = _v6_account_funding_snapshot(broker, trigger_refresh=True)
+    out["adaptive_forward_trader"] = {
+        "version": VERSION,
+        "policy_version": V6_POLICY_VERSION,
+        "architecture": V6_POLICY_LABEL,
+        "lane_counts": {
+            "watch": int(counts.get("WATCH", 0)),
+            "probation": int(counts.get("PROBATION", 0)),
+            "validated": int(counts.get("VALIDATED", 0)),
+            "prime": int(counts.get("PRIME", 0)),
+            "quarantined": int(counts.get("QUARANTINED", 0)),
+        },
+        "probation_policy": {
+            "category_live_thresholds": copy.deepcopy(V6_PROBATION_THRESHOLDS),
+            "minimum_legal_demo_size_bias": True,
+            "max_open_global": _v6_env_int("ADAPTIVE_MAX_OPEN_PROBATION", 2, 1, 5),
+            "max_open_per_category": _v6_env_int("ADAPTIVE_MAX_OPEN_PROBATION_PER_CATEGORY", 1, 1, 3),
+            "continuation_confirmation_required": True,
+            "post_trade_reset_required": True,
+            "compound_eligible": False,
+        },
+        "promotion_policy": {
+            "min_v6_probation_settled": V6_PROBATION_PROMOTION_MIN,
+            "min_win_rate_pct": V6_PROMOTION_WR_MIN * 100.0,
+            "min_profit_factor": V6_PROMOTION_PF_MIN,
+            "min_expectancy_r": V6_PROMOTION_EXPECTANCY_MIN,
+            "max_drawdown_r": V6_PROMOTION_MAX_DD_R,
+            "min_bootstrap_positive_pct": V6_PROMOTION_BOOTSTRAP_MIN * 100.0,
+        },
+        "automatic_quarantine": {
+            "review_after_trades": V6_PROBATION_REVIEW_MIN,
+            "wr_floor_pct": V6_QUARANTINE_WR_FLOOR * 100.0,
+            "pf_floor": V6_QUARANTINE_PF_FLOOR,
+            "max_probation_sample": V6_PROBATION_MAX_SETTLED,
+            "seeded_failing_families": list(WR_GUARD_SEEDED_QUARANTINES),
+            "current": quarantines[:12],
+        },
+        "score": {
+            "name": "FORWARD_CALIBRATED_EXECUTION_SCORE",
+            "is_probability": False,
+            "uses": [
+                "live Quant/AI/FAST",
+                "historical WR/PF admission",
+                "new V6 forward WR/PF/expectancy",
+                "MFE/MAE entry and exit behavior",
+                "same-regime forward behavior",
+            ],
+        },
+        "account_funding": funding,
+        "live_money_execution": False,
+    }
+
+    runtime = out.setdefault("runtime_architecture", {})
+    runtime.update({
+        "adaptive_forward_trader": True,
+        "adaptive_forward_policy_version": V6_POLICY_VERSION,
+        "execution_lanes": ["WATCH", "PROBATION", "VALIDATED", "PRIME"],
+        "mfe_mae_forward_learning": True,
+        "account_funding_snapshot_nonblocking": True,
+        "probation_minimum_size_bias": True,
+        "compound_prime_only": True,
+    })
+    broker_policy = out.setdefault("broker_data_policy", {})
+    broker_policy.update({
+        "account_funding_source": "IG_DEMO_ACCOUNTS_BACKGROUND_CACHE",
+        "probation_size_policy": "MINIMUM_LEGAL_SIZE_BIASED_THEN_EXISTING_REJECTION_DOWNSHIFT",
+    })
+
+    current_flow = str(out.get("trade_flow_state") or "")
+    stale_or_error = current_flow in {
+        "EXECUTION_LOOP_STALE", "EXECUTION_TICK_ERROR", "LIVE_SCANNER_STALE",
+        "BROKER_NOT_CONFIGURED", "CATEGORY_AUTOTRADE_DISABLED",
+    }
+    if not stale_or_error:
+        if counts.get("PRIME", 0) or counts.get("VALIDATED", 0):
+            out["trade_flow_state"] = "READY_TO_EXECUTE_VALIDATED"
+        elif counts.get("PROBATION", 0):
+            out["trade_flow_state"] = "READY_FOR_CONTROLLED_PROBATION"
+        elif counts.get("WATCH", 0):
+            out["trade_flow_state"] = "WATCH_ONLY_NO_EXECUTION_LANE"
+        else:
+            out["trade_flow_state"] = "WAITING_FOR_STRONG_SIGNAL"
+    out["version"] = VERSION
+    return out
+
+
+def _v6_runtime_optimizations(
+    *,
+    system: Optional[Dict[str, Any]],
+    broker: Any,
+) -> Dict[str, Any]:
+    result = _V6_BASE_RUNTIME_OPTIMIZATIONS(system=system, broker=broker)
+    _v6_account_funding_snapshot(broker, trigger_refresh=True)
+    system = system or {}
+    tracker = system.get("excursion_tracker")
+    portfolio = system.get("portfolio")
+    if tracker is not None and portfolio is not None:
+        try:
+            tracker._jasong_category_portfolio = portfolio
+        except Exception:
+            pass
+    if isinstance(result, dict):
+        result = dict(result)
+        result.update({
+            "adaptive_forward_trader": True,
+            "adaptive_policy_version": V6_POLICY_VERSION,
+            "account_funding_background_cache": True,
+        })
+    return result
+
+
+def _install_v6_adaptive_forward() -> Dict[str, Any]:
+    global _compute_guarded_forward_rankings
+    global _age_cached_rankings
+    global _tracker_context
+    global execution_health_snapshot
+    global _install_runtime_execution_optimizations
+
+    if getattr(ForwardPrimeArchitecture, "_jasong_adaptive_v6_patch", False):
+        return {"installed": True, "already_installed": True, "version": VERSION}
+
+    # Preserve the V5 tracker context function before replacing the global name.
+    globals()["_V6_V5_TRACKER_CONTEXT"] = _tracker_context
+
+    ForwardValidationEngine.metrics = _v6_forward_metrics
+    ForwardPrimeArchitecture.enrich = _v6_adaptive_forward_enrich
+    _compute_guarded_forward_rankings = _v6_compute_guarded_forward_rankings
+    _age_cached_rankings = _v6_age_cached_rankings
+
+    CategoryExecutionEngine._may_open = _v6_category_may_open
+    CategoryExecutionEngine._open_candidate = _v6_category_open_candidate
+    CategoryExecutionEngine.tick = _v6_reliable_category_tick
+    CategoryExecutionEngine.status = _v6_category_status
+
+    _tracker_context = _v6_tracker_context
+    TradeExcursionTracker._update_take_profit_fields = _v6_tracker_update
+    TradeExcursionTracker.merge = _v6_tracker_merge
+    TradeExcursionTracker.status = _v6_tracker_status
+
+    IGDemoBroker.open_epic_position = _v6_open_with_account_invalidate
+    IGDemoBroker.close_position = _v6_close_with_account_invalidate
+
+    execution_health_snapshot = _v6_execution_health_snapshot
+    _install_runtime_execution_optimizations = _v6_runtime_optimizations
+
+    ForwardPrimeArchitecture._jasong_adaptive_v6_patch = True
+    return {
+        "installed": True,
+        "version": VERSION,
+        "policy_version": V6_POLICY_VERSION,
+        "watch_probation_validated_prime": True,
+        "v6_only_probation_evidence": True,
+        "forward_calibrated_execution_score": True,
+        "mfe_mae_behavior_learning": True,
+        "category_specific_adaptive_exits": True,
+        "automatic_quarantine_and_promotion": True,
+        "account_funding_background_snapshot": True,
+        "probation_minimum_legal_size_bias": True,
+        "compound_prime_only": True,
+        "ig_demo_only": True,
+    }
+
+
+ADAPTIVE_V6_STATUS = _install_v6_adaptive_forward()
