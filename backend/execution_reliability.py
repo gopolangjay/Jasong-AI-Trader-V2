@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import statistics
 import threading
@@ -14,10 +15,12 @@ import category_strategy_engine as category_strategy_module
 from category_strategy_engine import CategoryStrategyEngine
 from ig_demo_broker import IGDemoBroker
 from prime_policy import ForwardPrimeArchitecture
+from forward_store import ForwardStore
+from forward_validation import ForwardValidationEngine
 from trade_excursions import TradeExcursionTracker
 
 
-VERSION = "6.9.4-wr-guard-v5.1-health-cache"
+VERSION = "6.9.4-wr-guard-v5.2-forward-cache"
 
 
 def _now() -> float:
@@ -232,6 +235,8 @@ _ORIGINAL_STRATEGY_LOOP = CategoryStrategyEngine._loop
 _ORIGINAL_FORWARD_ENRICH = ForwardPrimeArchitecture.enrich
 _ORIGINAL_FORWARD_RANKINGS = ForwardPrimeArchitecture.category_rankings
 _ORIGINAL_FORWARD_CATEGORY_ROWS = ForwardPrimeArchitecture._category_rows
+_ORIGINAL_FORWARD_STORE_SYNC = ForwardStore.sync
+_ORIGINAL_FORWARD_VALIDATOR_SYNC = ForwardValidationEngine.sync
 _ORIGINAL_TRACKER_UPDATE_TP = TradeExcursionTracker._update_take_profit_fields
 _ORIGINAL_TRACKER_NATIVE_NEEDED = TradeExcursionTracker._native_take_profit_needed
 _ORIGINAL_TRACKER_ATTACH_TP = TradeExcursionTracker._attach_native_take_profit
@@ -550,12 +555,162 @@ def _guarded_forward_enrich(
     return row
 
 
-def _guarded_forward_rankings(
+def _batched_forward_store_sync(
+    self: ForwardStore,
+    rows: Any,
+) -> int:
+    """Persist one forward evidence batch in one SQLite transaction."""
+    valid: List[Dict[str, Any]] = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        trade_id = str(
+            raw.get("trade_id")
+            or raw.get("ig_deal_id")
+            or raw.get("deal_id")
+            or ""
+        ).strip()
+        result = str(
+            raw.get("broker_result")
+            or raw.get("result")
+            or ""
+        ).upper().strip()
+        if trade_id and result in {"WIN", "LOSS"}:
+            row = dict(raw)
+            row["trade_id"] = trade_id
+            row["broker_result"] = result
+            valid.append(row)
+    if not valid:
+        return 0
+
+    sql = """
+        INSERT INTO forward_trades (
+            trade_id, market, symbol, strategy_id, direction, broker_result,
+            opened_at, closed_at, entry_level, exit_level, broker_pnl,
+            r_multiple, r_source, entry_snapshot_json, provenance_json, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trade_id) DO UPDATE SET
+            market=excluded.market,
+            symbol=excluded.symbol,
+            strategy_id=excluded.strategy_id,
+            direction=excluded.direction,
+            broker_result=excluded.broker_result,
+            opened_at=excluded.opened_at,
+            closed_at=excluded.closed_at,
+            entry_level=excluded.entry_level,
+            exit_level=excluded.exit_level,
+            broker_pnl=excluded.broker_pnl,
+            r_multiple=excluded.r_multiple,
+            r_source=excluded.r_source,
+            provenance_json=excluded.provenance_json,
+            raw_json=excluded.raw_json,
+            updated_at=strftime('%s','now')
+    """
+
+    values = []
+    for row in valid:
+        values.append((
+            row["trade_id"],
+            row.get("market") or row.get("symbol"),
+            row.get("symbol") or row.get("market"),
+            row.get("strategy_id") or row.get("selected_strategy") or "UNKNOWN",
+            str(row.get("direction") or "").upper(),
+            row["broker_result"],
+            row.get("opened_at") or row.get("entry_time"),
+            row.get("closed_at"),
+            row.get("entry_level") or row.get("broker_entry_level"),
+            row.get("exit_level") or row.get("broker_exit_level"),
+            row.get("broker_pnl"),
+            row.get("r_multiple"),
+            row.get("r_source"),
+            self._json(row.get("entry_snapshot") or row.get("signal_snapshot") or {}),
+            self._json(row.get("provenance") or {}),
+            self._json(row),
+        ))
+
+    with self._lock, self._connect() as db:
+        db.executemany(sql, values)
+        db.commit()
+    return len(values)
+
+
+def _forward_evidence_fingerprint(rows: List[Dict[str, Any]]) -> str:
+    compact = []
+    for row in rows:
+        compact.append((
+            str(row.get("trade_id") or ""),
+            str(row.get("strategy_id") or "UNKNOWN"),
+            str(row.get("broker_result") or ""),
+            str(row.get("r_source") or ""),
+            round(_to_float(row.get("r_multiple"), 0.0), 8),
+            str(row.get("broker_pnl")),
+            str(row.get("closed_at")),
+            str(row.get("exit_level") or row.get("broker_exit_level")),
+        ))
+    compact.sort()
+    return hashlib.sha256(repr(compact).encode("utf-8", errors="replace")).hexdigest()
+
+
+def _singleflight_forward_validator_sync(
+    self: ForwardValidationEngine,
+) -> int:
+    """Write settled forward evidence only when the normalized evidence changed."""
+    lock = getattr(self, "_jasong_forward_sync_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        self._jasong_forward_sync_lock = lock
+
+    if not lock.acquire(blocking=False):
+        self._jasong_forward_sync_skips = int(
+            getattr(self, "_jasong_forward_sync_skips", 0) or 0
+        ) + 1
+        return 0
+
+    started = _now()
+    try:
+        normalized: List[Dict[str, Any]] = []
+        try:
+            source = self.evidence_source() or []
+        except Exception:
+            source = []
+        for raw in source:
+            if not isinstance(raw, dict):
+                continue
+            row = self._normalise(raw)
+            if row:
+                normalized.append(row)
+
+        fingerprint = _forward_evidence_fingerprint(normalized)
+        previous = getattr(self, "_jasong_forward_sync_fingerprint", None)
+        self._jasong_forward_sync_last_scanned_at = _now()
+        self._jasong_forward_sync_last_rows = len(normalized)
+        if previous == fingerprint:
+            self._jasong_forward_sync_unchanged = int(
+                getattr(self, "_jasong_forward_sync_unchanged", 0) or 0
+            ) + 1
+            self._jasong_forward_sync_last_duration_seconds = round(
+                _now() - started, 3
+            )
+            return 0
+
+        count = self.store.sync(normalized)
+        self._jasong_forward_sync_fingerprint = fingerprint
+        self._jasong_forward_sync_last_changed_at = _now()
+        self._jasong_forward_sync_last_duration_seconds = round(
+            _now() - started, 3
+        )
+        self._jasong_forward_sync_last_write_count = count
+        return count
+    finally:
+        lock.release()
+
+
+def _compute_guarded_forward_rankings(
     self: ForwardPrimeArchitecture,
     *args: Any,
     **kwargs: Any,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Prevent category_rankings() from re-promoting STRONG into standard."""
+    """Compute one authoritative V5 validated ranking snapshot."""
     output = _ORIGINAL_FORWARD_RANKINGS(self, *args, **kwargs) or {}
     for rows in output.values():
         if not isinstance(rows, list):
@@ -578,6 +733,188 @@ def _guarded_forward_rankings(
                 row.get("compound_slot_candidate") and prime
             )
     return output
+
+
+def _rankings_cache_key(args: Any, kwargs: Dict[str, Any]) -> str:
+    category = kwargs.get("category")
+    top_n = kwargs.get("top_n")
+    if category is None and len(args) >= 1:
+        category = args[0]
+    if top_n is None and len(args) >= 2:
+        top_n = args[1]
+    if top_n is None:
+        top_n = 5
+    return f"{str(category or 'ALL').upper().strip()}|{int(top_n)}"
+
+
+def _rankings_refresh_seconds() -> float:
+    try:
+        value = float(os.getenv("JASONG_FORWARD_RANKINGS_REFRESH_SECONDS", "60"))
+    except Exception:
+        value = 60.0
+    return max(20.0, min(120.0, value))
+
+
+def _rankings_stale_max_seconds() -> float:
+    try:
+        value = float(os.getenv("JASONG_FORWARD_RANKINGS_STALE_MAX_SECONDS", "150"))
+    except Exception:
+        value = 150.0
+    return max(60.0, min(180.0, value))
+
+
+def _historical_refresh_running(forward_prime: ForwardPrimeArchitecture) -> bool:
+    intelligence = getattr(forward_prime, "intelligence", None)
+    state = getattr(intelligence, "_state", {}) if intelligence is not None else {}
+    if not isinstance(state, dict):
+        return False
+    refresh = state.get("full_refresh")
+    return bool(
+        isinstance(refresh, dict)
+        and str(refresh.get("status") or "").upper() == "RUNNING"
+    )
+
+
+def _age_cached_rankings(
+    self: ForwardPrimeArchitecture,
+    rankings: Dict[str, List[Dict[str, Any]]],
+    cache_age: float,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Age cached signal/quote freshness before a caller can execute it."""
+    output = copy.deepcopy(rankings)
+    signal_limit = float(getattr(self, "signal_max_age_seconds", 300.0) or 300.0)
+    quote_limit = float(getattr(self, "quote_max_age_seconds", 180.0) or 180.0)
+    for rows in output.values():
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row["forward_rankings_cache_age_seconds"] = round(cache_age, 2)
+            signal_age = row.get("signal_age_seconds")
+            quote_age = row.get("quote_age_seconds")
+            current_signal_age = None
+            current_quote_age = None
+            if signal_age is not None:
+                current_signal_age = max(0.0, _to_float(signal_age, 0.0) + cache_age)
+                row["signal_age_seconds"] = round(current_signal_age, 3)
+            if quote_age is not None:
+                current_quote_age = max(0.0, _to_float(quote_age, 0.0) + cache_age)
+                row["quote_age_seconds"] = round(current_quote_age, 3)
+
+            stale_reasons: List[str] = []
+            if current_signal_age is not None and current_signal_age > signal_limit:
+                stale_reasons.append("SIGNAL_STALE")
+            if current_quote_age is not None and current_quote_age > quote_limit:
+                stale_reasons.append("BROKER_QUOTE_STALE")
+            if stale_reasons:
+                provenance = row.get("provenance")
+                provenance = dict(provenance) if isinstance(provenance, dict) else {}
+                issues = [str(x) for x in (provenance.get("issues") or [])]
+                for reason in stale_reasons:
+                    if reason not in issues:
+                        issues.append(reason)
+                provenance["issues"] = issues
+                provenance["fresh"] = False
+                row["provenance"] = provenance
+                reasons = [str(x) for x in (row.get("rejection_reasons") or [])]
+                for reason in stale_reasons:
+                    if reason not in reasons:
+                        reasons.append(reason)
+                row["rejection_reasons"] = reasons
+                for field in (
+                    "strong_qualified", "standard_eligible", "trade_eligible",
+                    "ig_demo_learning_eligible", "prime_qualified",
+                    "execution_eligible", "eligible", "compound_eligible",
+                ):
+                    row[field] = False
+    return output
+
+
+def _forward_rankings_refresh_worker(
+    self: ForwardPrimeArchitecture,
+    cache_key: str,
+    args: Any,
+    kwargs: Dict[str, Any],
+) -> None:
+    started = _now()
+    lock = getattr(self, "_jasong_rankings_cache_lock")
+    try:
+        output = _compute_guarded_forward_rankings(self, *args, **kwargs)
+        with lock:
+            cache = getattr(self, "_jasong_rankings_cache", {})
+            cache_at = getattr(self, "_jasong_rankings_cache_at", {})
+            cache[cache_key] = copy.deepcopy(output)
+            cache_at[cache_key] = _now()
+            self._jasong_rankings_cache = cache
+            self._jasong_rankings_cache_at = cache_at
+            self._jasong_rankings_last_error = None
+            self._jasong_rankings_last_refresh_duration_seconds = round(_now() - started, 3)
+            self._jasong_rankings_last_refresh_at = _now()
+    except Exception as exc:
+        with lock:
+            self._jasong_rankings_last_error = _compact_error(exc)
+            self._jasong_rankings_last_refresh_duration_seconds = round(_now() - started, 3)
+    finally:
+        with lock:
+            refreshing = getattr(self, "_jasong_rankings_refreshing", set())
+            refreshing.discard(cache_key)
+            self._jasong_rankings_refreshing = refreshing
+
+
+def _cached_guarded_forward_rankings(
+    self: ForwardPrimeArchitecture,
+    *args: Any,
+    **kwargs: Any,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return a safe shared cache and refresh the expensive rankings in background."""
+    lock = getattr(self, "_jasong_rankings_cache_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        self._jasong_rankings_cache_lock = lock
+        self._jasong_rankings_cache = {}
+        self._jasong_rankings_cache_at = {}
+        self._jasong_rankings_refreshing = set()
+
+    key = _rankings_cache_key(args, kwargs)
+    now = _now()
+    refresh_after = _rankings_refresh_seconds()
+    stale_max = _rankings_stale_max_seconds()
+    with lock:
+        cache = getattr(self, "_jasong_rankings_cache", {})
+        cache_at = getattr(self, "_jasong_rankings_cache_at", {})
+        cached = cache.get(key)
+        at = _to_float(cache_at.get(key), 0.0)
+        age = max(0.0, now - at) if at > 0 else float("inf")
+        refreshing = getattr(self, "_jasong_rankings_refreshing", set())
+        full_refresh = _historical_refresh_running(self)
+
+        should_refresh = age >= refresh_after and key not in refreshing
+        if should_refresh and not full_refresh:
+            refreshing.add(key)
+            self._jasong_rankings_refreshing = refreshing
+            threading.Thread(
+                target=_forward_rankings_refresh_worker,
+                args=(self, key, tuple(args), dict(kwargs)),
+                name=f"jasong-forward-rankings-{key}",
+                daemon=True,
+            ).start()
+            self._jasong_rankings_refresh_started_at = now
+            self._jasong_rankings_refresh_deferred = False
+        elif should_refresh and full_refresh:
+            self._jasong_rankings_refresh_deferred = True
+
+        self._jasong_rankings_cache_state = (
+            "READY"
+            if isinstance(cached, dict) and age <= stale_max
+            else ("STALE" if isinstance(cached, dict) else "WARMING_UP")
+        )
+        self._jasong_rankings_cache_age_seconds = (
+            round(age, 2) if age != float("inf") else None
+        )
+        if not isinstance(cached, dict) or age > stale_max:
+            return {}
+        return _age_cached_rankings(self, cached, age)
 
 
 def _enhanced_category_rows(
@@ -1939,10 +2276,30 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
                 health["phase_started_at"] = _now()
                 external = _cached_external_for_tick(self)
 
-                health["phase"] = "RANKINGS"
+                health["phase"] = "RANKINGS_CACHE_READ"
                 health["phase_started_at"] = _now()
                 rankings = self.ranking_source() or {}
                 health["rankings_ready_at"] = _now()
+                ranking_owner = getattr(self.ranking_source, "__self__", None)
+                if ranking_owner is not None:
+                    health["forward_rankings_cache_state"] = getattr(
+                        ranking_owner, "_jasong_rankings_cache_state", None
+                    )
+                    health["forward_rankings_cache_age_seconds"] = getattr(
+                        ranking_owner, "_jasong_rankings_cache_age_seconds", None
+                    )
+                    health["forward_rankings_refresh_running"] = bool(
+                        getattr(ranking_owner, "_jasong_rankings_refreshing", set())
+                    )
+                    health["forward_rankings_refresh_deferred"] = bool(
+                        getattr(ranking_owner, "_jasong_rankings_refresh_deferred", False)
+                    )
+                    health["forward_rankings_last_refresh_duration_seconds"] = getattr(
+                        ranking_owner, "_jasong_rankings_last_refresh_duration_seconds", None
+                    )
+                    health["forward_rankings_last_error"] = getattr(
+                        ranking_owner, "_jasong_rankings_last_error", None
+                    )
 
                 # V5.1: execution-health must never recalculate forward rankings.
                 # Cache only the already-completed execution ranking snapshot in
@@ -1951,19 +2308,20 @@ def _reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
                 # analysis. This keeps diagnostics instant even with hundreds of
                 # settled forward trades.
                 try:
-                    self._jasong_health_rankings_cache = {
-                        str(category): [
-                            copy.deepcopy(row)
-                            for row in (rows or [])[:5]
-                            if isinstance(row, dict)
-                        ]
-                        for category, rows in rankings.items()
-                        if isinstance(rows, list)
-                    }
-                    self._jasong_health_rankings_cache_at = _now()
-                    health["health_rankings_cache_at"] = (
-                        self._jasong_health_rankings_cache_at
-                    )
+                    if rankings:
+                        self._jasong_health_rankings_cache = {
+                            str(category): [
+                                copy.deepcopy(row)
+                                for row in (rows or [])[:5]
+                                if isinstance(row, dict)
+                            ]
+                            for category, rows in rankings.items()
+                            if isinstance(rows, list)
+                        }
+                        self._jasong_health_rankings_cache_at = _now()
+                        health["health_rankings_cache_at"] = (
+                            self._jasong_health_rankings_cache_at
+                        )
                 except Exception:
                     pass
                 cooldowns = health.setdefault("candidate_error_cooldowns", {})
@@ -2327,12 +2685,14 @@ def install_execution_reliability() -> Dict[str, Any]:
 
         _patch_ig_demo_marker()
         _patch_ig_positions_cache()
+        ForwardStore.sync = _batched_forward_store_sync
+        ForwardValidationEngine.sync = _singleflight_forward_validator_sync
         removed_variants = _patch_quarantined_strategy_variants()
 
         # Entry-policy repair: restore validated standard eligibility and prevent
         # category_rankings() from re-promoting WATCH/STRONG signals.
         ForwardPrimeArchitecture.enrich = _guarded_forward_enrich
-        ForwardPrimeArchitecture.category_rankings = _guarded_forward_rankings
+        ForwardPrimeArchitecture.category_rankings = _cached_guarded_forward_rankings
         ForwardPrimeArchitecture._category_rows = _enhanced_category_rows
 
         # Exit/risk intelligence for new Category positions.
@@ -2358,6 +2718,9 @@ def install_execution_reliability() -> Dict[str, Any]:
             "single_snapshot_reconciliation": True,
             "candidate_exception_isolation": True,
             "validated_standard_execution_gate": True,
+            "batched_forward_store_sync": True,
+            "forward_evidence_change_detection": True,
+            "shared_forward_rankings_singleflight_cache": True,
             "failing_variants_removed_from_optimizer": {
                 "INDICES": ["INDEX_SESSION_MOMENTUM_V1"],
                 "METALS": ["METALS_BREAKOUT_V2"],
@@ -2837,6 +3200,39 @@ def execution_health_snapshot(
             "category_exit_policy": "VOLATILITY_R",
             "execution_health_cache_only": True,
             "execution_health_recomputes_forward_rankings": False,
+            "forward_store_sync_mode": "BATCHED_SINGLE_TRANSACTION",
+            "forward_evidence_sync_mode": "CHANGE_DETECTED_SINGLEFLIGHT",
+            "forward_rankings_mode": "SHARED_BACKGROUND_SINGLEFLIGHT_CACHE",
+            "forward_rankings_cache_state": getattr(
+                forward_prime, "_jasong_rankings_cache_state", None
+            ) if forward_prime is not None else None,
+            "forward_rankings_cache_age_seconds": getattr(
+                forward_prime, "_jasong_rankings_cache_age_seconds", None
+            ) if forward_prime is not None else None,
+            "forward_rankings_refresh_running": bool(
+                getattr(forward_prime, "_jasong_rankings_refreshing", set())
+            ) if forward_prime is not None else False,
+            "forward_rankings_refresh_deferred": bool(
+                getattr(forward_prime, "_jasong_rankings_refresh_deferred", False)
+            ) if forward_prime is not None else False,
+            "forward_rankings_last_refresh_duration_seconds": getattr(
+                forward_prime, "_jasong_rankings_last_refresh_duration_seconds", None
+            ) if forward_prime is not None else None,
+            "forward_rankings_last_error": getattr(
+                forward_prime, "_jasong_rankings_last_error", None
+            ) if forward_prime is not None else None,
+            "forward_validator_last_sync_duration_seconds": getattr(
+                getattr(forward_prime, "validator", None),
+                "_jasong_forward_sync_last_duration_seconds", None,
+            ) if forward_prime is not None else None,
+            "forward_validator_last_sync_rows": getattr(
+                getattr(forward_prime, "validator", None),
+                "_jasong_forward_sync_last_rows", None,
+            ) if forward_prime is not None else None,
+            "forward_validator_unchanged_sync_skips": getattr(
+                getattr(forward_prime, "validator", None),
+                "_jasong_forward_sync_unchanged", 0,
+            ) if forward_prime is not None else 0,
         },
         "broker_data_policy": {
             "ig_historical_candles_enabled": str(
