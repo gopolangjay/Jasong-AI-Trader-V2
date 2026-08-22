@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 
-VERSION = "6.9.4-live-regime-v6.2"
+VERSION = "6.9.4-live-regime-v6.2.1-clean"
 
 CATEGORY_SPREAD_LIMIT_BPS = {
     "FOREX": 8.0,
