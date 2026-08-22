@@ -4955,3 +4955,1279 @@ def _install_v6_adaptive_forward() -> Dict[str, Any]:
 
 
 ADAPTIVE_V6_STATUS = _install_v6_adaptive_forward()
+
+# ===========================================================================
+# V6.2 LIVE REGIME TRADER — NO NEWS / NO HISTORICAL PERFORMANCE GATES
+# ===========================================================================
+# Trade admission is based only on current candle-derived market state:
+#   TRENDING -> EMA20/EMA50 + ADX25 + pullback/breakout confirmation
+#   RANGING  -> RSI14 divergence + Bollinger/support/resistance + reversal candle
+# Historical WR/PF/WF/optimizer evidence and news have ZERO execution authority.
+# A recent candle buffer still exists solely because live indicators require it.
+# Profit management uses a 20%-30% STOP-WIN measured against the trade's IG
+# DEMO margin/capital basis, not a 20%-30% move in the underlying instrument.
+# ===========================================================================
+
+VERSION = "6.9.4-live-regime-v6.2"
+V62_POLICY_VERSION = "V6.2_LIVE_REGIME_ONLY"
+V62_POLICY_LABEL = "CURRENT_CANDLES_REGIME_MATCHING_ONLY"
+
+try:
+    from live_regime_v62 import analyze_live_market, CATEGORY_SPREAD_LIMIT_BPS
+    _V62_IMPORT_ERROR = None
+except Exception as _v62_import_exc:
+    analyze_live_market = None
+    CATEGORY_SPREAD_LIMIT_BPS = {
+        "FOREX": 8.0, "INDICES": 18.0, "CRYPTO": 80.0,
+        "METALS": 22.0, "ENERGY": 22.0, "SHARES": 35.0,
+    }
+    _V62_IMPORT_ERROR = f"{type(_v62_import_exc).__name__}: {_v62_import_exc}"
+
+_V62_BASE_EVALUATE_SEED = CategoryStrategyEngine._evaluate_seed
+_V62_BASE_CURRENT_EVALUATIONS = CategoryStrategyEngine._current_evaluations
+_V62_BASE_EVIDENCE_COVERAGE = CategoryStrategyEngine.evidence_coverage
+_V62_BASE_CATEGORY_RANKINGS = CategoryStrategyEngine.category_rankings
+_V62_BASE_OPTIMIZER_SUMMARY = CategoryStrategyEngine.optimizer_summary
+_V62_BASE_STRATEGY_STATUS = CategoryStrategyEngine.status
+_V62_BASE_FULL_REFRESH_STATUS = CategoryStrategyEngine.full_refresh_status
+_V62_BASE_FORWARD_ENRICH = ForwardPrimeArchitecture.enrich
+_V62_BASE_FORWARD_RANKINGS_METHOD = ForwardPrimeArchitecture.category_rankings
+_V62_BASE_COMPOUND_CANDIDATES = ForwardPrimeArchitecture.compound_candidates
+_V62_BASE_CATEGORY_STATUS = CategoryExecutionEngine.status
+_V62_BASE_TRACKER_UPDATE_FIELDS = TradeExcursionTracker._update_take_profit_fields
+_V62_BASE_NATIVE_TP_NEEDED = TradeExcursionTracker._native_take_profit_needed
+_V62_BASE_TRACKER_MERGE = TradeExcursionTracker.merge
+_V62_BASE_TRACKER_STATUS = TradeExcursionTracker.status
+_V62_BASE_HEALTH = execution_health_snapshot
+
+
+def _v62_fresh_evaluations(self: CategoryStrategyEngine) -> Dict[str, Dict[str, Any]]:
+    now = _now()
+    ttl = max(30.0, _to_float(getattr(self, "candidate_ttl_seconds", 300.0), 300.0))
+    with self._lock:
+        raw = self._state.get("evaluations") or {}
+        return {
+            str(key): dict(row)
+            for key, row in raw.items()
+            if isinstance(row, dict)
+            and now - _to_float(row.get("evaluated_at"), 0.0) <= ttl
+            and str(row.get("policy_version") or "") == V62_POLICY_VERSION
+        }
+
+
+def _v62_evidence_coverage(self: CategoryStrategyEngine) -> Dict[str, Any]:
+    current = _v62_fresh_evaluations(self)
+    seeds = list(getattr(category_strategy_module, "CATEGORY_MARKET_SEEDS", []) or [])
+    keys = [str(seed.get("key")) for seed in seeds if isinstance(seed, dict)]
+    completed = [key for key in keys if key in current]
+    pending = [key for key in keys if key not in current]
+    return {
+        "version": VERSION,
+        "mode": "LIVE_CURRENT_MARKET_SCAN_ONLY",
+        "historical_optimizer_enabled": False,
+        "historical_validation_enabled": False,
+        "news_enabled": False,
+        "markets_total": len(keys),
+        "markets_live_evaluated": len(completed),
+        "markets_pending_live_scan": len(pending),
+        # Compatibility keys for the unchanged background loop.
+        "markets_optimised": len(completed),
+        "markets_pending_optimisation": len(pending),
+        "optimiser_complete": len(pending) == 0,
+        "completed_keys": completed,
+        "pending_keys": pending,
+        "legacy_rows_excluded": 0,
+        "live_money_execution": False,
+    }
+
+
+def _v62_market_valuation_metadata(broker: Any, epic: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    details = dict(details or {})
+    if not details and epic and hasattr(broker, "market_details"):
+        try:
+            details = broker.market_details(epic, require_quote=True) or {}
+        except TypeError:
+            details = broker.market_details(epic) or {}
+        except Exception:
+            details = {}
+    instrument = details.get("instrument") or {}
+    snapshot = details.get("snapshot") or {}
+    scaling = _to_float(snapshot.get("scalingFactor"), 0.0)
+    value_pip = _to_float(instrument.get("valueOfOnePip"), 0.0)
+    settlement = None
+    currencies = instrument.get("currencies") or []
+    if isinstance(currencies, list):
+        row = next(
+            (x for x in currencies if isinstance(x, dict) and x.get("isDefault") is True),
+            None,
+        )
+        if row is None:
+            row = next((x for x in currencies if isinstance(x, dict)), None)
+        if row:
+            settlement = str(row.get("code") or "").upper().strip() or None
+    return {
+        "scaling_factor": scaling if scaling > 0 else None,
+        "value_of_one_pip": value_pip if value_pip > 0 else None,
+        "settlement_currency": settlement,
+    }
+
+
+def _v62_evaluate_seed(self: CategoryStrategyEngine, seed: Dict[str, Any]) -> Dict[str, Any]:
+    if analyze_live_market is None:
+        raise RuntimeError(f"V6.2 live regime module unavailable: {_V62_IMPORT_ERROR}")
+
+    frame = self.frame_func(seed)
+    context = analyze_live_market(
+        frame,
+        category=str(seed.get("category") or "").upper().strip(),
+        seed=seed,
+    )
+    category = str(seed.get("category") or "").upper().strip()
+    score = _to_float(context.get("live_setup_score"), 0.0)
+    direction = str(context.get("direction") or "WAIT").upper().strip()
+    proposed = str(context.get("proposed_direction") or direction).upper().strip()
+    setup_ready = bool(context.get("setup_ready")) and direction in {"BUY", "SELL"}
+    spread_limit = _to_float(CATEGORY_SPREAD_LIMIT_BPS.get(category), 25.0)
+
+    row: Dict[str, Any] = {
+        **dict(seed),
+        "version": VERSION,
+        "policy_version": V62_POLICY_VERSION,
+        "market": seed.get("name"),
+        "symbol": seed.get("key"),
+        "category": category,
+        "strategy_id": context.get("strategy_id") or "LIVE_REGIME_WAIT_V62",
+        "strategy_name": context.get("strategy_name") or "Live Regime Watch",
+        "market_regime": context.get("market_regime") or context.get("regime"),
+        "regime": context.get("market_regime") or context.get("regime"),
+        "direction": direction,
+        "proposed_direction": proposed,
+        "live_direction": direction,
+        "signal_timeframe": context.get("timeframe"),
+        "signal_trigger": context.get("trigger"),
+        "strategy_reason": context.get("reason"),
+        "signal_reason": context.get("reason"),
+        "live_price": context.get("live_price"),
+        "live_setup_score": round(score, 2),
+        "smart_fast_score": round(score, 2),
+        "live_fast_score": round(score, 2),
+        # Compatibility: this is explicitly technical-confluence, not a model probability.
+        "quant_confidence": round(score / 100.0, 6),
+        "quant_confidence_pct": round(score, 2),
+        "quant_confidence_source": "LIVE_TECHNICAL_CONFLUENCE_COMPATIBILITY_ALIAS",
+        "model_ai_confidence": 0.0,
+        "model_ai_directional_confidence_pct": 0.0,
+        "model_ai_used_for_entry": False,
+        "news_used_for_entry": False,
+        "historical_data_used_for_entry": False,
+        "historical_validation_mode": "DISABLED",
+        "historical_execution_veto": False,
+        "historical_win_rate": None,
+        "historical_profit_factor": None,
+        "historical_trades": None,
+        "historical_target_verified": False,
+        "historical_60_verified": False,
+        "walk_forward_pass": None,
+        "optimizer_complete": True,
+        "optimizer_enabled": False,
+        "optimizer_method": "DISABLED_V62_LIVE_REGIME_ONLY",
+        "current_market_context": copy.deepcopy(context),
+        "volatility_state": context.get("volatility_state"),
+        "volatility_ratio_to_recent_median": context.get("volatility_ratio_to_recent_median"),
+        "liquidity_state": context.get("liquidity_state"),
+        "relative_volume": context.get("relative_volume"),
+        "size_multiplier": context.get("size_multiplier"),
+        "protective_stop_level": context.get("protective_stop_level"),
+        "protective_stop_price_pct": context.get("protective_stop_price_pct"),
+        "stop_win_trigger_pct": context.get("stop_win_trigger_pct", 20.0),
+        "stop_win_target_pct": context.get("stop_win_target_pct", 20.0),
+        "stop_win_lock_floor_pct": context.get("stop_win_lock_floor_pct", 10.0),
+        "stop_win_measure": "PROFIT_PCT_OF_IG_TRADE_MARGIN_CAPITAL",
+        "underlying_price_take_profit_disabled": True,
+        "max_hold_hours": context.get("max_hold_hours"),
+        "holding_bars": max(1, int(_to_float(context.get("max_hold_hours"), 4.0) * 4.0)),
+        "ig_tradeable": False,
+        "ig_epic": None,
+        "ig_market_status": None,
+        "ig_min_deal_size": None,
+        "ig_bid": None,
+        "ig_offer": None,
+        "ig_spread_bps": None,
+        "ig_quote_source": "NOT_REQUESTED",
+        "spread_gate_bps": spread_limit,
+        "spread_pass": False,
+        "standard_eligible": False,
+        "trade_eligible": False,
+        "compound_eligible": False,
+        "prime_qualified": False,
+        "execution_lane": "WATCH",
+        "trade_class": "WATCH",
+        "evaluated_at": _now(),
+        "signal_timestamp": _now(),
+        "live_money_execution": False,
+    }
+
+    reasons: List[str] = []
+    if not setup_ready:
+        reasons.append("NO_CURRENT_REGIME_STRATEGY_ENTRY")
+    if not bool(context.get("volatility_ok", True)):
+        reasons.append("EXTREME_VOLATILITY_NO_TRADE")
+    if not bool(context.get("liquidity_ok_before_spread", True)):
+        reasons.append("LOW_LIQUIDITY_VOLUME_NO_TRADE")
+
+    if setup_ready:
+        try:
+            market = self._resolve_execution_market(seed)
+            row["ig_epic"] = market.get("epic")
+            row["ig_market_name"] = market.get("name")
+            row["ig_instrument_type"] = market.get("instrument_type") or market.get("instrument_family")
+            row["ig_market_status"] = market.get("market_status")
+            row["ig_tradeable"] = str(market.get("market_status") or "").upper() == "TRADEABLE"
+            row["ig_min_deal_size"] = market.get("min_deal_size")
+            row["ig_expiry"] = market.get("expiry")
+            bid, offer, quote_source = self._resolve_bid_offer(seed, market)
+            row["ig_bid"], row["ig_offer"], row["ig_quote_source"] = bid, offer, quote_source
+            if bid is not None and offer is not None and offer >= bid:
+                mid = (bid + offer) / 2.0
+                row["ig_spread_bps"] = round((offer - bid) / mid * 10000.0, 4) if mid > 0 else None
+            spread = row.get("ig_spread_bps")
+            row["spread_pass"] = spread is not None and _to_float(spread, 1e9) <= spread_limit
+        except Exception as exc:
+            row["ig_preflight_error"] = _compact_error(exc)
+
+        if not row["ig_tradeable"]:
+            reasons.append("IG_NOT_TRADEABLE")
+        if not row["spread_pass"]:
+            reasons.append("SPREAD_GATE_FAIL")
+            if row.get("ig_spread_bps") is None:
+                reasons.append("BROKER_QUOTE_UNAVAILABLE")
+
+    standard = bool(
+        setup_ready
+        and bool(context.get("volatility_ok", True))
+        and bool(context.get("liquidity_ok_before_spread", True))
+        and row["ig_tradeable"]
+        and row["spread_pass"]
+    )
+    row["standard_eligible"] = standard
+    row["trade_eligible"] = standard
+    row["execution_lane"] = (
+        "LIVE_TREND" if standard and str(row["strategy_id"]).startswith("LIVE_TREND")
+        else "LIVE_RANGE" if standard
+        else "WATCH"
+    )
+    row["trade_class"] = row["execution_lane"]
+    row["category_rank_score"] = round(score, 3)
+    row["execution_score"] = round(score, 3)
+    row["confidence_qualified"] = standard
+    row["direction_match"] = direction in {"BUY", "SELL"}
+    row["rejection_reasons"] = list(dict.fromkeys(reasons))
+    row["execution_basis"] = (
+        "CURRENT_CANDLES_REGIME_STRATEGY_MATCH"
+        if standard else "WAIT_FOR_CURRENT_REGIME_SETUP"
+    )
+    return row
+
+
+def _v62_category_rankings(
+    self: CategoryStrategyEngine,
+    category: Optional[str] = None,
+    top_n: int = 5,
+) -> Dict[str, List[Dict[str, Any]]]:
+    top_n = max(1, min(5, int(top_n)))
+    rows = list(_v62_fresh_evaluations(self).values())
+    order = tuple(getattr(category_strategy_module, "CATEGORY_ORDER", ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES")))
+    wanted = [str(category).upper().strip()] if category else list(order)
+    output: Dict[str, List[Dict[str, Any]]] = {}
+    for cat in wanted:
+        pool = [dict(x) for x in rows if str(x.get("category") or "").upper() == cat]
+        pool.sort(
+            key=lambda x: (
+                bool(x.get("standard_eligible")),
+                _to_float(x.get("live_setup_score"), 0.0),
+                -_to_float(x.get("ig_spread_bps"), 1e9),
+            ),
+            reverse=True,
+        )
+        ranked: List[Dict[str, Any]] = []
+        for idx, row in enumerate(pool[:top_n], start=1):
+            row["category_rank"] = idx
+            row["rank"] = idx
+            row["source_rank"] = idx
+            # Compound remains a live-market A+ lane: no historical/forward gate.
+            compound = bool(
+                row.get("standard_eligible")
+                and idx <= 2
+                and _to_float(row.get("live_setup_score"), 0.0) >= 90.0
+            )
+            row["compound_slot_candidate"] = idx <= 2
+            row["compound_eligible"] = compound
+            row["prime_qualified"] = compound
+            row["eligible"] = compound
+            row["elite_eligible"] = compound
+            row["execution_eligible"] = compound
+            row["selected"] = compound
+            row["elite_state"] = "LIVE_A_PLUS" if compound else "LIVE_STANDARD" if row.get("standard_eligible") else "OBSERVE"
+            ranked.append(row)
+        output[cat] = ranked
+    return output
+
+
+def _v62_optimizer_summary(self: CategoryStrategyEngine) -> Dict[str, Any]:
+    rankings = _v62_category_rankings(self)
+    return {
+        "version": VERSION,
+        "method": "DISABLED — LIVE REGIME STRATEGY MATCHING ONLY",
+        "historical_optimizer_enabled": False,
+        "historical_holdout_enabled": False,
+        "walk_forward_enabled": False,
+        "news_enabled": False,
+        "current_indicator_buffer_only": True,
+        "regime_classifier": {
+            "trending": "ADX14 >=25 + EMA20/EMA50 direction + pullback/breakout candle",
+            "ranging": "ADX below trend threshold + Bollinger/support-resistance + strict RSI14 divergence + reversal candle",
+            "transition": "NO TRADE",
+        },
+        "coverage": _v62_evidence_coverage(self),
+        "categories": {
+            cat: {
+                "ranked": len(rows),
+                "live_ready": sum(1 for x in rows if x.get("standard_eligible")),
+                "top": rows[0] if rows else None,
+            }
+            for cat, rows in rankings.items()
+        },
+        "live_money_execution": False,
+    }
+
+
+def _v62_strategy_status(self: CategoryStrategyEngine) -> Dict[str, Any]:
+    rankings = _v62_category_rankings(self)
+    return {
+        "version": VERSION,
+        "name": "JASONG V6.2 LIVE REGIME INTELLIGENCE",
+        "enabled": bool(self._state.get("enabled", True)),
+        "policy": {
+            "historical_data_for_trade_admission": False,
+            "news_for_trade_admission": False,
+            "current_candles_only": True,
+            "trend_strategy": "EMA20/EMA50 + ADX25 + pullback/breakout confirmation",
+            "range_strategy": "RSI14 divergence + Bollinger/support-resistance + reversal candle",
+            "transition_regime": "NO_TRADE",
+            "volatility_controls_stop_width_and_size": True,
+            "liquidity_requires_broker_spread_and_volume_when_available": True,
+            "stop_win_profit_pct_range": [20.0, 30.0],
+        },
+        "categories": {
+            cat: {
+                "ranked": len(rows),
+                "standard_ready": sum(1 for x in rows if x.get("standard_eligible")),
+                "compound_ready": sum(1 for x in rows if x.get("compound_eligible")),
+                "top": rows[0] if rows else None,
+            }
+            for cat, rows in rankings.items()
+        },
+        "universe_size": len(getattr(category_strategy_module, "CATEGORY_MARKET_SEEDS", []) or []),
+        "fresh_evaluations": len(_v62_fresh_evaluations(self)),
+        "live_scan": _v62_evidence_coverage(self),
+        "full_refresh": _v62_full_refresh_status(self),
+        "execution_mode": "IG_DEMO_ONLY",
+        "last_error": self._state.get("last_error"),
+        "live_money_execution": False,
+    }
+
+
+def _v62_full_refresh_status(self: CategoryStrategyEngine) -> Dict[str, Any]:
+    base = _V62_BASE_FULL_REFRESH_STATUS(self)
+    out = dict(base or {})
+    out.update({
+        "version": VERSION,
+        "purpose": "LIVE_FULL_MARKET_SCAN",
+        "historical_optimizer_enabled": False,
+        "historical_validation_enabled": False,
+        "news_enabled": False,
+    })
+    if "markets_optimised" in out:
+        out["markets_live_evaluated"] = out.get("markets_optimised")
+    if "markets_pending_optimisation" in out:
+        out["markets_pending_live_scan"] = out.get("markets_pending_optimisation")
+    return out
+
+
+def _v62_forward_enrich(
+    self: ForwardPrimeArchitecture,
+    raw: Dict[str, Any],
+    *,
+    forward_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    row = dict(raw or {})
+    score = _to_float(row.get("live_setup_score"), 0.0)
+    row["historical_validation_mode"] = "DISABLED"
+    row["historical_execution_veto"] = False
+    row["forward_validation_used_for_entry"] = False
+    row["news_used_for_entry"] = False
+    row["standard_eligible"] = bool(row.get("standard_eligible"))
+    row["trade_eligible"] = row["standard_eligible"]
+    row["prime_qualified"] = bool(row.get("standard_eligible") and score >= 90.0)
+    row["compound_eligible"] = bool(row.get("compound_eligible") or row["prime_qualified"])
+    row["execution_basis"] = "CURRENT_CANDLES_REGIME_STRATEGY_MATCH"
+    return row
+
+
+def _v62_forward_rankings(
+    self: ForwardPrimeArchitecture,
+    category: Optional[str] = None,
+    top_n: int = 5,
+) -> Dict[str, List[Dict[str, Any]]]:
+    # specialist_market_integration replaces the intelligence instance method with
+    # this forward architecture method; call the class-level live ranker directly
+    # to avoid a recursion loop.
+    rankings = _v62_category_rankings(self.intelligence, category=category, top_n=top_n)
+    for rows in rankings.values():
+        for row in rows:
+            row["forward_validation_used_for_entry"] = False
+            row["historical_validation_mode"] = "DISABLED"
+            row["news_used_for_entry"] = False
+    return rankings
+
+
+def _v62_compound_candidates(self: ForwardPrimeArchitecture) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for cat, ranked in _v62_forward_rankings(self).items():
+        for row in ranked:
+            if row.get("compound_eligible"):
+                item = dict(row)
+                item["compound_source_category"] = cat
+                item["compound_source_rank"] = item.get("category_rank")
+                item["prime_authority"] = "LIVE_REGIME_A_PLUS_ONLY"
+                rows.append(item)
+    rows.sort(key=lambda x: _to_float(x.get("live_setup_score"), 0.0), reverse=True)
+    return rows
+
+
+def _v62_category_may_open(
+    self: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+    external: List[Dict[str, Any]],
+) -> tuple[bool, str]:
+    if not bool(candidate.get("standard_eligible")):
+        return False, "current regime setup not executable"
+    return _V6_BASE_CATEGORY_MAY_OPEN(self, candidate, external)
+
+
+def _v62_parse_account_now(broker: Any) -> Dict[str, Any]:
+    try:
+        payload = _V6_BASE_IG_ACCOUNTS(broker) or {}
+        return _v6_parse_account_payload(broker, payload)
+    except Exception as exc:
+        return {"state": "ERROR", "error": _compact_error(exc)}
+
+
+def _v62_attach_native_stop_only(self: CategoryExecutionEngine, opened: Dict[str, Any]) -> None:
+    deal_id = str(opened.get("deal_id") or "").strip()
+    stop = _to_float(opened.get("protective_stop_level"), 0.0)
+    if not deal_id or stop <= 0:
+        opened["native_stop_state"] = "NOT_READY"
+        return
+    request_fn = getattr(self.broker, "_request", None)
+    if not callable(request_fn):
+        opened["native_stop_state"] = "SERVER_FALLBACK_ONLY"
+        return
+    try:
+        ack = request_fn(
+            "PUT",
+            f"/positions/otc/{deal_id}",
+            version=2,
+            payload={"stopLevel": float(stop)},
+        ) or {}
+        ref = str(ack.get("dealReference") or "").strip()
+        confirmation: Dict[str, Any] = {}
+        if ref and hasattr(self.broker, "confirm"):
+            confirmation = self.broker.confirm(ref) or {}
+        rejected = str(confirmation.get("dealStatus") or "").upper() == "REJECTED"
+        opened["native_stop_state"] = "REJECTED" if rejected else ("CONFIRMED" if confirmation else "ATTACHED")
+        opened["native_stop_reference"] = ref or None
+        opened["native_stop_reason"] = confirmation.get("reason")
+    except Exception as exc:
+        opened["native_stop_state"] = "SERVER_FALLBACK_ONLY"
+        opened["native_stop_error"] = _compact_error(exc)
+
+
+def _v62_category_open_candidate(
+    self: CategoryExecutionEngine,
+    candidate: Dict[str, Any],
+    external: List[Dict[str, Any]],
+) -> None:
+    if not bool(candidate.get("standard_eligible")):
+        return
+    before_ids = {
+        str(row.get("deal_id") or "")
+        for row in self._open_positions()
+        if row.get("deal_id")
+    }
+    account_before = _v62_parse_account_now(self.broker)
+    original_default = float(self.default_size)
+    size_mult = max(0.25, min(1.0, _to_float(candidate.get("size_multiplier"), 1.0)))
+    try:
+        self.default_size = max(0.0001, original_default * size_mult)
+        _adaptive_category_open_candidate(self, candidate, external)
+    finally:
+        self.default_size = original_default
+
+    opened = next(
+        (
+            row for row in reversed(self._open_positions())
+            if str(row.get("deal_id") or "") not in before_ids
+        ),
+        None,
+    )
+    if not isinstance(opened, dict):
+        return
+
+    # Capture isolated trade capital from the IG margin/deposit change.
+    account_after: Dict[str, Any] = {}
+    capital_basis = None
+    before_margin = _to_float(account_before.get("deposit_margin_used"), float("nan"))
+    # IG normally reflects the new position margin immediately, but allow a
+    # short bounded retry because confirmation and /accounts can settle a few
+    # hundred milliseconds apart. Stop-win capital basis is mandatory: we do
+    # not guess leverage or pretend notional is the margin capital.
+    for _attempt in range(3):
+        try:
+            time.sleep(0.30 if _attempt == 0 else 0.45)
+        except Exception:
+            pass
+        account_after = _v62_parse_account_now(self.broker)
+        after_margin = _to_float(account_after.get("deposit_margin_used"), float("nan"))
+        margin_delta = (
+            after_margin - before_margin
+            if before_margin == before_margin and after_margin == after_margin
+            else float("nan")
+        )
+        if margin_delta == margin_delta and margin_delta > 0:
+            capital_basis = margin_delta
+            break
+
+    max_hours = max(0.5, _to_float(candidate.get("max_hold_hours"), 4.0))
+    opened.update({
+        "policy_version": V62_POLICY_VERSION,
+        "execution_lane": candidate.get("execution_lane"),
+        "trade_class": candidate.get("execution_lane"),
+        "strategy_id": candidate.get("strategy_id"),
+        "strategy_name": candidate.get("strategy_name"),
+        "market_regime": candidate.get("market_regime"),
+        "signal_timeframe": candidate.get("signal_timeframe"),
+        "signal_trigger": candidate.get("signal_trigger"),
+        "live_setup_score": candidate.get("live_setup_score"),
+        "protective_stop_level": candidate.get("protective_stop_level"),
+        "protective_stop_price_pct": candidate.get("protective_stop_price_pct"),
+        "planned_stop_pct": candidate.get("protective_stop_price_pct"),
+        # Critical: no 20%-30% underlying-price limit is attached.
+        "planned_take_profit_pct": None,
+        "underlying_price_take_profit_disabled": True,
+        "stop_win_trigger_pct": _to_float(candidate.get("stop_win_trigger_pct"), 20.0),
+        "stop_win_target_pct": max(20.0, min(30.0, _to_float(candidate.get("stop_win_target_pct"), 20.0))),
+        "stop_win_lock_floor_pct": max(0.0, min(20.0, _to_float(candidate.get("stop_win_lock_floor_pct"), 10.0))),
+        "stop_win_measure": "PROFIT_PCT_OF_IG_TRADE_MARGIN_CAPITAL",
+        "trade_capital_basis_cash": capital_basis,
+        "trade_capital_basis_source": "IG_DEMO_MARGIN_DELTA_AT_OPEN" if capital_basis else "UNAVAILABLE",
+        "account_currency": account_after.get("currency") or account_before.get("currency"),
+        "account_before_open": account_before,
+        "account_after_open": account_after,
+        "profit_lock_armed": False,
+        "max_profit_pct_seen": 0.0,
+        "due_at": _now() + max_hours * 3600.0,
+        "max_hold_hours": max_hours,
+        "news_used_at_entry": False,
+        "historical_data_used_at_entry": False,
+        "opened_from_current_candle_regime": True,
+    })
+
+    if capital_basis is None:
+        opened["stop_win_state"] = "CAPITAL_BASIS_UNAVAILABLE_FAIL_CLOSED"
+        # A V6.2 trade is not allowed to remain open if the requested 20%-30%
+        # profit-on-trade target cannot be measured honestly.
+        try:
+            result = self.broker.close_position(str(opened.get("deal_id") or "")) or {}
+            opened["status"] = "CLOSED"
+            opened["closed_at"] = _now()
+            opened["close_result"] = result
+            opened["exit_reason"] = "STOP_WIN_CAPITAL_BASIS_UNAVAILABLE"
+            self._state["closes"] = int(self._state.get("closes") or 0) + 1
+            self._journal(
+                "V62_FAIL_CLOSED",
+                deal_id=opened.get("deal_id"),
+                symbol=opened.get("symbol"),
+                reason="STOP_WIN_CAPITAL_BASIS_UNAVAILABLE",
+            )
+        except Exception as exc:
+            opened["fail_closed_error"] = _compact_error(exc)
+        return
+
+    # Store IG valuation metadata once at entry so profit % can be monitored
+    # without repeated market-details requests every execution tick.
+    metadata: Dict[str, Any] = {}
+    try:
+        details = self.broker.market_details(str(opened.get("epic") or ""), require_quote=True) or {}
+        metadata = _v62_market_valuation_metadata(self.broker, str(opened.get("epic") or ""), details)
+    except Exception:
+        metadata = {}
+    opened.update({
+        "pnl_scaling_factor": metadata.get("scaling_factor"),
+        "pnl_value_of_one_pip": metadata.get("value_of_one_pip"),
+        "settlement_currency": metadata.get("settlement_currency"),
+    })
+    account_ccy = str(opened.get("account_currency") or "").upper().strip()
+    settlement = str(opened.get("settlement_currency") or account_ccy).upper().strip()
+    conversion = None
+    if account_ccy:
+        try:
+            conversion = 1.0 if not settlement or settlement == account_ccy else self.broker._fx_conversion_factor(settlement, account_ccy)
+        except Exception:
+            conversion = None
+    opened["pnl_conversion_to_account"] = conversion
+    _v62_attach_native_stop_only(self, opened)
+
+
+def _v62_position_profit_pct(position: Dict[str, Any], broker_row: Dict[str, Any]) -> tuple[Optional[float], Optional[float], str]:
+    capital = _to_float(position.get("trade_capital_basis_cash"), 0.0)
+    if capital <= 0:
+        return None, None, "TRADE_CAPITAL_BASIS_UNAVAILABLE"
+    entry = _to_float(position.get("entry_level"), 0.0)
+    size = _to_float(position.get("size"), 0.0)
+    scaling = _to_float(position.get("pnl_scaling_factor"), 0.0)
+    value_pip = _to_float(position.get("pnl_value_of_one_pip"), 0.0)
+    conversion = _to_float(position.get("pnl_conversion_to_account"), 0.0)
+    direction = str(position.get("direction") or "").upper().strip()
+    bid = _to_float(broker_row.get("bid"), 0.0)
+    offer = _to_float(broker_row.get("offer"), 0.0)
+    if entry <= 0 or size <= 0 or scaling <= 0 or value_pip <= 0 or conversion <= 0:
+        return None, None, "IG_VALUATION_METADATA_UNAVAILABLE"
+    if direction == "BUY" and bid > 0:
+        move = bid - entry
+    elif direction == "SELL" and offer > 0:
+        move = entry - offer
+    else:
+        return None, None, "LIVE_BROKER_QUOTE_UNAVAILABLE"
+    pips = move * scaling
+    pnl = pips * value_pip * size * conversion
+    return pnl / capital * 100.0, pnl, "IG_LIVE_QUOTE_PLUS_ENTRY_VALUATION_METADATA"
+
+
+def _v62_close_position(
+    self: CategoryExecutionEngine,
+    position: Dict[str, Any],
+    *,
+    reason: str,
+    profit_pct: Optional[float],
+    pnl_cash: Optional[float],
+) -> bool:
+    deal_id = str(position.get("deal_id") or "").strip()
+    if not deal_id:
+        return False
+    try:
+        result = self.broker.close_position(deal_id) or {}
+        status = str(result.get("status") or result.get("dealStatus") or "").upper()
+        if result.get("closeVerified") or status in {"ALREADY_CLOSED_OR_NOT_FOUND", "ACCEPTED"}:
+            position["status"] = "CLOSED"
+            position["closed_at"] = _now()
+            position["close_result"] = result
+            position["exit_reason"] = reason
+            position["exit_profit_pct"] = None if profit_pct is None else round(profit_pct, 4)
+            position["exit_pnl_cash_estimate"] = None if pnl_cash is None else round(pnl_cash, 6)
+            self._state["closes"] = int(self._state.get("closes") or 0) + 1
+            self._journal(
+                "V62_STOP_WIN_CLOSE" if "STOP_WIN" in reason else "V62_CLOSE",
+                deal_id=deal_id,
+                symbol=position.get("symbol"),
+                category=position.get("category"),
+                reason=reason,
+                profit_pct=profit_pct,
+                pnl_cash=pnl_cash,
+            )
+            return True
+    except Exception as exc:
+        position["stop_win_close_error"] = _compact_error(exc)
+    return False
+
+
+def _v62_protective_stop_closes(self: CategoryExecutionEngine, broker_rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Server fallback for the native IG protective stop.
+
+    If the broker-side stop attachment was rejected/unavailable, the execution
+    loop still observes the exact IG bid/offer and closes at the stored level.
+    """
+    by_deal = {str(x.get("deal_id") or ""): x for x in (broker_rows or []) if isinstance(x, dict)}
+    stats = {"checked": 0, "closed": 0}
+    for position in self._open_positions():
+        if str(position.get("policy_version") or "") != V62_POLICY_VERSION:
+            continue
+        stop = _to_float(position.get("protective_stop_level"), 0.0)
+        if stop <= 0:
+            continue
+        row = by_deal.get(str(position.get("deal_id") or ""))
+        if not row:
+            continue
+        stats["checked"] += 1
+        direction = str(position.get("direction") or "").upper().strip()
+        bid = _to_float(row.get("bid"), 0.0)
+        offer = _to_float(row.get("offer"), 0.0)
+        breached = (direction == "BUY" and bid > 0 and bid <= stop) or (direction == "SELL" and offer > 0 and offer >= stop)
+        if breached and _v62_close_position(
+            self, position,
+            reason="PROTECTIVE_STOP_SERVER_FALLBACK",
+            profit_pct=position.get("current_trade_profit_pct"),
+            pnl_cash=position.get("current_trade_pnl_cash_estimate"),
+        ):
+            stats["closed"] += 1
+    return stats
+
+
+def _v62_stop_win_closes(self: CategoryExecutionEngine, broker_rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    by_deal = {str(x.get("deal_id") or ""): x for x in (broker_rows or []) if isinstance(x, dict)}
+    stats = {"checked": 0, "targets_closed": 0, "locks_armed": 0, "lock_floor_closed": 0, "valuation_unavailable": 0}
+    for position in self._open_positions():
+        if str(position.get("policy_version") or "") != V62_POLICY_VERSION:
+            continue
+        row = by_deal.get(str(position.get("deal_id") or ""))
+        if not row:
+            continue
+        stats["checked"] += 1
+        profit_pct, pnl_cash, source = _v62_position_profit_pct(position, row)
+        position["stop_win_valuation_source"] = source
+        position["current_trade_profit_pct"] = None if profit_pct is None else round(profit_pct, 4)
+        position["current_trade_pnl_cash_estimate"] = None if pnl_cash is None else round(pnl_cash, 6)
+        position["stop_win_last_checked_at"] = _now()
+        if profit_pct is None:
+            stats["valuation_unavailable"] += 1
+            continue
+        position["max_profit_pct_seen"] = round(max(_to_float(position.get("max_profit_pct_seen"), profit_pct), profit_pct), 4)
+        trigger = max(20.0, _to_float(position.get("stop_win_trigger_pct"), 20.0))
+        target = max(20.0, min(30.0, _to_float(position.get("stop_win_target_pct"), 20.0)))
+        floor = max(0.0, min(trigger, _to_float(position.get("stop_win_lock_floor_pct"), 10.0)))
+        if not bool(position.get("profit_lock_armed")) and profit_pct >= trigger:
+            position["profit_lock_armed"] = True
+            position["profit_lock_armed_at"] = _now()
+            stats["locks_armed"] += 1
+        if profit_pct >= target:
+            if _v62_close_position(
+                self, position,
+                reason=f"STOP_WIN_TARGET_{target:.1f}PCT",
+                profit_pct=profit_pct,
+                pnl_cash=pnl_cash,
+            ):
+                stats["targets_closed"] += 1
+            continue
+        if bool(position.get("profit_lock_armed")) and profit_pct <= floor:
+            if _v62_close_position(
+                self, position,
+                reason=f"STOP_WIN_LOCK_FLOOR_{floor:.1f}PCT",
+                profit_pct=profit_pct,
+                pnl_cash=pnl_cash,
+            ):
+                stats["lock_floor_closed"] += 1
+    return stats
+
+
+def _v62_tracker_update_fields(self: TradeExcursionTracker, record: Dict[str, Any], now: float) -> bool:
+    if str(record.get("policy_version") or "") == V62_POLICY_VERSION:
+        record["take_profit_policy"] = "V62_PROFIT_ON_TRADE_MARGIN_20_TO_30_PCT"
+        record["native_take_profit_required"] = False
+        record["planned_take_profit_pct"] = None
+        record["take_profit_pct"] = None
+        return False
+    return _V62_BASE_TRACKER_UPDATE_FIELDS(self, record, now)
+
+
+def _v62_native_tp_needed(self: TradeExcursionTracker, record: Dict[str, Any]) -> bool:
+    if str(record.get("policy_version") or "") == V62_POLICY_VERSION:
+        return False
+    return _V62_BASE_NATIVE_TP_NEEDED(self, record)
+
+
+def _v62_tracker_merge(self: TradeExcursionTracker, row: Dict[str, Any]) -> Dict[str, Any]:
+    out = _V62_BASE_TRACKER_MERGE(self, row)
+    key = str(out.get("deal_id") or out.get("ig_deal_id") or out.get("trade_id") or "").strip()
+    portfolio = getattr(self, "_jasong_category_portfolio", None)
+    if portfolio is not None and key:
+        try:
+            with portfolio._lock:
+                pos = next((x for x in portfolio._state.get("positions", []) if str(x.get("deal_id") or "") == key), None)
+            if isinstance(pos, dict) and str(pos.get("policy_version") or "") == V62_POLICY_VERSION:
+                for field in (
+                    "policy_version", "execution_lane", "strategy_id", "strategy_name",
+                    "market_regime", "signal_timeframe", "signal_trigger", "live_setup_score",
+                    "stop_win_trigger_pct", "stop_win_target_pct", "stop_win_lock_floor_pct",
+                    "trade_capital_basis_cash", "trade_capital_basis_source", "current_trade_profit_pct",
+                    "current_trade_pnl_cash_estimate", "max_profit_pct_seen", "profit_lock_armed",
+                    "protective_stop_level", "protective_stop_price_pct", "stop_win_valuation_source",
+                ):
+                    if pos.get(field) is not None:
+                        out[field] = copy.deepcopy(pos.get(field))
+        except Exception:
+            pass
+    return out
+
+
+def _v62_tracker_status(self: TradeExcursionTracker) -> Dict[str, Any]:
+    out = _V62_BASE_TRACKER_STATUS(self)
+    out.update({
+        "version": VERSION,
+        "live_regime_policy": V62_POLICY_VERSION,
+        "underlying_price_take_profit_for_v62": False,
+        "v62_stop_win_profit_pct_range": [20.0, 30.0],
+        "v62_stop_win_measure": "IG_TRADE_MARGIN_CAPITAL",
+        "native_protective_stop_retained": True,
+    })
+    return out
+
+
+def _v62_strategy_loop(self: CategoryStrategyEngine) -> None:
+    """Continuous live-regime scanner; no historical optimiser/validator work."""
+    if self._stop.wait(8.0):
+        return
+    while not self._stop.is_set():
+        started = _now()
+        try:
+            if self._state.get("enabled", True):
+                coverage = self.evidence_coverage()
+                refresh_running = bool(self._full_refresh_thread and self._full_refresh_thread.is_alive())
+                if self.auto_full_refresh and coverage.get("markets_pending_live_scan", 0) > 0 and not refresh_running:
+                    self.start_full_refresh(force=True)
+                    refresh_running = True
+                if not refresh_running:
+                    self.run_now()
+                with self._lock:
+                    self._state["live_regime_scan_only"] = True
+                    self._state["historical_optimizer_runtime_enabled"] = False
+                    self._state["news_runtime_enabled"] = False
+                    self._state["last_loop_duration_seconds"] = round(_now() - started, 3)
+                    self._persist()
+        except Exception as exc:
+            with self._lock:
+                self._state["last_error"] = f"live-regime refresh: {_compact_error(exc)}"
+                self._persist()
+        elapsed = max(0.0, _now() - started)
+        self._stop.wait(max(5.0, float(self.scan_interval_seconds) - elapsed))
+
+
+def _v62_reliable_category_tick(self: CategoryExecutionEngine) -> Dict[str, Any]:
+    with self._lock:
+        health = _execution_health_state(self)
+        now = _now()
+        health.update({
+            "last_tick_started_at": now,
+            "tick_count": int(health.get("tick_count") or 0) + 1,
+            "candidate_attempts_this_tick": 0,
+            "candidate_opens_this_tick": 0,
+            "candidate_errors_this_tick": 0,
+            "standard_eligible_this_tick": 0,
+            "ranked_candidates_this_tick": 0,
+            "blocked_eligible_this_tick": 0,
+            "tick_error": None,
+            "policy_version": V62_POLICY_VERSION,
+        })
+        blockers: Counter[str] = Counter()
+        try:
+            health["phase"] = "RECONCILE"
+            health["phase_started_at"] = _now()
+            broker_rows = self._reconcile()
+
+            health["phase"] = "PROTECTIVE_STOP_FALLBACK"
+            health["phase_started_at"] = _now()
+            health["protective_stop_fallback"] = _v62_protective_stop_closes(self, broker_rows)
+
+            health["phase"] = "STOP_WIN_20_30"
+            health["phase_started_at"] = _now()
+            health["stop_win"] = _v62_stop_win_closes(self, broker_rows)
+
+            health["phase"] = "DUE_CLOSES"
+            health["phase_started_at"] = _now()
+            self._due_closes()
+
+            configured = bool(getattr(self.broker, "configured", lambda: False)())
+            health["broker_configured"] = configured
+            try:
+                broker_status = self.broker.status() or {}
+            except Exception:
+                broker_status = {}
+            health["broker_connected"] = bool(broker_status.get("connected"))
+            health["broker_last_error"] = broker_status.get("last_error")
+            health["category_autotrade_enabled"] = bool(self.enabled)
+            health["account_funding"] = _v6_account_funding_snapshot(self.broker, trigger_refresh=True)
+
+            if self.enabled and configured:
+                external = _cached_external_for_tick(self)
+                health["phase"] = "LIVE_REGIME_RANKINGS"
+                health["phase_started_at"] = _now()
+                rankings = self.ranking_source() or {}
+                try:
+                    self._jasong_health_rankings_cache = {
+                        str(cat): [copy.deepcopy(x) for x in rows[:5] if isinstance(x, dict)]
+                        for cat, rows in rankings.items() if isinstance(rows, list)
+                    }
+                    self._jasong_health_rankings_cache_at = _now()
+                except Exception:
+                    pass
+
+                cooldowns = health.setdefault("candidate_error_cooldowns", {})
+                retry_seconds = max(15, min(900, int(os.getenv("CATEGORY_EXECUTION_ERROR_COOLDOWN_SECONDS", "60"))))
+                for category in ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"):
+                    for raw in rankings.get(category, [])[:5]:
+                        if not isinstance(raw, dict):
+                            continue
+                        candidate = dict(raw)
+                        health["ranked_candidates_this_tick"] += 1
+                        if not candidate.get("standard_eligible"):
+                            for reason in candidate.get("rejection_reasons") or ["CURRENT_SETUP_NOT_READY"]:
+                                blockers[str(reason)] += 1
+                            continue
+                        health["standard_eligible_this_tick"] += 1
+                        key = _candidate_key(candidate)
+                        until = _to_float(cooldowns.get(key), 0.0)
+                        if until > now:
+                            blockers["ERROR_COOLDOWN"] += 1
+                            continue
+                        cooldowns.pop(key, None)
+
+                        funding_ok, funding_reason, funding = _v6_account_funding_gate(self.broker, candidate)
+                        health["account_funding"] = funding
+                        if not funding_ok:
+                            blockers[funding_reason] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            continue
+                        reentry_ok, reentry_reason = _reentry_reset_gate(self, candidate)
+                        if not reentry_ok:
+                            blockers[reentry_reason] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            continue
+                        allowed, reason = self._may_open(candidate, external)
+                        if not allowed:
+                            blockers[str(reason or "BLOCKED").upper().replace(" ", "_")] += 1
+                            health["blocked_eligible_this_tick"] += 1
+                            continue
+
+                        health["candidate_attempts_this_tick"] += 1
+                        health["total_isolated_candidate_attempts"] = int(health.get("total_isolated_candidate_attempts") or 0) + 1
+                        health["last_open_attempt"] = {
+                            "at": _now(), "candidate": key,
+                            "strategy_id": candidate.get("strategy_id"),
+                            "regime": candidate.get("market_regime"),
+                            "timeframe": candidate.get("signal_timeframe"),
+                            "trigger": candidate.get("signal_trigger"),
+                            "live_setup_score": candidate.get("live_setup_score"),
+                            "stop_win_target_pct": candidate.get("stop_win_target_pct"),
+                        }
+                        before = int(self._state.get("opens") or 0)
+                        try:
+                            self._open_candidate(candidate, external)
+                            if int(self._state.get("opens") or 0) > before:
+                                health["candidate_opens_this_tick"] += 1
+                                health["total_isolated_candidate_opens"] = int(health.get("total_isolated_candidate_opens") or 0) + 1
+                                health["last_open_result"] = f"OPENED_{candidate.get('execution_lane')}"
+                                health["last_open_success_at"] = _now()
+                                cooldowns.pop(key, None)
+                            else:
+                                blockers["NO_OPEN_RECORDED"] += 1
+                        except Exception as exc:
+                            label = _classify_broker_error(exc)
+                            message = _compact_error(exc)
+                            health["candidate_errors_this_tick"] += 1
+                            health["total_candidate_errors"] = int(health.get("total_candidate_errors") or 0) + 1
+                            health["last_open_result"] = label
+                            health["last_candidate_error"] = {"at": _now(), "candidate": key, "classification": label, "error": message}
+                            recent = health.setdefault("recent_errors", [])
+                            recent.append(dict(health["last_candidate_error"]))
+                            health["recent_errors"] = recent[-20:]
+                            cooldowns[key] = _now() + (300 if label == "INSUFFICIENT_FUNDS" else retry_seconds)
+                            blockers[label] += 1
+                            continue
+                health["candidate_error_cooldowns"] = {
+                    key: until for key, until in cooldowns.items() if _to_float(until, 0.0) > now
+                }
+            elif not self.enabled:
+                health["last_open_result"] = "CATEGORY_AUTOTRADE_DISABLED"
+            else:
+                health["last_open_result"] = "IG_DEMO_NOT_CONFIGURED"
+
+            health["recent_blockers"] = dict(blockers)
+            health["phase"] = "COMPLETE"
+            health["phase_started_at"] = _now()
+            health["last_tick_completed_at"] = _now()
+            health["last_tick_duration_seconds"] = round(health["last_tick_completed_at"] - now, 3)
+            self._state["last_error"] = None
+        except Exception as exc:
+            message = _compact_error(exc)
+            self._state["last_error"] = message
+            health["tick_error"] = message
+            health["last_open_result"] = "TICK_ERROR"
+            health["last_tick_completed_at"] = _now()
+        self._state["last_tick_at"] = _now()
+        self._persist()
+        return {
+            "version": VERSION,
+            "enabled": bool(self.enabled),
+            "open_positions": len(self._open_positions()),
+            "last_tick_at": self._state.get("last_tick_at"),
+            "last_error": self._state.get("last_error"),
+            "execution_health": copy.deepcopy(health),
+            "live_money_execution": False,
+        }
+
+
+def _v62_category_status(self: CategoryExecutionEngine) -> Dict[str, Any]:
+    out = _V62_BASE_CATEGORY_STATUS(self)
+    out["version"] = VERSION
+    out["entry_policy"] = {
+        "policy_version": V62_POLICY_VERSION,
+        "historical_validation": "DISABLED",
+        "news": "DISABLED",
+        "forward_performance_gate": "DISABLED_FOR_ENTRY",
+        "current_candles_only": True,
+        "trending_market": {
+            "strategy": "EMA20/EMA50 Trend Follower",
+            "adx_min": 25.0,
+            "entries": ["EMA20_PULLBACK", "20_BAR_BREAKOUT"],
+            "timeframes": ["1H", "4H"],
+        },
+        "ranging_market": {
+            "strategy": "RSI14 Divergence Reversal Timer",
+            "rsi_levels": [30.0, 70.0],
+            "confirmation": "BOLLINGER_OR_SUPPORT_RESISTANCE_PLUS_STRONG_REVERSAL_CANDLE",
+            "timeframes": ["15M", "1H"],
+        },
+        "transition_market": "NO_TRADE",
+        "stop_win_profit_pct_range": [20.0, 30.0],
+        "profit_lock_trigger_pct": 20.0,
+        "profit_lock_floor_pct": 10.0,
+        "profit_target_is_underlying_price_move": False,
+        "execution_mode": "IG_DEMO_ONLY",
+    }
+    out["execution_health"] = copy.deepcopy(_execution_health_state(self))
+    return out
+
+
+def _v62_health_snapshot(
+    *,
+    system: Optional[Dict[str, Any]] = None,
+    broker: Any = None,
+) -> Dict[str, Any]:
+    out = _V62_BASE_HEALTH(system=system, broker=broker)
+    out["version"] = VERSION
+    out["strategy_unchanged"] = False
+    system = system or {}
+    intelligence = system.get("intelligence")
+    portfolio = system.get("portfolio")
+    rankings: Dict[str, List[Dict[str, Any]]] = {}
+    if intelligence is not None:
+        try:
+            rankings = intelligence.category_rankings()
+        except Exception:
+            rankings = {}
+    ready = sum(1 for rows in rankings.values() for x in rows if x.get("standard_eligible"))
+    trending = sum(1 for rows in rankings.values() for x in rows if str(x.get("market_regime") or "").startswith("TRENDING"))
+    ranging = sum(1 for rows in rankings.values() for x in rows if str(x.get("market_regime") or "") == "RANGING")
+    if ready > 0:
+        flow = "LIVE_REGIME_SIGNAL_READY"
+    elif trending or ranging:
+        flow = "WAITING_FOR_STRATEGY_TRIGGER"
+    else:
+        flow = "WAITING_FOR_FAVORABLE_REGIME"
+    out["trade_flow_state"] = flow
+    out["entry_policy"] = {
+        "policy_version": V62_POLICY_VERSION,
+        "decision_basis": "CURRENT_CANDLES_REGIME_MATCHING_ONLY",
+        "historical_data_for_trade_admission": False,
+        "historical_wr_pf_walk_forward_gates": False,
+        "news_for_trade_admission": False,
+        "model_ai_required": False,
+        "trend_strategy": "EMA20/EMA50 + ADX>=25 + pullback/breakout confirmation",
+        "range_strategy": "RSI14 divergence + Bollinger/support-resistance + strong reversal candle",
+        "volatility": "ATR controls stop width and size multiplier",
+        "liquidity": "broker spread + relative volume when available",
+        "stop_win_profit_pct_range": [20.0, 30.0],
+        "stop_win_measure": "IG_TRADE_MARGIN_CAPITAL",
+        "underlying_price_take_profit_disabled": True,
+        "execution_mode": "IG_DEMO_ONLY",
+    }
+    out["historical_refresh"] = {
+        "status": "DISABLED",
+        "reason": "V6.2 does not run historical performance validation; background full scan evaluates current market state only",
+    }
+    out["live_regime_v62"] = {
+        "enabled": True,
+        "import_error": _V62_IMPORT_ERROR,
+        "ranked_candidates": sum(len(rows) for rows in rankings.values()),
+        "standard_eligible": ready,
+        "trending_regime_rows": trending,
+        "ranging_regime_rows": ranging,
+        "strategy_status": intelligence.status() if intelligence is not None else None,
+        "stop_win_runtime": copy.deepcopy(_execution_health_state(portfolio).get("stop_win")) if portfolio is not None else None,
+        "live_money_execution": False,
+    }
+    runtime = out.setdefault("runtime_architecture", {})
+    runtime.update({
+        "live_regime_v62": True,
+        "news_engine": "DISABLED",
+        "historical_strategy_optimizer": "DISABLED",
+        "historical_validation_execution_gate": "DISABLED",
+        "forward_validation_execution_gate": "DISABLED",
+        "current_indicator_buffer_only": True,
+        "stop_win": "20_TO_30_PCT_OF_IG_TRADE_MARGIN_CAPITAL",
+        "native_underlying_take_profit_for_v62": False,
+        "native_protective_stop": True,
+    })
+    return out
+
+
+# Reuse the safe multi-term resolver from V6.1 without any news dependency.
+def _v62_resolve_global_market(
+    self: IGDemoBroker,
+    *,
+    search_terms: List[str],
+    expected_types: Optional[List[str]] = None,
+    name_tokens: Optional[List[str]] = None,
+    require_tradeable: bool = True,
+    cache_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    terms = [str(x or "").strip() for x in (search_terms or []) if str(x or "").strip()]
+    if not terms:
+        raise RuntimeError("No IG DEMO global market search terms supplied")
+    tokens = [str(x or "").upper().strip() for x in (name_tokens or []) if str(x or "").strip()]
+    allowed = [str(x or "").upper().strip() for x in (expected_types or []) if str(x or "").strip()]
+    ck = str(cache_key or "|".join(terms)).upper().strip()
+    cache_id = f"V62GLOBAL:{ck}:{int(require_tradeable)}"
+    now = _now()
+    cache = getattr(self, "_market_cache", {})
+    cache_at = getattr(self, "_market_cache_at", {})
+    ttl = _to_float(getattr(self, "_market_cache_ttl", 120.0), 120.0)
+    cached = cache.get(cache_id) if isinstance(cache, dict) else None
+    cached_at = cache_at.get(cache_id, 0.0) if isinstance(cache_at, dict) else 0.0
+    if cached and now - _to_float(cached_at, 0.0) < max(30.0, ttl):
+        return dict(cached)
+
+    def compact(value: Any) -> str:
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    checked: set[str] = set()
+    errors: List[str] = []
+    for term in terms[:4]:
+        try:
+            response = self.search_markets(term) or {}
+        except Exception as exc:
+            errors.append(f"{term}: {_compact_error(exc)}")
+            continue
+        rows = [dict(x) for x in (response.get("markets") or []) if isinstance(x, dict)]
+        term_c = compact(term)
+        for raw in rows[:20]:
+            epic = str(raw.get("epic") or "").strip()
+            if not epic or epic in checked:
+                continue
+            checked.add(epic)
+            try:
+                try:
+                    details = self.market_details(epic, require_quote=True) or {}
+                except TypeError:
+                    details = self.market_details(epic) or {}
+            except Exception as exc:
+                errors.append(f"{term}/{epic}: {_compact_error(exc)}")
+                continue
+            instrument = details.get("instrument") or {}
+            snapshot = details.get("snapshot") or {}
+            actual_type = str(instrument.get("type") or raw.get("instrumentType") or raw.get("type") or "")
+            if not self._instrument_type_allowed(actual_type, allowed):
+                continue
+            if any(x in actual_type.upper() for x in ("OPT_", "BINARY", "SPRINT", "KNOCKOUT", "BUNGEE")):
+                continue
+            name = str(instrument.get("name") or raw.get("instrumentName") or raw.get("name") or "")
+            name_c = compact(name)
+            token_hits = sum(1 for token in tokens if compact(token) and compact(token) in name_c)
+            term_hit = bool(term_c and (term_c in name_c or name_c in term_c))
+            if tokens and token_hits <= 0 and not term_hit:
+                continue
+            if not tokens and not term_hit:
+                continue
+            status = str(snapshot.get("marketStatus") or raw.get("marketStatus") or "").upper()
+            if require_tradeable and status != "TRADEABLE":
+                continue
+            q = getattr(self, "extract_snapshot_quote", lambda _: {})(details) or {}
+            bid = _to_float(q.get("bid"), 0.0) or _to_float(raw.get("bid"), 0.0)
+            offer = _to_float(q.get("offer"), 0.0) or _to_float(raw.get("offer"), 0.0)
+            resolved = {
+                "symbol": ck,
+                "epic": epic,
+                "expiry": instrument.get("expiry") or raw.get("expiry") or "-",
+                "name": name,
+                "instrument_type": actual_type,
+                "instrument_family": self._instrument_type_family(actual_type),
+                "market_status": status,
+                "details": details,
+                "min_deal_size": self._min_deal_size(details),
+                "bid": bid if bid > 0 else None,
+                "offer": offer if offer >= bid and offer > 0 else None,
+                "resolver_version": "V6.2_MULTI_TERM_SAFE_RESOLVER",
+                "resolver_search_term": term,
+            }
+            if isinstance(cache, dict):
+                cache[cache_id] = dict(resolved)
+            if isinstance(cache_at, dict):
+                cache_at[cache_id] = now
+            return resolved
+    suffix = f" ({'; '.join(errors[-3:])})" if errors else ""
+    raise RuntimeError(f"IG DEMO search terms for {terms[0]} did not contain a safe matching instrument{suffix}")
+
+
+def _install_v62_live_regime() -> Dict[str, Any]:
+    global execution_health_snapshot
+    if getattr(ForwardPrimeArchitecture, "_jasong_v62_live_regime_patch", False):
+        return {"installed": True, "already_installed": True, "version": VERSION}
+
+    IGDemoBroker.resolve_global_market = _v62_resolve_global_market
+    CategoryStrategyEngine._current_evaluations = _v62_fresh_evaluations
+    CategoryStrategyEngine.evidence_coverage = _v62_evidence_coverage
+    CategoryStrategyEngine._evaluate_seed = _v62_evaluate_seed
+    CategoryStrategyEngine.category_rankings = _v62_category_rankings
+    CategoryStrategyEngine.optimizer_summary = _v62_optimizer_summary
+    CategoryStrategyEngine.status = _v62_strategy_status
+    CategoryStrategyEngine.full_refresh_status = _v62_full_refresh_status
+    CategoryStrategyEngine._loop = _v62_strategy_loop
+
+    ForwardPrimeArchitecture.enrich = _v62_forward_enrich
+    ForwardPrimeArchitecture.category_rankings = _v62_forward_rankings
+    ForwardPrimeArchitecture.compound_candidates = _v62_compound_candidates
+
+    CategoryExecutionEngine._may_open = _v62_category_may_open
+    CategoryExecutionEngine._open_candidate = _v62_category_open_candidate
+    CategoryExecutionEngine.tick = _v62_reliable_category_tick
+    CategoryExecutionEngine.status = _v62_category_status
+
+    TradeExcursionTracker._update_take_profit_fields = _v62_tracker_update_fields
+    TradeExcursionTracker._native_take_profit_needed = _v62_native_tp_needed
+    TradeExcursionTracker.merge = _v62_tracker_merge
+    TradeExcursionTracker.status = _v62_tracker_status
+
+    execution_health_snapshot = _v62_health_snapshot
+    ForwardPrimeArchitecture._jasong_v62_live_regime_patch = True
+    return {
+        "installed": True,
+        "version": VERSION,
+        "policy_version": V62_POLICY_VERSION,
+        "historical_performance_execution_gate": False,
+        "historical_optimizer_execution_authority": False,
+        "news_execution_authority": False,
+        "forward_performance_execution_gate": False,
+        "current_candle_regime_only": True,
+        "trend_strategy": "EMA20_EMA50_ADX25_PULLBACK_OR_BREAKOUT",
+        "range_strategy": "RSI14_DIVERGENCE_BOLLINGER_SUPPORT_RESISTANCE",
+        "transition_no_trade": True,
+        "volatility_adaptive_stop_and_size": True,
+        "liquidity_spread_and_volume_gate": True,
+        "stop_win_profit_pct_range": [20.0, 30.0],
+        "stop_win_is_not_underlying_price_move": True,
+        "native_protective_stop_only": True,
+        "ig_global_resolver": "V6.2_MULTI_TERM_SAFE_RESOLVER",
+        "ig_demo_only": True,
+    }
+
+
+V62_STATUS = _install_v62_live_regime()
