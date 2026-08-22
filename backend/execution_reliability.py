@@ -18,6 +18,178 @@ from prime_policy import ForwardPrimeArchitecture
 from forward_store import ForwardStore
 from forward_validation import ForwardValidationEngine
 from trade_excursions import TradeExcursionTracker
+from v64_learning_engine import V64LearningTradeEngine
+from ig_demo_bridge import IGDemoMirror
+from auto_manager import AutomatedTradeManager
+
+
+# ===========================================================================
+# V6.2.1 EXCLUSIVE LIVE-REGIME RUNTIME
+# ===========================================================================
+# backend/run_server.py imports this module before backend/main.py.  That gives
+# V6.2.1 one safe place to disable the OLD autonomous learning pipeline before
+# main.py instantiates it.  The legacy engine/history remains readable, but it
+# cannot create watchers, start its worker, queue deep/historical validation or
+# mirror learning trades to IG DEMO.  Category/Compound V6.2 live-regime
+# execution remains untouched.
+# ===========================================================================
+
+_V621_ORIGINAL_LEARNING_STATUS = V64LearningTradeEngine.status
+_V621_ORIGINAL_AUTO_STATUS = AutomatedTradeManager.status
+_V621_ORIGINAL_MIRROR_STATUS = getattr(IGDemoMirror, "status", None)
+
+
+def _v621_learning_status(self: V64LearningTradeEngine) -> Dict[str, Any]:
+    out = dict(_V621_ORIGINAL_LEARNING_STATUS(self) or {})
+    out.update({
+        "enabled": False,
+        "execution_enabled": False,
+        "new_trade_admission": False,
+        "legacy_runtime_state": "DISABLED_BY_V6_2_1_LIVE_REGIME",
+        "historical_records_retained_read_only": True,
+        "note": (
+            "Legacy V6.4/V6.5 learning records are retained for diagnostics only; "
+            "they cannot open IG DEMO trades in V6.2.1."
+        ),
+    })
+    return out
+
+
+def _v621_disable_learning_start(self: V64LearningTradeEngine) -> None:
+    try:
+        with self._lock:
+            self._state["enabled"] = False
+            self._state["legacy_runtime_state"] = "DISABLED_BY_V6_2_1_LIVE_REGIME"
+        self._stop_event.set()
+        self._persist()
+    except Exception:
+        pass
+    return None
+
+
+def _v621_disable_learning_enable(self: V64LearningTradeEngine) -> Dict[str, Any]:
+    _v621_disable_learning_start(self)
+    return _v621_learning_status(self)
+
+
+def _v621_disable_learning_submit(
+    self: V64LearningTradeEngine,
+    candidate: Dict[str, Any],
+    validated: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    _v621_disable_learning_start(self)
+    return {
+        "accepted": False,
+        "reason": "LEGACY_LEARNING_DISABLED_BY_V6_2_1_LIVE_REGIME",
+        "execution_enabled": False,
+    }
+
+
+def _v621_disable_learning_tick(self: V64LearningTradeEngine, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    _v621_disable_learning_start(self)
+    return _v621_learning_status(self)
+
+
+def _v621_auto_status(self: AutomatedTradeManager) -> Dict[str, Any]:
+    out = dict(_V621_ORIGINAL_AUTO_STATUS(self) or {})
+    out.update({
+        "enabled": False,
+        "execution_enabled": False,
+        "legacy_runtime_state": "DISABLED_BY_V6_2_1_LIVE_REGIME",
+        "historical_deep_validation_enabled": False,
+        "new_jobs_allowed": False,
+    })
+    return out
+
+
+def _v621_disable_auto_start(self: AutomatedTradeManager) -> None:
+    try:
+        with self._lock:
+            self._state["enabled"] = False
+            self._state["next_run_at"] = None
+            self._state["legacy_runtime_state"] = "DISABLED_BY_V6_2_1_LIVE_REGIME"
+        self._stop_event.set()
+        self._persist_state()
+    except Exception:
+        pass
+    return None
+
+
+def _v621_disable_auto_enable(self: AutomatedTradeManager, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    _v621_disable_auto_start(self)
+    return _v621_auto_status(self)
+
+
+def _v621_disable_auto_queue(self: AutomatedTradeManager, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    _v621_disable_auto_start(self)
+    return {
+        "accepted": False,
+        "status": "DISABLED_BY_V6_2_1_LIVE_REGIME",
+        "execution_enabled": False,
+    }
+
+
+def _v621_mirror_status(self: IGDemoMirror) -> Dict[str, Any]:
+    if callable(_V621_ORIGINAL_MIRROR_STATUS):
+        try:
+            out = dict(_V621_ORIGINAL_MIRROR_STATUS(self) or {})
+        except Exception:
+            out = {}
+    else:
+        out = {}
+    out.update({
+        "enabled": False,
+        "legacy_learning_execution_enabled": False,
+        "legacy_runtime_state": "DISABLED_BY_V6_2_1_LIVE_REGIME",
+        "new_learning_orders_allowed": False,
+        "live_money_execution": False,
+    })
+    return out
+
+
+def _v621_disable_mirror_start(self: IGDemoMirror) -> Dict[str, Any]:
+    try:
+        self.enabled = False
+        self._stop_event.set()
+    except Exception:
+        pass
+    return _v621_mirror_status(self)
+
+
+def _v621_disable_mirror_sync(self: IGDemoMirror, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        self.enabled = False
+        self._stop_event.set()
+    except Exception:
+        pass
+    out = _v621_mirror_status(self)
+    out["sync_skipped"] = "LEGACY_LEARNING_MIRROR_DISABLED"
+    return out
+
+
+def _install_v621_exclusive_runtime() -> None:
+    V64LearningTradeEngine.start = _v621_disable_learning_start
+    V64LearningTradeEngine.enable = _v621_disable_learning_enable
+    V64LearningTradeEngine.submit_candidate = _v621_disable_learning_submit
+    if hasattr(V64LearningTradeEngine, "tick"):
+        V64LearningTradeEngine.tick = _v621_disable_learning_tick
+    V64LearningTradeEngine.status = _v621_learning_status
+
+    AutomatedTradeManager.start_thread = _v621_disable_auto_start
+    AutomatedTradeManager.enable = _v621_disable_auto_enable
+    if hasattr(AutomatedTradeManager, "queue_run"):
+        AutomatedTradeManager.queue_run = _v621_disable_auto_queue
+    AutomatedTradeManager.status = _v621_auto_status
+
+    IGDemoMirror.start = _v621_disable_mirror_start
+    if hasattr(IGDemoMirror, "sync_once"):
+        IGDemoMirror.sync_once = _v621_disable_mirror_sync
+    if callable(_V621_ORIGINAL_MIRROR_STATUS):
+        IGDemoMirror.status = _v621_mirror_status
+
+
+_install_v621_exclusive_runtime()
 
 
 VERSION = "6.9.4-adaptive-forward-v6"
@@ -4968,7 +5140,7 @@ ADAPTIVE_V6_STATUS = _install_v6_adaptive_forward()
 # DEMO margin/capital basis, not a 20%-30% move in the underlying instrument.
 # ===========================================================================
 
-VERSION = "6.9.4-live-regime-v6.2"
+VERSION = "6.9.4-live-regime-v6.2.1-clean"
 V62_POLICY_VERSION = "V6.2_LIVE_REGIME_ONLY"
 V62_POLICY_LABEL = "CURRENT_CANDLES_REGIME_MATCHING_ONLY"
 
@@ -6076,7 +6248,85 @@ def _v62_health_snapshot(
         "stop_win": "20_TO_30_PCT_OF_IG_TRADE_MARGIN_CAPITAL",
         "native_underlying_take_profit_for_v62": False,
         "native_protective_stop": True,
+        "legacy_v64_learning_engine": "DISABLED",
+        "legacy_ig_demo_learning_mirror": "DISABLED",
+        "legacy_auto_manager_historical_validation": "DISABLED",
+        "exclusive_execution_authority": "V6.2.1_LIVE_REGIME_CATEGORY_PLUS_LIVE_A_PLUS_COMPOUND",
+        "adaptive_forward_trader": False,
+        "execution_lanes": ["WATCH", "LIVE_TREND", "LIVE_RANGE", "LIVE_A_PLUS_COMPOUND"],
     })
+
+    # Remove stale V5/V6 adaptive/historical diagnostics from the public health
+    # surface. They were inherited from the base snapshot and could make it look
+    # as if Model-AI, historical WR or forward validation still blocked V6.2.
+    live_blockers: Counter[str] = Counter()
+    blocked_rows: List[Dict[str, Any]] = []
+    for cat, rows in rankings.items():
+        for row in rows:
+            reasons = list(row.get("rejection_reasons") or [])
+            if not row.get("standard_eligible"):
+                for reason in reasons or ["CURRENT_SETUP_NOT_READY"]:
+                    live_blockers[str(reason)] += 1
+                blocked_rows.append({
+                    "category": cat,
+                    "symbol": row.get("symbol"),
+                    "regime": row.get("market_regime"),
+                    "direction": row.get("direction"),
+                    "proposed_direction": row.get("proposed_direction"),
+                    "live_setup_score": row.get("live_setup_score"),
+                    "reasons": reasons or ["CURRENT_SETUP_NOT_READY"],
+                })
+    out["signal_gate_diagnostics"] = {
+        "policy_version": V62_POLICY_VERSION,
+        "operational_blockers": dict(live_blockers.most_common()),
+        "blocked_candidates": blocked_rows[:30],
+        "model_ai_is_execution_gate": False,
+        "historical_validation_is_execution_gate": False,
+        "forward_validation_is_execution_gate": False,
+        "news_is_execution_gate": False,
+        "decision_basis": "CURRENT_CANDLES_REGIME_MATCHING_ONLY",
+    }
+
+    category_health = out.setdefault("category_execution", {})
+    by_category: Dict[str, Any] = {}
+    for cat, rows in rankings.items():
+        cblock: Counter[str] = Counter()
+        live_ready = 0
+        compound_ready = 0
+        for row in rows:
+            if row.get("standard_eligible"):
+                live_ready += 1
+            if row.get("compound_eligible"):
+                compound_ready += 1
+            if not row.get("standard_eligible"):
+                for reason in row.get("rejection_reasons") or ["CURRENT_SETUP_NOT_READY"]:
+                    cblock[str(reason)] += 1
+        by_category[cat] = {
+            "ranked": len(rows),
+            "live_ready": live_ready,
+            "compound_ready": compound_ready,
+            "watch": len(rows) - live_ready,
+            "top_signal_blockers": dict(cblock.most_common()),
+        }
+    category_health["by_category"] = by_category
+    category_health["standard_eligible_candidates"] = ready
+    category_health["prime_candidates"] = sum(
+        1 for rows in rankings.values() for x in rows if x.get("compound_eligible")
+    )
+    category_health["legacy_model_ai_gate"] = False
+    category_health["legacy_historical_gate"] = False
+
+    out["adaptive_forward_trader"] = {
+        "execution_enabled": False,
+        "state": "LEGACY_RUNTIME_DISABLED",
+        "reason": "V6.2.1 uses current-candle regime strategy matching only",
+    }
+    out["legacy_execution_paths"] = {
+        "v64_learning_engine": "DISABLED",
+        "ig_demo_learning_mirror": "DISABLED",
+        "auto_manager_deep_validation": "DISABLED",
+        "settled_history_retained": True,
+    }
     return out
 
 
