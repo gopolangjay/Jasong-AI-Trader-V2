@@ -28,9 +28,6 @@ class RiskPlan:
         return asdict(self)
 
 
-# These are volatility guardrails, not fixed stops.
-# The actual stop is derived from recent realised bar movement, then clamped
-# inside the category-specific range.
 CATEGORY_STOP_PCT_BOUNDS = {
     "FOREX": (0.08, 0.40),
     "INDICES": (0.18, 0.90),
@@ -60,15 +57,9 @@ def _recent_absolute_return_pct(values: Iterable[Any]) -> float:
     cleaned = []
     for raw in list(values or [])[-24:]:
         value = _safe_float(raw)
-        if value is None:
-            continue
-        cleaned.append(abs(value) * 100.0)
-    if not cleaned:
-        return 0.0
-
-    # Median is deliberately used instead of standard deviation so a single
-    # gap/candle cannot make the next stop absurdly wide.
-    return float(statistics.median(cleaned))
+        if value is not None:
+            cleaned.append(abs(value) * 100.0)
+    return float(statistics.median(cleaned)) if cleaned else 0.0
 
 
 def build_risk_plan(
@@ -88,30 +79,13 @@ def build_risk_plan(
     category = str(candidate.get("category") or "UNKNOWN").upper().strip()
     floor_pct, cap_pct = CATEGORY_STOP_PCT_BOUNDS.get(category, (0.25, 1.50))
 
-    vol_multiplier = _env_float(
-        "CATEGORY_RISK_VOL_MULTIPLIER",
-        2.5,
-        0.5,
-        10.0,
-    )
-    spread_multiplier = _env_float(
-        "CATEGORY_RISK_SPREAD_MULTIPLIER",
-        1.5,
-        0.0,
-        10.0,
-    )
-    target_r = _env_float(
-        "CATEGORY_TAKE_PROFIT_R",
-        1.5,
-        0.25,
-        10.0,
-    )
+    vol_multiplier = _env_float("CATEGORY_RISK_VOL_MULTIPLIER", 2.5, 0.5, 10.0)
+    spread_multiplier = _env_float("CATEGORY_RISK_SPREAD_MULTIPLIER", 1.5, 0.0, 10.0)
+    target_r = _env_float("CATEGORY_TAKE_PROFIT_R", 1.5, 0.25, 10.0)
 
     median_abs_return_pct = _recent_absolute_return_pct(
         candidate.get("recent_returns") or []
     )
-
-    # 1 bp = 0.01 percent.
     spread_bps = _safe_float(
         candidate.get("ig_spread_bps")
         if candidate.get("ig_spread_bps") is not None
@@ -126,18 +100,18 @@ def build_risk_plan(
     )
     stop_pct = max(floor_pct, min(cap_pct, raw_stop_pct))
 
-    stop_distance = entry * (stop_pct / 100.0)
+    stop_distance = entry * stop_pct / 100.0
     target_distance = stop_distance * target_r
 
     if clean_direction == "BUY":
-        protective_stop = entry - stop_distance
-        take_profit = entry + target_distance
+        stop_price = entry - stop_distance
+        target_price = entry + target_distance
     else:
-        protective_stop = entry + stop_distance
-        take_profit = entry - target_distance
+        stop_price = entry + stop_distance
+        target_price = entry - target_distance
 
-    if protective_stop <= 0 or take_profit <= 0:
-        raise ValueError("calculated broker risk levels are invalid")
+    if stop_price <= 0 or target_price <= 0:
+        raise ValueError("calculated risk levels are invalid")
 
     source = (
         f"MEDIAN_ABS_RETURN_X{vol_multiplier:g}"
@@ -154,7 +128,7 @@ def build_risk_plan(
         target_r=round(target_r, 6),
         stop_distance=round(stop_distance, 10),
         target_distance=round(target_distance, 10),
-        protective_stop_price=round(protective_stop, 10),
-        take_profit_target_price=round(take_profit, 10),
+        protective_stop_price=round(stop_price, 10),
+        take_profit_target_price=round(target_price, 10),
         source=source,
     )
