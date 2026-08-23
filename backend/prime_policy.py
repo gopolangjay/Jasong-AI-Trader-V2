@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from forward_store import ForwardStore
 from forward_validation import ForwardValidationConfig, ForwardValidationEngine
-from provenance import ProvenanceRegistry, source_missing
+from provenance import ProvenanceRegistry
 from strategy_learning import StrategyLearningEngine
 
 
@@ -22,13 +22,9 @@ COMPOUND_SLOTS_PER_CATEGORY = 2
 
 
 class ForwardPrimeArchitecture:
-    """Runtime integration layer that makes forward evidence the PRIME authority.
+    """Runtime integration layer that makes broker-settled forward evidence PRIME authority."""
 
-    Historical holdout / walk-forward fields remain in every candidate as
-    INFORMATIONAL_ONLY diagnostics, but they have no execution-veto role.
-    """
-
-    VERSION = "6.9.4-forward"
+    VERSION = "6.3-clean-core-forward-r-v1"
 
     def __init__(
         self,
@@ -47,10 +43,7 @@ class ForwardPrimeArchitecture:
         self.signal_max_age_seconds = max(30.0, float(os.getenv("FORWARD_SIGNAL_MAX_AGE_SECONDS", "300")))
         self.quote_max_age_seconds = max(15.0, float(os.getenv("FORWARD_QUOTE_MAX_AGE_SECONDS", "180")))
         self._lock = threading.RLock()
-        store_path = os.getenv(
-            "FORWARD_VALIDATION_DB_PATH",
-            str(Path(state_dir) / "jasong_forward_validation.sqlite3"),
-        )
+        store_path = os.getenv("FORWARD_VALIDATION_DB_PATH", str(Path(state_dir) / "jasong_forward_validation.sqlite3"))
         self.store = ForwardStore(store_path)
         self.validator = ForwardValidationEngine(
             store=self.store,
@@ -117,6 +110,8 @@ class ForwardPrimeArchitecture:
         close_result = row.get("close_result") if isinstance(row.get("close_result"), dict) else {}
         pnl_value = close_result.get("profitLoss")
         if pnl_value is None:
+            pnl_value = close_result.get("profit")
+        if pnl_value is None:
             pnl_value = close_result.get("pnl")
         if pnl_value is not None:
             try:
@@ -136,11 +131,7 @@ class ForwardPrimeArchitecture:
         if entry <= 0 or exit_level <= 0 or direction not in {"BUY", "SELL"}:
             return None
         move = exit_level - entry if direction == "BUY" else entry - exit_level
-        if move > 0:
-            return "WIN"
-        if move < 0:
-            return "LOSS"
-        return None
+        return "WIN" if move > 0 else "LOSS" if move < 0 else None
 
     def _category_rows(self) -> List[Dict[str, Any]]:
         portfolio = self.category_portfolio
@@ -162,16 +153,29 @@ class ForwardPrimeArchitecture:
             row["broker_result"] = result
             close_result = row.get("close_result") if isinstance(row.get("close_result"), dict) else {}
             row["exit_level"] = close_result.get("level") or row.get("exit_level")
-            row["broker_pnl"] = (
-                close_result.get("profitLoss")
-                or close_result.get("pnl")
-                or row.get("broker_pnl")
-            )
+            if close_result.get("profitLoss") is not None:
+                row["broker_pnl"] = close_result.get("profitLoss")
+            elif close_result.get("profit") is not None:
+                row["broker_pnl"] = close_result.get("profit")
+            elif close_result.get("pnl") is not None:
+                row["broker_pnl"] = close_result.get("pnl")
+
+            try:
+                entry = float(row.get("entry_level") or 0.0)
+                exit_level = float(row.get("exit_level") or 0.0)
+                risk_distance = float(row.get("planned_risk_price_distance") or 0.0)
+            except Exception:
+                entry = exit_level = risk_distance = 0.0
+            direction = str(row.get("direction") or "").upper().strip()
+            if entry > 0 and exit_level > 0 and risk_distance > 0 and direction in {"BUY", "SELL"}:
+                realised_move = exit_level - entry if direction == "BUY" else entry - exit_level
+                row["r_multiple"] = realised_move / risk_distance
+                row["realized_r"] = row["r_multiple"]
+                row["r_source"] = "BROKER_EXIT_OVER_PLANNED_PRICE_RISK"
             output.append(row)
         return output
 
     def _settled_evidence_rows(self) -> List[Dict[str, Any]]:
-        # One de-duplicated evidence stream: legacy/Compound IG DEMO plus JSCAT.
         rows = self._legacy_rows() + self._category_rows()
         by_id: Dict[str, Dict[str, Any]] = {}
         for row in rows:
@@ -181,11 +185,6 @@ class ForwardPrimeArchitecture:
         return list(by_id.values())
 
     def _live_fast_score(self, row: Dict[str, Any], provenance: Dict[str, Any]) -> float:
-        """Live execution-speed/quality score with no holdout/WF inputs.
-
-        FAST intentionally uses only the current signal, recent price movement,
-        broker spread and freshness. Historical WR/PF/trade-count are excluded.
-        """
         quant = max(0.0, min(1.0, self._safe_float(row.get("quant_confidence"), 0.0)))
         ai = max(0.0, min(1.0, self._safe_float(row.get("model_ai_confidence"), 0.0)))
         direction = str(row.get("direction") or row.get("live_direction") or "").upper()
@@ -196,25 +195,18 @@ class ForwardPrimeArchitecture:
             except Exception:
                 continue
         if recent:
-            short = sum(recent[-5:])
-            medium = sum(recent)
-            signed = short + 0.5 * medium
+            signed = sum(recent[-5:]) + 0.5 * sum(recent)
             aligned = signed > 0 if direction == "BUY" else signed < 0 if direction == "SELL" else False
             momentum = 1.0 if aligned else 0.25
         else:
             momentum = 0.50
         spread = self._safe_float(row.get("ig_spread_bps") or row.get("spread_bps"), 0.0)
         limit = self._safe_float(row.get("spread_gate_bps") or row.get("spread_limit_bps"), 0.0)
-        if limit > 0 and spread >= 0:
-            spread_efficiency = max(0.0, min(1.0, 1.0 - spread / limit))
-        else:
-            spread_efficiency = 0.0
+        spread_efficiency = max(0.0, min(1.0, 1.0 - spread / limit)) if limit > 0 and spread >= 0 else 0.0
         freshness = 1.0 if provenance.get("fresh") else 0.0
-        quant_component = min(1.0, quant / 0.60)
-        ai_component = min(1.0, ai / 0.70)
         score = 100.0 * (
-            0.25 * quant_component
-            + 0.30 * ai_component
+            0.25 * min(1.0, quant / 0.60)
+            + 0.30 * min(1.0, ai / 0.70)
             + 0.20 * momentum
             + 0.15 * spread_efficiency
             + 0.10 * freshness
@@ -224,16 +216,13 @@ class ForwardPrimeArchitecture:
     def _strong_gate(self, row: Dict[str, Any], provenance: Dict[str, Any]) -> tuple[bool, List[str]]:
         reasons: List[str] = []
         direction = str(row.get("direction") or row.get("live_direction") or "").upper().strip()
-        quant = self._safe_float(row.get("quant_confidence"), 0.0)
-        ai = self._safe_float(row.get("model_ai_confidence"), 0.0)
-        fast = self._safe_float(row.get("smart_fast_score"), 0.0)
         if direction not in {"BUY", "SELL"}:
             reasons.append("NO_DIRECTION")
-        if quant < QUANT_MIN:
+        if self._safe_float(row.get("quant_confidence"), 0.0) < QUANT_MIN:
             reasons.append("QUANT_BELOW_28")
-        if ai < DIRECTIONAL_AI_MIN:
+        if self._safe_float(row.get("model_ai_confidence"), 0.0) < DIRECTIONAL_AI_MIN:
             reasons.append("MODEL_AI_BELOW_40")
-        if fast < FAST_MIN:
+        if self._safe_float(row.get("smart_fast_score"), 0.0) < FAST_MIN:
             reasons.append("FAST_BELOW_45")
         if not bool(row.get("ig_tradeable")):
             reasons.append("IG_NOT_TRADEABLE")
@@ -244,12 +233,7 @@ class ForwardPrimeArchitecture:
                 reasons.append(str(issue))
         return len(reasons) == 0, reasons
 
-    def enrich(
-        self,
-        raw: Dict[str, Any],
-        *,
-        forward_metrics: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    def enrich(self, raw: Dict[str, Any], *, forward_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         row = dict(raw)
         historical = self._historical_information(row)
         provenance = self.provenance_registry.build(
@@ -257,17 +241,14 @@ class ForwardPrimeArchitecture:
             signal_max_age_seconds=self.signal_max_age_seconds,
             quote_max_age_seconds=self.quote_max_age_seconds,
         )
-        historical_fast_score = row.get("smart_fast_score")
-        live_fast_score = self._live_fast_score(row, provenance)
-        row["historical_smart_fast_score"] = historical_fast_score
-        row["smart_fast_score"] = live_fast_score
-        row["live_fast_score"] = live_fast_score
+        historical_fast = row.get("smart_fast_score")
+        live_fast = self._live_fast_score(row, provenance)
+        row["historical_smart_fast_score"] = historical_fast
+        row["smart_fast_score"] = live_fast
+        row["live_fast_score"] = live_fast
         row["fast_score_source"] = "LIVE_SIGNAL_SPREAD_FRESHNESS"
         strategy_id = str(
-            row.get("strategy_id")
-            or row.get("selected_strategy")
-            or row.get("strategy_name")
-            or "UNKNOWN"
+            row.get("strategy_id") or row.get("selected_strategy") or row.get("strategy_name") or "UNKNOWN"
         ).upper().strip()
         strong, strong_reasons = self._strong_gate(row, provenance)
         forward = forward_metrics or (
@@ -277,25 +258,17 @@ class ForwardPrimeArchitecture:
         )
         prime = bool(strong and forward.get("prime_eligible"))
 
-        historical_only_tokens = {
-            "SELECTION_UNSTABLE",
-            "HOLDOUT_SAMPLE_BELOW_MIN",
-            "HOLDOUT_WR_BELOW_60",
-            "PROFIT_FACTOR_BELOW_1_20",
-            "WALK_FORWARD_BELOW_40",
-            "WF_HOLDOUT_SAMPLE_BELOW_MIN",
-            "WF_HOLDOUT_WR_BELOW_60",
-            "WF_HOLDOUT_PF_BELOW_1_20",
-            "WF_HOLDOUT_DRAWDOWN_FAIL",
-            "WF_MIN_FOLD_WR_BELOW_40",
-            "WF_MEDIAN_WR_BELOW_40",
-            "WF_PROFITABLE_FOLDS_BELOW_2",
-            "WF_FOLD_DRAWDOWN_FAIL",
+        historical_only = {
+            "SELECTION_UNSTABLE", "HOLDOUT_SAMPLE_BELOW_MIN", "HOLDOUT_WR_BELOW_60",
+            "PROFIT_FACTOR_BELOW_1_20", "WALK_FORWARD_BELOW_40",
+            "WF_HOLDOUT_SAMPLE_BELOW_MIN", "WF_HOLDOUT_WR_BELOW_60",
+            "WF_HOLDOUT_PF_BELOW_1_20", "WF_HOLDOUT_DRAWDOWN_FAIL",
+            "WF_MIN_FOLD_WR_BELOW_40", "WF_MEDIAN_WR_BELOW_40",
+            "WF_PROFITABLE_FOLDS_BELOW_2", "WF_FOLD_DRAWDOWN_FAIL",
         }
         operational_original = [
-            str(reason)
-            for reason in (row.get("rejection_reasons") or [])
-            if str(reason) not in historical_only_tokens
+            str(reason) for reason in (row.get("rejection_reasons") or [])
+            if str(reason) not in historical_only
             and not str(reason).startswith("HOLDOUT_")
             and not str(reason).startswith("WF_")
         ]
@@ -306,13 +279,11 @@ class ForwardPrimeArchitecture:
         live_quality = None
         live_deep = None
         if strong:
-            live_quality = (
-                "A+"
-                if self._safe_float(row.get("model_ai_confidence")) >= 0.60
+            live_quality = "A+" if (
+                self._safe_float(row.get("model_ai_confidence")) >= 0.60
                 and self._safe_float(row.get("quant_confidence")) >= 0.40
                 and self._safe_float(row.get("smart_fast_score")) >= 70.0
-                else "A"
-            )
+            ) else "A"
             live_deep = "VERIFIED"
 
         row.update({
@@ -374,25 +345,20 @@ class ForwardPrimeArchitecture:
         metric_cache: Dict[str, Dict[str, Any]] = {}
 
         def forward_for(row: Dict[str, Any]) -> Dict[str, Any]:
-            strategy = str(
-                row.get("strategy_id")
-                or row.get("selected_strategy")
-                or row.get("strategy_name")
-                or "UNKNOWN"
-            ).upper().strip()
+            strategy = str(row.get("strategy_id") or row.get("selected_strategy") or row.get("strategy_name") or "UNKNOWN").upper().strip()
             cache_key = strategy if strategy != "UNKNOWN" else "SYMBOL::" + str(row.get("symbol") or row.get("market") or "")
             if cache_key not in metric_cache:
-                if strategy != "UNKNOWN":
-                    metric_cache[cache_key] = self.validator.metrics(strategy_id=strategy, sync=False)
-                else:
-                    metric_cache[cache_key] = self.validator.metrics(symbol=row.get("symbol"), sync=False)
+                metric_cache[cache_key] = (
+                    self.validator.metrics(strategy_id=strategy, sync=False)
+                    if strategy != "UNKNOWN"
+                    else self.validator.metrics(symbol=row.get("symbol"), sync=False)
+                )
             return metric_cache[cache_key]
 
         for cat in categories:
             pool = [
                 self.enrich(row, forward_metrics=forward_for(row))
-                for row in rows
-                if str(row.get("category") or "").upper() == cat
+                for row in rows if str(row.get("category") or "").upper() == cat
             ]
             pool.sort(
                 key=lambda row: (
@@ -404,14 +370,13 @@ class ForwardPrimeArchitecture:
                 ),
                 reverse=True,
             )
-            ranked: List[Dict[str, Any]] = []
-            for idx, row in enumerate(pool[: max(1, min(int(top_n), TOP_N_PER_CATEGORY))], start=1):
+            ranked = []
+            for idx, row in enumerate(pool[:max(1, min(int(top_n), TOP_N_PER_CATEGORY))], start=1):
                 row["category_rank"] = idx
                 row["rank"] = idx
                 row["source_rank"] = idx
                 row["compound_slot_candidate"] = idx <= COMPOUND_SLOTS_PER_CATEGORY
                 row["compound_eligible"] = bool(idx <= COMPOUND_SLOTS_PER_CATEGORY and row.get("prime_qualified"))
-                # Category standard track is the controlled DEMO learning lane.
                 row["standard_eligible"] = bool(row.get("strong_qualified"))
                 row["trade_eligible"] = bool(row.get("strong_qualified"))
                 ranked.append(row)
@@ -448,19 +413,13 @@ class ForwardPrimeArchitecture:
                 if not key:
                     continue
                 forward = dict(enriched.get("forward_validation") or {})
-                if enriched.get("strong_qualified"):
-                    strong_count += 1
-                if enriched.get("prime_qualified"):
-                    prime_count += 1
+                strong_count += int(bool(enriched.get("strong_qualified")))
+                prime_count += int(bool(enriched.get("prime_qualified")))
                 by_market[key] = {
                     **forward,
                     "quarantined": not bool(enriched.get("prime_qualified")),
                     "hard_quarantined": False,
-                    "quarantine_reason": (
-                        None
-                        if enriched.get("prime_qualified")
-                        else "FORWARD_VALIDATION_NOT_YET_PRIME"
-                    ),
+                    "quarantine_reason": None if enriched.get("prime_qualified") else "FORWARD_VALIDATION_NOT_YET_PRIME",
                 }
         return {
             "version": self.VERSION,
@@ -474,7 +433,6 @@ class ForwardPrimeArchitecture:
         }
 
     def _patch_compound(self, compound_engine: Any) -> None:
-        # Disable legacy historical vetoes without erasing the recorded metrics.
         for attr, value in {
             "quant_min_confidence": QUANT_MIN,
             "ai_min_confidence": DIRECTIONAL_AI_MIN,
@@ -488,7 +446,6 @@ class ForwardPrimeArchitecture:
         }.items():
             if hasattr(compound_engine, attr):
                 setattr(compound_engine, attr, value)
-
         setter = getattr(compound_engine, "set_forward_evidence_source", None)
         if callable(setter):
             setter(self.execution_guard_snapshot)
@@ -518,10 +475,8 @@ class ForwardPrimeArchitecture:
                         "strategy_metrics": {"source": "CATEGORY_SPECIALIST", "forward": forward},
                     }
                 return original_assessment(row)
-
             compound_engine._adaptive_strategy_assessment = MethodType(assessment, compound_engine)
             compound_engine._forward_prime_strategy_patch = True
-
         compound_engine.candidate_source = lambda _cycle_capital: self.compound_candidates()
 
     def _patch_legacy_learning_lane(self, evidence_source: Any) -> None:
@@ -535,59 +490,6 @@ class ForwardPrimeArchitecture:
         }.items():
             if hasattr(evidence_source, attr):
                 setattr(evidence_source, attr, value)
-
-        original_submit = getattr(evidence_source, "_submit_open", None)
-        if callable(original_submit) and not getattr(evidence_source, "_forward_prime_submit_patch", False):
-            def submit(self_mirror: Any, trade: Dict[str, Any], mirror: Dict[str, Any]) -> Any:
-                for key in (
-                    "strategy_id", "strategy_name", "selected_strategy", "regime", "market_regime",
-                    "rsi", "adx", "spread_bps", "spread_limit_bps", "provenance",
-                    "analysis_price_source", "analysis_price_timestamp", "broker_quote_source",
-                    "broker_quote_timestamp", "signal_age_seconds", "quote_age_seconds",
-                    "planned_risk_cash", "risk_cash",
-                ):
-                    if trade.get(key) is not None:
-                        mirror[key] = trade.get(key)
-                mirror["entry_snapshot"] = {
-                    "strategy_id": trade.get("strategy_id") or trade.get("selected_strategy"),
-                    "direction": trade.get("direction"),
-                    "quant_confidence": trade.get("quant_confidence"),
-                    "model_ai_confidence": trade.get("model_ai_confidence"),
-                    "smart_fast_score": trade.get("smart_fast_score"),
-                    "rsi": trade.get("rsi") or trade.get("entry_rsi"),
-                    "adx": trade.get("adx"),
-                    "spread_bps": trade.get("spread_bps"),
-                    "spread_limit_bps": trade.get("spread_limit_bps"),
-                    "captured_at": time.time(),
-                }
-                return original_submit(trade, mirror)
-
-            evidence_source._submit_open = MethodType(submit, evidence_source)
-            evidence_source._forward_prime_submit_patch = True
-
-        original_gate = getattr(evidence_source, "_prime_trade_gate", None)
-        if callable(original_gate) and not getattr(evidence_source, "_forward_prime_gate_patch", False):
-            def learning_gate(self_mirror: Any, trade: Dict[str, Any]):
-                reasons = []
-                quant = self._safe_float(trade.get("quant_confidence"), 0.0)
-                ai = self._safe_float(trade.get("model_ai_confidence"), 0.0)
-                fast = self._safe_float(trade.get("smart_fast_score"), 0.0)
-                direction = str(trade.get("direction") or "").upper()
-                if direction not in {"BUY", "SELL"}:
-                    reasons.append("NO_DIRECTION")
-                if quant < QUANT_MIN:
-                    reasons.append("QUANT_BELOW_28")
-                if ai < DIRECTIONAL_AI_MIN:
-                    reasons.append("MODEL_AI_BELOW_40")
-                if fast < FAST_MIN:
-                    reasons.append("FAST_BELOW_45")
-                strategy = str(trade.get("selected_strategy") or trade.get("strategy_id") or "").upper()
-                if strategy == "NO_TRADE":
-                    reasons.append("NO_EXECUTABLE_STRATEGY")
-                return len(reasons) == 0, reasons, self.execution_guard_snapshot()
-
-            evidence_source._prime_trade_gate = MethodType(learning_gate, evidence_source)
-            evidence_source._forward_prime_gate_patch = True
 
     def attach_category_portfolio(self, portfolio: Any) -> None:
         self.category_portfolio = portfolio
@@ -633,14 +535,18 @@ class ForwardPrimeArchitecture:
 
     def status(self) -> Dict[str, Any]:
         rankings = self.category_rankings()
-        strategies = sorted({str(row.get("strategy_id") or "UNKNOWN") for bucket in rankings.values() for row in bucket if row.get("strategy_id")})
+        strategies = sorted({
+            str(row.get("strategy_id") or "UNKNOWN")
+            for bucket in rankings.values()
+            for row in bucket if row.get("strategy_id")
+        })
         metrics = {strategy: self.validator.metrics(strategy_id=strategy) for strategy in strategies}
         rows = self.validator.all_rows(limit=200)
         return {
             "version": self.VERSION,
             "authority": "BROKER_SETTLED_FORWARD_ONLY",
             "historical_validation": {"mode": "INFORMATIONAL_ONLY", "execution_veto": False},
-            "bootstrap_lane": "STRONG -> controlled IG DEMO category/learning trades -> settled forward evidence -> PRIME",
+            "bootstrap_lane": "STRONG -> controlled IG DEMO category trades -> settled forward evidence -> PRIME",
             "thresholds": metrics[next(iter(metrics))]["thresholds"] if metrics else self.validator.metrics(symbol="__NONE__")["thresholds"],
             "strategy_metrics": metrics,
             "strategy_learning": self.learner.analyze(rows),
@@ -653,18 +559,8 @@ class ForwardPrimeArchitecture:
         return self.learner.analyze(self.validator.all_rows(limit=500))
 
     def routes(self, app: Any) -> None:
-        app.add_api_route(
-            "/forward-validation/status",
-            self.status,
-            methods=["GET"],
-            name="forward_validation_status_v694",
-        )
-        app.add_api_route(
-            "/forward-validation/learning",
-            self.learning_report,
-            methods=["GET"],
-            name="forward_validation_learning_v694",
-        )
+        app.add_api_route("/forward-validation/status", self.status, methods=["GET"], name="forward_validation_status_clean_core_r")
+        app.add_api_route("/forward-validation/learning", self.learning_report, methods=["GET"], name="forward_validation_learning_clean_core_r")
         app.add_api_route(
             "/forward-validation/trades",
             lambda: {
@@ -674,7 +570,7 @@ class ForwardPrimeArchitecture:
                 "live_money_execution": False,
             },
             methods=["GET"],
-            name="forward_validation_trades_v694",
+            name="forward_validation_trades_clean_core_r",
         )
 
 
