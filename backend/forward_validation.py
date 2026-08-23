@@ -52,7 +52,7 @@ class ForwardValidationConfig:
 class ForwardValidationEngine:
     """PRIME authority based only on post-deployment broker-settled evidence."""
 
-    VERSION = "6.9.4-forward"
+    VERSION = "6.3-clean-core-forward-r-v1"
 
     def __init__(
         self,
@@ -80,22 +80,19 @@ class ForwardValidationEngine:
             return None
         output = dict(row)
         output["broker_result"] = result
-        output["trade_id"] = str(
-            row.get("trade_id") or row.get("ig_deal_id") or row.get("deal_id") or ""
-        ).strip()
+        output["trade_id"] = str(row.get("trade_id") or row.get("ig_deal_id") or row.get("deal_id") or "").strip()
         if not output["trade_id"]:
             return None
-        output["strategy_id"] = str(
-            row.get("strategy_id") or row.get("selected_strategy") or "UNKNOWN"
-        ).upper().strip()
+        output["strategy_id"] = str(row.get("strategy_id") or row.get("selected_strategy") or "UNKNOWN").upper().strip()
         output["symbol"] = row.get("symbol") or row.get("market")
 
-        explicit_r = cls._safe_float(
-            row.get("r_multiple")
-            or row.get("realized_r")
-            or row.get("realised_r")
-            or row.get("result_r")
-        )
+        explicit_candidate = None
+        for key in ("r_multiple", "realized_r", "realised_r", "result_r"):
+            if row.get(key) is not None:
+                explicit_candidate = row.get(key)
+                break
+        explicit_r = cls._safe_float(explicit_candidate)
+
         if explicit_r is not None:
             output["r_multiple"] = explicit_r
             output["r_source"] = row.get("r_source") or "EXPLICIT_R"
@@ -110,9 +107,6 @@ class ForwardValidationEngine:
                 output["r_multiple"] = pnl / risk
                 output["r_source"] = "BROKER_PNL_OVER_ENTRY_RISK"
             else:
-                # Honest fallback when old broker records did not persist entry risk.
-                # It preserves the sign of the broker-settled result and is labelled
-                # so it can never be mistaken for a true stop-distance R multiple.
                 output["r_multiple"] = 1.0 if result == "WIN" else -1.0
                 output["r_source"] = "BINARY_OUTCOME_R_FALLBACK"
         return output
@@ -124,11 +118,10 @@ class ForwardValidationEngine:
         except Exception:
             source = []
         for raw in source:
-            if not isinstance(raw, dict):
-                continue
-            row = self._normalise(raw)
-            if row:
-                rows.append(row)
+            if isinstance(raw, dict):
+                row = self._normalise(raw)
+                if row:
+                    rows.append(row)
         return self.store.sync(rows)
 
     @staticmethod
