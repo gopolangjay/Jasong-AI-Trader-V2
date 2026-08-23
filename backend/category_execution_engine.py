@@ -8,19 +8,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from risk_exit_policy import build_risk_plan
+
 
 class CategoryExecutionEngine:
-    """Independent IG DEMO standard-category portfolio executor.
+    """Independent IG DEMO standard-category portfolio executor."""
 
-    The Category portfolio is intentionally separate from Elite Compound:
-      * standard positions use JSCAT_* references;
-      * Compound continues using JSCMP_*;
-      * the same qualifying signal may exist in both tracks;
-      * duplicate exposure is surfaced rather than hidden;
-      * no production/live-money endpoint exists here.
-    """
-
-    VERSION = "6.9.3"
+    VERSION = "6.3-clean-core-risk-exit-v1"
     DEAL_PREFIX = "JSCAT_"
 
     def __init__(
@@ -39,8 +33,6 @@ class CategoryExecutionEngine:
         self.enabled = str(os.getenv("CATEGORY_AUTOTRADE", "true")).lower() in {"1", "true", "yes", "on"}
         self.poll_seconds = max(15, int(poll_seconds or os.getenv("CATEGORY_EXECUTION_POLL_SECONDS", "30")))
         self.max_open_positions = max(1, min(30, int(os.getenv("CATEGORY_MAX_OPEN_POSITIONS", "12"))))
-        # Shared broker capacity across Category + Compound + learning/manual.
-        # V6.8.x currently uses 15 as the IG DEMO account-wide ceiling.
         self.global_ig_max_positions = max(1, min(50, int(os.getenv("CATEGORY_GLOBAL_IG_MAX_POSITIONS", "15"))))
         self.max_per_category = max(1, min(5, int(os.getenv("CATEGORY_MAX_OPEN_PER_CATEGORY", "5"))))
         self.max_theme_exposure = max(1, min(10, int(os.getenv("CATEGORY_MAX_THEME_EXPOSURE", "3"))))
@@ -90,7 +82,7 @@ class CategoryExecutionEngine:
 
     @staticmethod
     def _broker_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
+        rows = []
         for item in payload.get("positions", []) or []:
             if not isinstance(item, dict):
                 continue
@@ -116,22 +108,18 @@ class CategoryExecutionEngine:
         if not self.external_positions_source:
             return []
         try:
-            rows = self.external_positions_source() or []
-            return [dict(row) for row in rows if isinstance(row, dict)]
+            return [dict(row) for row in (self.external_positions_source() or []) if isinstance(row, dict)]
         except Exception:
             return []
 
     def _journal(self, event: str, **data: Any) -> None:
-        row = {"at": time.time(), "event": event, **data}
-        self._state.setdefault("journal", []).append(row)
+        self._state.setdefault("journal", []).append({"at": time.time(), "event": event, **data})
         self._state["journal"] = self._state["journal"][-500:]
 
     def _reconcile(self) -> List[Dict[str, Any]]:
-        broker_payload = self.broker.positions()
-        broker_rows = self._broker_rows(broker_payload)
+        broker_rows = self._broker_rows(self.broker.positions())
         by_deal = {str(row.get("deal_id") or ""): row for row in broker_rows}
-        tracked = self._state.setdefault("positions", [])
-        for item in tracked:
+        for item in self._state.setdefault("positions", []):
             if item.get("status") != "OPEN":
                 continue
             deal_id = str(item.get("deal_id") or "")
@@ -150,28 +138,27 @@ class CategoryExecutionEngine:
     @staticmethod
     def _is_dual_track(epic: Any, external: List[Dict[str, Any]]) -> bool:
         clean = str(epic or "").upper().strip()
-        if not clean:
-            return False
-        return any(str(row.get("epic") or row.get("ig_epic") or "").upper().strip() == clean for row in external)
+        return bool(clean) and any(
+            str(row.get("epic") or row.get("ig_epic") or "").upper().strip() == clean
+            for row in external
+        )
 
     def _due_closes(self) -> None:
         now = time.time()
         for item in self._state.setdefault("positions", []):
-            if item.get("status") != "OPEN":
-                continue
-            if now < float(item.get("due_at") or 0.0):
+            if item.get("status") != "OPEN" or now < float(item.get("due_at") or 0.0):
                 continue
             deal_id = str(item.get("deal_id") or "")
             if not deal_id:
                 continue
             try:
-                result = self.broker.close_position(deal_id)
+                result = self.broker.close_position(deal_id) or {}
                 status = str(result.get("status") or result.get("dealStatus") or "").upper()
                 if status == "CLOSE_DEFERRED_MARKET_CLOSED":
                     item["close_state"] = status
                     item["last_close_check_at"] = now
                     continue
-                if result.get("closeVerified") or status in {"ALREADY_CLOSED_OR_NOT_FOUND", "ACCEPTED"}:
+                if result.get("closeVerified") or status in {"ALREADY_CLOSED_OR_NOT_FOUND", "ACCEPTED", "CLOSED_VERIFIED"}:
                     item["status"] = "CLOSED"
                     item["closed_at"] = now
                     item["close_result"] = result
@@ -188,19 +175,16 @@ class CategoryExecutionEngine:
 
     def _theme_counts(self, external: List[Dict[str, Any]]) -> Dict[str, int]:
         counts: Dict[str, int] = {}
-        for row in self._open_positions():
-            for tag in row.get("exposure_tags") or []:
-                counts[str(tag)] = counts.get(str(tag), 0) + 1
-        for row in external:
+        for row in self._open_positions() + list(external):
             for tag in row.get("exposure_tags") or []:
                 counts[str(tag)] = counts.get(str(tag), 0) + 1
         return counts
 
     def _epic_track_count(self, epic: str, external: List[Dict[str, Any]]) -> int:
         clean = str(epic or "").upper().strip()
-        count = sum(1 for row in self._open_positions() if str(row.get("epic") or "").upper().strip() == clean)
-        count += sum(1 for row in external if str(row.get("epic") or row.get("ig_epic") or "").upper().strip() == clean)
-        return count
+        return sum(1 for row in self._open_positions() if str(row.get("epic") or "").upper().strip() == clean) + sum(
+            1 for row in external if str(row.get("epic") or row.get("ig_epic") or "").upper().strip() == clean
+        )
 
     def _may_open(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> tuple[bool, str]:
         if not candidate.get("standard_eligible"):
@@ -214,12 +198,16 @@ class CategoryExecutionEngine:
         open_rows = self._open_positions()
         if len(open_rows) >= self.max_open_positions:
             return False, "category portfolio position cap reached"
-        combined_open = len(open_rows) + len(external)
-        if combined_open >= self.global_ig_max_positions:
+        if len(open_rows) + len(external) >= self.global_ig_max_positions:
             return False, "global IG DEMO position cap reached"
         if sum(1 for row in open_rows if row.get("category") == category) >= self.max_per_category:
             return False, "category position cap reached"
-        if any(row.get("category") == category and str(row.get("symbol") or "").upper() == symbol and row.get("direction") == direction for row in open_rows):
+        if any(
+            row.get("category") == category
+            and str(row.get("symbol") or "").upper() == symbol
+            and row.get("direction") == direction
+            for row in open_rows
+        ):
             return False, "duplicate category signal already open"
         if self._epic_track_count(epic, external) >= self.max_tracks_per_epic:
             return False, "combined category/compound EPIC exposure cap reached"
@@ -230,9 +218,10 @@ class CategoryExecutionEngine:
         return True, "approved"
 
     def _open_candidate(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> None:
-        allowed, reason = self._may_open(candidate, external)
+        allowed, _ = self._may_open(candidate, external)
         if not allowed:
             return
+
         category = str(candidate.get("category") or "UNK").upper()
         ref = f"JSCAT_{category[:3]}_{uuid.uuid4().hex[:16].upper()}"[:30]
         result = self.broker.open_epic_position(
@@ -240,10 +229,28 @@ class CategoryExecutionEngine:
             direction=str(candidate["direction"]),
             size=max(self.default_size, float(candidate.get("ig_min_deal_size") or 0.0)),
             deal_reference=ref,
-        )
+        ) or {}
         deal_id = result.get("dealId")
         if not deal_id:
             raise RuntimeError(f"IG DEMO did not return dealId: {result}")
+
+        entry_level = result.get("level")
+        risk_plan = None
+        try:
+            if entry_level is not None:
+                risk_plan = build_risk_plan(
+                    candidate,
+                    entry_price=float(entry_level),
+                    direction=str(candidate["direction"]),
+                )
+        except Exception as exc:
+            self._journal(
+                "RISK_PLAN_ERROR",
+                deal_id=deal_id,
+                symbol=candidate.get("symbol"),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
         hold_seconds = max(900, int(candidate.get("holding_bars") or 4) * 15 * 60)
         position = {
             "track": "CATEGORY",
@@ -258,7 +265,7 @@ class CategoryExecutionEngine:
             "deal_id": deal_id,
             "deal_reference": result.get("dealReference") or ref,
             "size": result.get("size"),
-            "entry_level": result.get("level"),
+            "entry_level": entry_level,
             "opened_at": time.time(),
             "due_at": time.time() + hold_seconds,
             "status": "OPEN",
@@ -269,23 +276,47 @@ class CategoryExecutionEngine:
             "historical_profit_factor": candidate.get("historical_profit_factor"),
             "smart_fast_score": candidate.get("smart_fast_score"),
             "dual_track": self._is_dual_track(candidate.get("ig_epic"), external),
+            "risk_policy_version": risk_plan.version if risk_plan else None,
+            "planned_stop_pct": risk_plan.stop_pct if risk_plan else None,
+            "planned_risk_price_distance": risk_plan.stop_distance if risk_plan else None,
+            "planned_target_r": risk_plan.target_r if risk_plan else None,
+            "protective_stop_price": risk_plan.protective_stop_price if risk_plan else None,
+            "take_profit_target_price": risk_plan.take_profit_target_price if risk_plan else None,
+            "risk_plan_source": risk_plan.source if risk_plan else None,
             "live_money_execution": False,
         }
+
         self._state.setdefault("positions", []).append(position)
         self._state["opens"] = int(self._state.get("opens") or 0) + 1
         self._journal("OPEN", category=category, symbol=position["symbol"], deal_id=deal_id, dual_track=position["dual_track"])
+
+        tracker = getattr(self, "_trade_excursion_tracker", None)
+        register = getattr(tracker, "register_trade_plan", None)
+        if callable(register) and risk_plan is not None:
+            try:
+                register(
+                    deal_id,
+                    {
+                        **risk_plan.as_dict(),
+                        "strategy_id": position.get("strategy_id"),
+                        "symbol": position.get("symbol"),
+                        "category": position.get("category"),
+                        "deal_reference": position.get("deal_reference"),
+                    },
+                )
+            except Exception as exc:
+                self._journal(
+                    "RISK_PLAN_REGISTER_ERROR",
+                    deal_id=deal_id,
+                    symbol=position.get("symbol"),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
 
     @staticmethod
     def _symbol_key(value: Any) -> str:
         return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
 
     def set_enabled(self, enabled: bool) -> Dict[str, Any]:
-        """Enable/disable Category autotrading for the current running process.
-
-        The environment variable remains the restart-time authority. This method
-        is intentionally runtime-scoped so a GPT Action cannot silently rewrite
-        Render environment configuration.
-        """
         with self._lock:
             self.enabled = bool(enabled)
             self._state["enabled"] = self.enabled
@@ -300,28 +331,15 @@ class CategoryExecutionEngine:
             }
 
     def open_qualified_symbol(self, symbol: str) -> Dict[str, Any]:
-        """Open one currently qualified Category candidate through normal gates.
-
-        This method deliberately does not accept EPIC, direction, size, or a
-        bypass flag from the caller. The live ranking owns those values and
-        _may_open() still enforces standard eligibility, portfolio/global caps,
-        duplicate exposure, dual-track EPIC caps, and theme exposure limits.
-        """
         wanted = self._symbol_key(symbol)
         if not wanted:
-            return {
-                "version": self.VERSION,
-                "opened": False,
-                "error": "symbol is required",
-                "live_money_execution": False,
-            }
-
+            return {"version": self.VERSION, "opened": False, "error": "symbol is required", "live_money_execution": False}
         with self._lock:
             try:
                 self._reconcile()
                 self._due_closes()
                 rankings = self.ranking_source() or {}
-                candidate: Optional[Dict[str, Any]] = None
+                candidate = None
                 for category in ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"):
                     for raw in rankings.get(category, [])[:5]:
                         if not isinstance(raw, dict):
@@ -337,7 +355,6 @@ class CategoryExecutionEngine:
                             break
                     if candidate is not None:
                         break
-
                 if candidate is None:
                     return {
                         "version": self.VERSION,
@@ -346,7 +363,6 @@ class CategoryExecutionEngine:
                         "reason": "Market is not in the current top-five-per-category ranking surface.",
                         "live_money_execution": False,
                     }
-
                 external = self._external_positions()
                 allowed, reason = self._may_open(candidate, external)
                 if not allowed:
@@ -361,33 +377,16 @@ class CategoryExecutionEngine:
                         "standard_eligible": bool(candidate.get("standard_eligible")),
                         "live_money_execution": False,
                     }
-
-                before = {
-                    str(row.get("deal_id") or "")
-                    for row in self._open_positions()
-                    if row.get("deal_id")
-                }
+                before = {str(row.get("deal_id") or "") for row in self._open_positions() if row.get("deal_id")}
                 self._open_candidate(candidate, external)
                 self._persist()
                 opened = next(
-                    (
-                        dict(row)
-                        for row in reversed(self._open_positions())
-                        if str(row.get("deal_id") or "") not in before
-                    ),
+                    (dict(row) for row in reversed(self._open_positions()) if str(row.get("deal_id") or "") not in before),
                     None,
                 )
-                if opened is None:
-                    return {
-                        "version": self.VERSION,
-                        "opened": False,
-                        "symbol": candidate.get("symbol") or candidate.get("key"),
-                        "reason": "No new Category position was created.",
-                        "live_money_execution": False,
-                    }
                 return {
                     "version": self.VERSION,
-                    "opened": True,
+                    "opened": opened is not None,
                     "position": opened,
                     "execution_basis": "CURRENT_STANDARD_ELIGIBILITY_PLUS_CATEGORY_RISK_GATES",
                     "live_money_execution": False,
@@ -395,24 +394,12 @@ class CategoryExecutionEngine:
             except Exception as exc:
                 self._state["last_error"] = f"GPT open: {type(exc).__name__}: {exc}"
                 self._persist()
-                return {
-                    "version": self.VERSION,
-                    "opened": False,
-                    "symbol": symbol,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "live_money_execution": False,
-                }
+                return {"version": self.VERSION, "opened": False, "symbol": symbol, "error": f"{type(exc).__name__}: {exc}", "live_money_execution": False}
 
     def close_category_position(self, deal_id: str) -> Dict[str, Any]:
-        """Close a JSCAT-owned IG DEMO position and reconcile local state."""
         wanted = str(deal_id or "").strip()
         if not wanted:
-            return {
-                "version": self.VERSION,
-                "closed": False,
-                "error": "deal_id is required",
-                "live_money_execution": False,
-            }
+            return {"version": self.VERSION, "closed": False, "error": "deal_id is required", "live_money_execution": False}
         with self._lock:
             try:
                 self._reconcile()
@@ -433,26 +420,25 @@ class CategoryExecutionEngine:
                         "reason": "Only an open JSCAT-owned Category position can be closed by this action.",
                         "live_money_execution": False,
                     }
-                result = self.broker.close_position(wanted)
-                self._reconcile()
-                self._journal("GPT_CLOSE_REQUEST", deal_id=wanted, result=result.get("status") or result.get("dealStatus"))
+                result = self.broker.close_position(wanted) or {}
+                status = str(result.get("status") or result.get("dealStatus") or "").upper()
+                if result.get("closeVerified") or status in {"ALREADY_CLOSED_OR_NOT_FOUND", "ACCEPTED", "CLOSED_VERIFIED"}:
+                    tracked["status"] = "CLOSED"
+                    tracked["closed_at"] = time.time()
+                    tracked["close_result"] = result
+                    self._state["closes"] = int(self._state.get("closes") or 0) + 1
+                self._journal("GPT_CLOSE_REQUEST", deal_id=wanted, result=status)
                 self._persist()
                 return {
                     "version": self.VERSION,
-                    "closed": bool(result.get("closeVerified")) or str(result.get("status") or "").upper() in {"ALREADY_CLOSED_OR_NOT_FOUND", "CLOSED_VERIFIED"},
+                    "closed": bool(result.get("closeVerified")) or status in {"ALREADY_CLOSED_OR_NOT_FOUND", "ACCEPTED", "CLOSED_VERIFIED"},
                     "result": result,
                     "live_money_execution": False,
                 }
             except Exception as exc:
                 self._state["last_error"] = f"GPT close: {type(exc).__name__}: {exc}"
                 self._persist()
-                return {
-                    "version": self.VERSION,
-                    "closed": False,
-                    "deal_id": wanted,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "live_money_execution": False,
-                }
+                return {"version": self.VERSION, "closed": False, "deal_id": wanted, "error": f"{type(exc).__name__}: {exc}", "live_money_execution": False}
 
     def tick(self) -> Dict[str, Any]:
         with self._lock:
@@ -462,7 +448,6 @@ class CategoryExecutionEngine:
                 if self.enabled and getattr(self.broker, "configured", lambda: False)():
                     external = self._external_positions()
                     rankings = self.ranking_source() or {}
-                    # Each category owns its own 1-5 ranking. No weak filler is opened.
                     for category in ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"):
                         for candidate in rankings.get(category, [])[:5]:
                             self._open_candidate(dict(candidate), external)
@@ -495,6 +480,7 @@ class CategoryExecutionEngine:
             "enabled": self.enabled,
             "execution_mode": "IG_DEMO_ONLY",
             "deal_prefix": self.DEAL_PREFIX,
+            "risk_policy": "VOLATILITY_PLUS_SPREAD_R_BASED",
             "open_positions": len(open_rows),
             "open_by_category": by_category,
             "dual_track_positions": dual,
