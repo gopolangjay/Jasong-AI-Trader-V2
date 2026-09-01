@@ -10,27 +10,34 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from xauusd_liquidity_strategy import (
+    STRATEGY_ID as XAUUSD_STRATEGY_ID,
+    STRATEGY_NAME as XAUUSD_STRATEGY_NAME,
+    VERSION as XAUUSD_STRATEGY_VERSION,
+    analyze_xauusd,
+)
+
 
 # ============================================================================
 # JASONG AI TRADER V6.3 CLEAN CORE
-# CURRENT-CLOSED-CANDLE REGIME STRATEGY
+# ACTIVE XAUUSD LIQUIDITY / MARKET-STRUCTURE STRATEGY
 # ============================================================================
 #
 # EXECUTION AUTHORITY:
-#   CURRENT CLOSED CANDLES -> REGIME -> CATEGORY ROUTER -> VOLATILITY/LIQUIDITY
-#   -> QUANT >= 28 -> DIRECTIONAL AI >= 40 -> IG TRADEABILITY/SPREAD
-#   -> CONTROLLED IG DEMO ENTRY -> RISK/EXIT ENGINE -> FORWARD PRIME.
+#   H4 STRUCTURE -> PREMIUM/DISCOUNT -> M15 LIQUIDITY SWEEP -> H1/M15
+#   BOS/CHoCH -> OB/FVG RETEST -> CLOSED-CANDLE CONFIRMATION -> >=2R ROOM
+#   -> LONDON/NEW YORK SESSION -> IG TRADEABILITY/SPREAD -> IG DEMO ENTRY.
 #
-# Historical optimisation/holdout statistics are NOT used to choose the current
-# trade and have no execution-veto role. Forward broker-settled evidence remains
-# the PRIME authority in prime_policy.py.
+# The former 40-market EMA/ADX/range entry router is retired from autonomous
+# execution. Its markets remain visible in the catalogue, while GOLD is the only
+# active entry market supported by the newly supplied XAUUSD course.
 #
 # A strategy ID is versioned when its live rules materially change. This prevents
 # old broker evidence from being silently mixed with a new strategy definition.
 # ============================================================================
 
-VERSION = "6.3-clean-core-current-candle-regime-v1"
-EVIDENCE_SCHEMA_VERSION = 4
+VERSION = "6.10-xau-liquidity-structure-active-v1"
+EVIDENCE_SCHEMA_VERSION = 5
 
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
@@ -91,9 +98,9 @@ CATEGORY_RULES: Dict[str, Dict[str, Any]] = {
         "trend_requires_vwap": False,
     },
     "METALS": {
-        "strategy_id": "METALS_CURRENT_CANDLE_REGIME_V3",
-        "strategy_name": "Metals Current-Candle Trend / Range Router",
-        "holding_bars": 6,
+        "strategy_id": XAUUSD_STRATEGY_ID,
+        "strategy_name": XAUUSD_STRATEGY_NAME,
+        "holding_bars": 48,
         "spread_gate_bps": 22.0,
         "min_atr_pct": 0.015,
         "max_atr_q95_multiplier": 1.35,
@@ -217,6 +224,37 @@ CATEGORY_MARKET_SEEDS: List[Dict[str, Any]] = [
     _seed("XOM", "Exxon Mobil", "SHARES", "XOM", ig_search_terms=["Exxon Mobil"], expected_types=["SHARES"], name_tokens=["EXXON"], exposure_tags=["US_EQUITY", "ENERGY"]),
     _seed("AMD", "AMD", "SHARES", "AMD", ig_search_terms=["Advanced Micro Devices", "AMD"], expected_types=["SHARES"], name_tokens=["MICRO", "DEVICES"], exposure_tags=["US_EQUITY", "US_TECH", "SEMICONDUCTORS"]),
 ]
+
+
+def _active_execution_keys() -> Tuple[str, ...]:
+    """Only video-supported markets may create new autonomous entries.
+
+    The newly supplied course is explicitly an XAUUSD course. Existing
+    positions from retired strategies remain broker-managed until their own
+    stop, target or due-close; they are not force-closed during deployment.
+    """
+    configured = str(
+        os.getenv("JASONG_ACTIVE_EXECUTION_MARKETS", "GOLD")
+    )
+    requested = {
+        "".join(ch for ch in item.upper().strip() if ch.isalnum())
+        for item in configured.split(",")
+        if item.strip()
+    }
+    supported = {"GOLD"}
+    clean = tuple(sorted(requested & supported))
+    return clean or ("GOLD",)
+
+
+ACTIVE_EXECUTION_KEYS = _active_execution_keys()
+
+
+def _active_market_seeds() -> List[Dict[str, Any]]:
+    active = set(ACTIVE_EXECUTION_KEYS)
+    return [
+        row for row in CATEGORY_MARKET_SEEDS
+        if str(row.get("key") or "").upper() in active
+    ]
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -800,10 +838,10 @@ def _live_fast_score(
 
 
 class CategoryStrategyEngine:
-    """Six-category current-closed-candle regime engine.
+    """XAUUSD active execution engine with the six-category API preserved.
 
-    The engine deliberately does not use historical WR/PF/WF to decide the
-    current live signal. Forward PRIME remains external in prime_policy.py.
+    GOLD uses the multi-timeframe, session-aware liquidity/structure rules.
+    The other catalogue markets cannot create new autonomous entries.
     """
 
     VERSION = VERSION
@@ -877,7 +915,7 @@ class CategoryStrategyEngine:
                 "started_at": None,
                 "completed_at": None,
                 "processed": 0,
-                "total": len(CATEGORY_MARKET_SEEDS),
+                "total": len(_active_market_seeds()),
                 "current_key": None,
                 "errors": 0,
                 "last_error": None,
@@ -923,7 +961,7 @@ class CategoryStrategyEngine:
                     if (
                         excluded
                         or source_version != self.VERSION
-                        or len(current) < len(CATEGORY_MARKET_SEEDS)
+                        or len(current) < len(_active_market_seeds())
                     ):
                         state["migration_at"] = time.time()
                         state["full_refresh"]["processed"] = len(current)
@@ -970,7 +1008,19 @@ class CategoryStrategyEngine:
                 row for row in rows
                 if row["category"] == clean
             ]
-        return [dict(row) for row in rows]
+        active = set(ACTIVE_EXECUTION_KEYS)
+        return [
+            {
+                **dict(row),
+                "execution_active": str(row.get("key") or "").upper() in active,
+                "execution_policy": (
+                    "XAUUSD_LIQUIDITY_STRUCTURE_ACTIVE"
+                    if str(row.get("key") or "").upper() in active
+                    else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
+                ),
+            }
+            for row in rows
+        ]
 
     def _current_evaluations(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
@@ -984,7 +1034,7 @@ class CategoryStrategyEngine:
     def evidence_coverage(self) -> Dict[str, Any]:
         current = self._current_evaluations()
         universe_keys = [
-            str(seed["key"]) for seed in CATEGORY_MARKET_SEEDS
+            str(seed["key"]) for seed in _active_market_seeds()
         ]
         completed = [
             key for key in universe_keys if key in current
@@ -1002,6 +1052,11 @@ class CategoryStrategyEngine:
             "current_candle_strategy_complete": len(pending) == 0,
             "completed_keys": completed,
             "pending_keys": pending,
+            "active_execution_keys": list(ACTIVE_EXECUTION_KEYS),
+            "retired_market_count": max(
+                0,
+                len(CATEGORY_MARKET_SEEDS) - len(universe_keys),
+            ),
             "legacy_rows_excluded": int(
                 self._state.get("legacy_rows_excluded") or 0
             ),
@@ -1038,7 +1093,7 @@ class CategoryStrategyEngine:
 
             for cat in categories:
                 pool = [
-                    row for row in CATEGORY_MARKET_SEEDS
+                    row for row in _active_market_seeds()
                     if row["category"] == cat
                 ]
                 if not pool:
@@ -1201,6 +1256,34 @@ class CategoryStrategyEngine:
         if category not in CATEGORY_RULES:
             raise ValueError(f"Unsupported category: {category}")
 
+        key = str(seed.get("key") or "").upper().strip()
+        if key not in set(ACTIVE_EXECUTION_KEYS):
+            return {
+                **seed,
+                "version": self.VERSION,
+                "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+                "current_candle_strategy_complete": True,
+                "optimizer_complete": True,
+                "walk_forward_complete": True,
+                "market": seed.get("name"),
+                "symbol": seed.get("key"),
+                "strategy_id": "RETIRED_ENTRY_STRATEGY",
+                "strategy_name": "Analysis Only — Autonomous Entry Retired",
+                "strategy_definition_version": self.VERSION,
+                "strategy_selection_mode": "ANALYSIS_ONLY",
+                "direction": "WAIT",
+                "live_direction": "WAIT",
+                "quant_confidence": 0.0,
+                "model_ai_confidence": 0.0,
+                "smart_fast_score": 0.0,
+                "standard_eligible": False,
+                "trade_eligible": False,
+                "compound_eligible": False,
+                "rejection_reasons": ["OLD_ENTRY_STRATEGY_RETIRED"],
+                "evaluated_at": time.time(),
+                "live_money_execution": False,
+            }
+
         raw = self.frame_func(seed)
         frame = _feature_frame(raw)
         closed_pos = _closed_candle_position(frame)
@@ -1208,10 +1291,37 @@ class CategoryStrategyEngine:
         latest_timestamp = frame.index[closed_pos]
 
         rule = CATEGORY_RULES[category]
-        live = _live_router(latest, category)
+        xau = analyze_xauusd(frame.iloc[:closed_pos + 1].copy())
+        quality = _market_quality(latest, category)
+        selected_checks = dict(
+            (xau.get("selected_setup") or {}).get("checks") or {}
+        )
+        live = {
+            "direction": xau.get("direction") or "WAIT",
+            "quant_confidence": xau.get("quant_confidence") or 0.0,
+            "regime": (
+                (xau.get("h4_structure") or {}).get("trend")
+                or "NEUTRAL"
+            ),
+            "strategy_branch": xau.get("strategy_branch"),
+            "strategy_reason": xau.get("strategy_reason"),
+            "branch_checks": selected_checks,
+            "volatility_pass": quality["volatility_pass"],
+            "volatility_floor_pass": quality["volatility_floor_pass"],
+            "panic_volatility_pass": quality["panic_volatility_pass"],
+            "liquidity_pass": bool(selected_checks.get("liquidity_sweep")),
+            "atr_pct": quality["atr_pct"],
+            "atr_q95_pct": quality["atr_q95_pct"],
+            "relative_volume": quality["relative_volume"],
+        }
         direction = str(live["direction"])
         quant = _confidence01(live["quant_confidence"])
-        ai = _directional_ai(latest, direction)
+        legacy_rule_ml_ai = _directional_ai(latest, direction)
+        ai = (
+            _confidence01(xau.get("directional_confidence"))
+            if direction in {"BUY", "SELL"}
+            else 0.0
+        )
 
         quant_pass = (
             direction in {"BUY", "SELL"}
@@ -1246,7 +1356,8 @@ class CategoryStrategyEngine:
             "strategy_id": rule["strategy_id"],
             "strategy_name": rule["strategy_name"],
             "strategy_definition_version": self.VERSION,
-            "strategy_selection_mode": "CURRENT_CLOSED_CANDLE_ONLY",
+            "strategy_selection_mode":
+                "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
             "historical_validation_mode": "INFORMATIONAL_ONLY",
             "historical_execution_veto": False,
             "regime": live["regime"],
@@ -1259,6 +1370,12 @@ class CategoryStrategyEngine:
             "model_ai_directional_confidence_pct": round(
                 ai * 100.0,
                 2,
+            ),
+            "model_ai_confidence_source":
+                "XAUUSD_RULE_CONFLUENCE_NOT_LEGACY_ML",
+            "legacy_rule_ml_directional_confidence": round(
+                legacy_rule_ml_ai,
+                6,
             ),
             "ai28_pass": quant_pass,
             "ai40_pass": ai_pass,
@@ -1322,15 +1439,45 @@ class CategoryStrategyEngine:
                 latest.get("BEAR_REVERSAL_CANDLE")
             ),
             "closed_candle_timestamp": (
-                latest_timestamp.isoformat()
-                if hasattr(latest_timestamp, "isoformat")
-                else str(latest_timestamp)
+                xau.get("closed_candle_timestamp")
+                or (
+                    latest_timestamp.isoformat()
+                    if hasattr(latest_timestamp, "isoformat")
+                    else str(latest_timestamp)
+                )
             ),
             "closed_candle_index_offset": -2,
             "forming_candle_ignored": True,
             "holding_bars": int(rule["holding_bars"]),
             "analysis_source":
-                "CURRENT_CLOSED_CANDLE_REGIME_ROUTER",
+                "XAUUSD_M15_H1_H4_LIQUIDITY_STRUCTURE",
+            "analysis_execution_price_basis": (
+                "PUBLIC_GOLD_FUTURES_STRUCTURE_DISTANCE_TRANSFERRED_TO_"
+                "FRESH_IG_SPOT_GOLD_QUOTE"
+            ),
+            "xauusd_strategy_version": XAUUSD_STRATEGY_VERSION,
+            "xauusd_strategy": xau,
+            "setup_id": xau.get("setup_id"),
+            "structural_stop_price": xau.get("structural_stop_price"),
+            "structural_stop_distance": xau.get("structural_stop_distance"),
+            "take_profit_target_price": xau.get("take_profit_target_price"),
+            "target_distance": xau.get("target_distance"),
+            "target_r": xau.get("target_r"),
+            "room_to_opposing_liquidity_r":
+                xau.get("room_to_opposing_liquidity_r"),
+            "session": dict(xau.get("session") or {}),
+            "session_name":
+                (xau.get("session") or {}).get("name"),
+            "session_active": bool(
+                (xau.get("session") or {}).get("active")
+            ),
+            "london_new_york_overlap": bool(
+                (xau.get("session") or {}).get("overlap")
+            ),
+            "south_africa_time":
+                (xau.get("session") or {}).get("south_africa_local"),
+            "session_exit_at": xau.get("session_exit_at"),
+            "max_hold_seconds": xau.get("max_hold_seconds"),
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"]
@@ -1445,12 +1592,14 @@ class CategoryStrategyEngine:
         row["spread_bps"] = spread
         row["spread_pass"] = spread_pass
 
-        rejection_reasons: List[str] = []
-        if live["regime"] == "PANIC_VOLATILITY":
+        rejection_reasons: List[str] = list(
+            xau.get("rejection_reasons") or []
+        )
+        if not live["panic_volatility_pass"]:
             rejection_reasons.append("PANIC_VOLATILITY")
         if direction not in {"BUY", "SELL"}:
             rejection_reasons.append(
-                "CURRENT_CANDLE_STRATEGY_NOT_CONFIRMED"
+                "XAUUSD_FULL_CONFLUENCE_NOT_CONFIRMED"
             )
         if not live["volatility_pass"]:
             rejection_reasons.append(
@@ -1498,7 +1647,7 @@ class CategoryStrategyEngine:
             direction in {"BUY", "SELL"}
         )
         row["intelligence_source"] = (
-            "CURRENT_CLOSED_CANDLE_REGIME_V1"
+            "XAUUSD_LIQUIDITY_STRUCTURE_V1"
         )
 
         # Rank only on current evidence. No historical WR/PF component.
@@ -1765,15 +1914,28 @@ class CategoryStrategyEngine:
                 reverse=True,
             )
             best = rows[0] if rows else {}
+            active_category = category == "METALS"
             categories[category] = {
                 "market": best.get("market"),
                 "symbol": best.get("symbol"),
                 "selected_strategy_id":
-                    CATEGORY_RULES[category]["strategy_id"],
+                    (
+                        CATEGORY_RULES[category]["strategy_id"]
+                        if active_category
+                        else "RETIRED_ENTRY_STRATEGY"
+                    ),
                 "selected_strategy_name":
-                    CATEGORY_RULES[category]["strategy_name"],
+                    (
+                        CATEGORY_RULES[category]["strategy_name"]
+                        if active_category
+                        else "Analysis Only — Autonomous Entry Retired"
+                    ),
                 "selection_mode":
-                    "CURRENT_CLOSED_CANDLE_ONLY",
+                    (
+                        "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+                        if active_category
+                        else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
+                    ),
                 "regime": best.get("regime"),
                 "strategy_branch":
                     best.get("strategy_branch"),
@@ -1784,13 +1946,19 @@ class CategoryStrategyEngine:
         return {
             "version": self.VERSION,
             "method":
-                "CURRENT_CLOSED_CANDLE_REGIME_ROUTER",
+                "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
             "current_candle_only": True,
             "forming_candle_ignored": True,
-            "trend_rule":
-                "EMA20/EMA50 + ADX>25 + pullback + closed candle",
-            "range_rule":
-                "RSI divergence + Bollinger/S&R + exhaustion + reversal candle",
+            "active_execution_markets": list(ACTIVE_EXECUTION_KEYS),
+            "higher_timeframe_rule": "H4 HH/HL or LH/LL structure",
+            "setup_rule": (
+                "premium/discount + liquidity sweep + BOS/CHoCH + "
+                "OB/FVG retest + closed M15 confirmation"
+            ),
+            "session_rule": (
+                "London or New York local 08:00-17:00, DST-aware"
+            ),
+            "risk_reward_rule": "minimum 1:2 structural R:R",
             "quant_min_pct": 28.0,
             "model_ai_min_pct": 40.0,
             "fast_score_min": 45.0,
@@ -1827,7 +1995,7 @@ class CategoryStrategyEngine:
                     "started_at": time.time(),
                     "completed_at": None,
                     "processed": 0,
-                    "total": len(CATEGORY_MARKET_SEEDS),
+                    "total": len(_active_market_seeds()),
                     "current_key": None,
                     "errors": 0,
                     "last_error": None,
@@ -1835,7 +2003,7 @@ class CategoryStrategyEngine:
                 self._persist()
 
             for idx, seed in enumerate(
-                CATEGORY_MARKET_SEEDS,
+                _active_market_seeds(),
                 start=1,
             ):
                 if self._stop.is_set():
@@ -1950,13 +2118,27 @@ class CategoryStrategyEngine:
             standard_ready += standard
             compound_ready += compound
 
+            active_category = category == "METALS"
             by_category[category] = {
                 "strategy":
-                    CATEGORY_RULES[category]["strategy_name"],
+                    (
+                        CATEGORY_RULES[category]["strategy_name"]
+                        if active_category
+                        else "Analysis Only — Autonomous Entry Retired"
+                    ),
                 "strategy_id":
-                    CATEGORY_RULES[category]["strategy_id"],
+                    (
+                        CATEGORY_RULES[category]["strategy_id"]
+                        if active_category
+                        else "RETIRED_ENTRY_STRATEGY"
+                    ),
+                "execution_active": active_category,
                 "selection_mode":
-                    "CURRENT_CLOSED_CANDLE_ONLY",
+                    (
+                        "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+                        if active_category
+                        else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
+                    ),
                 "ranked": len(rows),
                 "standard_ready": standard,
                 "compound_ready": compound,
@@ -1982,7 +2164,7 @@ class CategoryStrategyEngine:
             return {
                 "version": self.VERSION,
                 "name":
-                    "JASONG V6.3 CURRENT-CANDLE REGIME INTELLIGENCE",
+                    "JASONG V6.10 XAUUSD LIQUIDITY-STRUCTURE EXECUTION",
                 "enabled": bool(
                     self._state.get("enabled", True)
                 ),
@@ -1990,12 +2172,18 @@ class CategoryStrategyEngine:
                     "price_basis":
                         "CURRENT_CLOSED_CANDLE_ONLY",
                     "forming_candle_ignored": True,
-                    "regime_threshold":
-                        "ADX > 25 = TRENDING; else RANGING",
-                    "trending":
-                        "EMA20/EMA50 + pullback + closed-candle confirmation",
-                    "ranging":
-                        "RSI divergence + Bollinger/S&R + exhaustion + reversal candle",
+                    "active_market": "XAUUSD / GOLD ONLY",
+                    "higher_timeframe": "H4 market structure",
+                    "confirmation_timeframe": "H1 structure",
+                    "entry_timeframe": "M15 closed candle",
+                    "session_policy": (
+                        "Europe/London 08:00-17:00 or "
+                        "America/New_York 08:00-17:00; DST-aware"
+                    ),
+                    "setup": (
+                        "premium/discount -> liquidity sweep -> BOS/CHoCH -> "
+                        "OB/FVG retest -> candle confirmation -> >=2R"
+                    ),
                     "then":
                         "volatility + liquidity -> Quant -> AI -> FAST -> IG tradeability/spread",
                 },
@@ -2017,8 +2205,15 @@ class CategoryStrategyEngine:
                 },
                 "categories": by_category,
                 "category_count": len(CATEGORY_ORDER),
-                "universe_size":
-                    len(CATEGORY_MARKET_SEEDS),
+                "universe_size": len(_active_market_seeds()),
+                "catalogue_size": len(CATEGORY_MARKET_SEEDS),
+                "active_execution_keys": list(ACTIVE_EXECUTION_KEYS),
+                "retired_entry_markets": [
+                    str(row.get("key"))
+                    for row in CATEGORY_MARKET_SEEDS
+                    if str(row.get("key") or "").upper()
+                    not in set(ACTIVE_EXECUTION_KEYS)
+                ],
                 "fresh_evaluations":
                     len(self._fresh_rows()),
                 "standard_ready": standard_ready,

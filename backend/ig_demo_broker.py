@@ -44,6 +44,8 @@ class IGDemoBroker:
     BASE_URL = "https://demo-api.ig.com/gateway/deal"
 
     def __init__(self) -> None:
+        self.demo = True
+        self.live_money_execution = False
         self.api_key = os.getenv("IG_DEMO_API_KEY", "").strip()
         self.identifier = os.getenv("IG_DEMO_IDENTIFIER", "").strip()
         self.password = os.getenv("IG_DEMO_PASSWORD", "")
@@ -1077,6 +1079,7 @@ class IGDemoBroker:
         direction: str,
         size: Optional[float] = None,
         deal_reference: Optional[str] = None,
+        allow_size_increment_retry: bool = True,
     ) -> Dict[str, Any]:
         """Open an IG DEMO position on an already-resolved EPIC."""
         direction = str(direction or "").upper().strip()
@@ -1143,6 +1146,7 @@ class IGDemoBroker:
             if (
                 "SIZE_INCREMENT" in first_rejection_reason.upper()
                 and self.demo
+                and allow_size_increment_retry
             ):
                 retry_sizes = self._size_increment_retry_candidates(
                     requested_size,

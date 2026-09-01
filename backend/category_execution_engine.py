@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from risk_exit_policy import build_risk_plan
+
+
+class RiskSizingError(RuntimeError):
+    pass
 
 
 class CategoryExecutionEngine:
     """Independent IG DEMO standard-category portfolio executor."""
 
-    VERSION = "6.3-clean-core-risk-exit-v1"
+    VERSION = "6.10-xau-active-execution-v1"
     DEAL_PREFIX = "JSCAT_"
+    ACTIVE_STRATEGY_PREFIX = "XAUUSD_LIQUIDITY_STRUCTURE"
+    ACTIVE_SYMBOL = "GOLD"
 
     def __init__(
         self,
@@ -38,6 +47,15 @@ class CategoryExecutionEngine:
         self.max_theme_exposure = max(1, min(10, int(os.getenv("CATEGORY_MAX_THEME_EXPOSURE", "3"))))
         self.max_tracks_per_epic = max(1, min(2, int(os.getenv("CATEGORY_MAX_TRACKS_PER_EPIC", "2"))))
         self.default_size = max(0.0001, float(os.getenv("CATEGORY_DEFAULT_SIZE", "0.5")))
+        self.risk_per_trade_pct = max(
+            0.10,
+            min(1.00, float(os.getenv("XAU_RISK_PER_TRADE_PCT", "1.0"))),
+        )
+        self.max_daily_entries = max(
+            1,
+            min(2, int(os.getenv("XAU_MAX_DAILY_ENTRIES", "2"))),
+        )
+        self._sast = ZoneInfo("Africa/Johannesburg")
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -186,13 +204,216 @@ class CategoryExecutionEngine:
             1 for row in external if str(row.get("epic") or row.get("ig_epic") or "").upper().strip() == clean
         )
 
+    def _broker_has_open_epic(self, epic: str) -> bool:
+        clean = str(epic or "").upper().strip()
+        if not clean:
+            return False
+        try:
+            rows = self._broker_rows(self.broker.positions() or {})
+        except Exception:
+            # Fail closed when account-wide exposure cannot be verified.
+            return True
+        return any(
+            str(row.get("epic") or "").upper().strip() == clean
+            for row in rows
+        )
+
+    def _is_active_strategy(self, candidate: Dict[str, Any]) -> bool:
+        strategy = str(candidate.get("strategy_id") or "").upper().strip()
+        symbol = str(candidate.get("symbol") or candidate.get("key") or "").upper().strip()
+        return (
+            strategy.startswith(self.ACTIVE_STRATEGY_PREFIX)
+            and symbol == self.ACTIVE_SYMBOL
+        )
+
+    def _opened_today_sast(self) -> int:
+        today = datetime.now(tz=self._sast).date()
+        count = 0
+        for row in self._state.setdefault("positions", []):
+            if not str(row.get("strategy_id") or "").upper().startswith(
+                self.ACTIVE_STRATEGY_PREFIX
+            ):
+                continue
+            opened_at = float(row.get("opened_at") or 0.0)
+            if opened_at <= 0:
+                continue
+            if datetime.fromtimestamp(opened_at, tz=self._sast).date() == today:
+                count += 1
+        return count
+
+    def _account_for_risk(self) -> Dict[str, Any]:
+        payload = self.broker.accounts() or {}
+        rows = [
+            row for row in payload.get("accounts", []) or []
+            if isinstance(row, dict)
+        ]
+        if not rows:
+            raise RiskSizingError("IG DEMO account balance is unavailable")
+
+        preferred = str(
+            (getattr(self.broker, "status", lambda: {})() or {}).get("account_id")
+            or ""
+        ).strip()
+        row = next(
+            (
+                item for item in rows
+                if str(item.get("accountId") or "").strip() == preferred
+            ),
+            rows[0],
+        )
+        balance_block = row.get("balance") or {}
+        balance = float(balance_block.get("balance") or 0.0)
+        currency = str(row.get("currency") or "").upper().strip()
+        if balance <= 0 or not currency:
+            raise RiskSizingError("IG DEMO account balance/currency is invalid")
+        return {
+            "account_id": row.get("accountId"),
+            "balance": balance,
+            "available": float(balance_block.get("available") or 0.0),
+            "currency": currency,
+        }
+
+    @staticmethod
+    def _default_settlement_currency(details: Dict[str, Any]) -> Optional[str]:
+        instrument = details.get("instrument") or {}
+        currencies = instrument.get("currencies") or []
+        selected = next(
+            (
+                item for item in currencies
+                if isinstance(item, dict) and item.get("isDefault") is True
+            ),
+            None,
+        )
+        if selected is None:
+            selected = next(
+                (item for item in currencies if isinstance(item, dict)),
+                None,
+            )
+        code = str((selected or {}).get("code") or "").upper().strip()
+        return code or None
+
+    @staticmethod
+    def _floor_to_step(value: float, step: float) -> float:
+        if step <= 0:
+            return float(value)
+        return float(f"{math.floor((value + 1e-12) / step) * step:.10f}")
+
+    def _risk_sized_order(
+        self,
+        candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        direction = str(candidate.get("direction") or "").upper().strip()
+        if direction not in {"BUY", "SELL"}:
+            raise RiskSizingError("Risk sizing requires BUY or SELL")
+
+        account = self._account_for_risk()
+        epic = str(candidate.get("ig_epic") or "").strip()
+        try:
+            details = self.broker.market_details(
+                epic,
+                require_quote=True,
+            ) or {}
+        except TypeError:
+            details = self.broker.market_details(epic) or {}
+
+        quote_snapshot = dict(details.get("_quote_snapshot") or {})
+        snapshot = dict(details.get("snapshot") or {})
+        bid = quote_snapshot.get("bid")
+        offer = quote_snapshot.get("offer")
+        if bid is None:
+            bid = snapshot.get("bid")
+        if offer is None:
+            offer = snapshot.get("offer")
+        if bid is None:
+            bid = candidate.get("ig_bid")
+        if offer is None:
+            offer = candidate.get("ig_offer")
+        raw_entry_quote = offer if direction == "BUY" else bid
+        entry_quote = float(raw_entry_quote or 0.0)
+        if entry_quote <= 0:
+            raise RiskSizingError("Fresh IG entry-side quote is unavailable")
+
+        risk_plan = build_risk_plan(
+            candidate,
+            entry_price=entry_quote,
+            direction=direction,
+        )
+        settlement_currency = self._default_settlement_currency(details)
+
+        valuation = self.broker.estimate_closed_position_pnl(
+            epic=epic,
+            direction=direction,
+            entry_level=entry_quote,
+            exit_level=risk_plan.protective_stop_price,
+            size=1.0,
+            settlement_currency=settlement_currency,
+            account_currency=account["currency"],
+        )
+        risk_per_size = abs(float(valuation.get("account_pnl") or 0.0))
+        if risk_per_size <= 0:
+            raise RiskSizingError("IG valuation produced no usable risk per size")
+
+        risk_cash = account["balance"] * self.risk_per_trade_pct / 100.0
+        raw_size = risk_cash / risk_per_size
+        min_size = float(
+            getattr(self.broker, "_min_deal_size", lambda _: 0.0)(details)
+            or candidate.get("ig_min_deal_size")
+            or 0.0
+        )
+        increment = float(
+            getattr(self.broker, "_deal_size_increment", lambda _: min_size)(details)
+            or min_size
+            or 0.0
+        )
+        if min_size <= 0 or increment <= 0:
+            raise RiskSizingError(
+                "IG minimum size or size increment is unavailable; refusing unsafe sizing"
+            )
+        size = self._floor_to_step(raw_size, increment)
+
+        if size + 1e-12 < min_size or size <= 0:
+            minimum_risk = risk_per_size * min_size
+            raise RiskSizingError(
+                "IG minimum size would exceed the 1% XAUUSD risk budget "
+                f"(budget {risk_cash:.2f} {account['currency']}; "
+                f"minimum-size risk {minimum_risk:.2f} {account['currency']})"
+            )
+
+        estimated_risk = risk_per_size * size
+        if estimated_risk > risk_cash * 1.001:
+            raise RiskSizingError(
+                "Rounded IG size exceeds the configured XAUUSD risk budget"
+            )
+
+        return {
+            "size": size,
+            "entry_quote": entry_quote,
+            "risk_cash": round(risk_cash, 8),
+            "estimated_stop_risk_cash": round(estimated_risk, 8),
+            "risk_per_trade_pct": self.risk_per_trade_pct,
+            "account_balance": round(account["balance"], 8),
+            "account_currency": account["currency"],
+            "minimum_size": min_size,
+            "size_increment": increment,
+            "risk_plan_at_quote": risk_plan.as_dict(),
+            "valuation": valuation,
+        }
+
     def _may_open(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> tuple[bool, str]:
+        if not self._is_active_strategy(candidate):
+            return False, "old autonomous entry strategy is retired; GOLD XAUUSD only"
         if not candidate.get("standard_eligible"):
             return False, "not standard eligible"
+        if candidate.get("session_active") is not True:
+            return False, "outside London/New York execution session"
+        setup_id = str(candidate.get("setup_id") or "").strip()
+        if not setup_id:
+            return False, "XAUUSD setup has no deterministic setup ID"
+        if self._opened_today_sast() >= self.max_daily_entries:
+            return False, "South Africa daily XAUUSD entry cap reached"
         epic = str(candidate.get("ig_epic") or "").strip()
         if not epic:
             return False, "no IG EPIC"
-        direction = str(candidate.get("direction") or "").upper()
         category = str(candidate.get("category") or "").upper()
         symbol = str(candidate.get("symbol") or "").upper()
         open_rows = self._open_positions()
@@ -203,12 +424,17 @@ class CategoryExecutionEngine:
         if sum(1 for row in open_rows if row.get("category") == category) >= self.max_per_category:
             return False, "category position cap reached"
         if any(
-            row.get("category") == category
-            and str(row.get("symbol") or "").upper() == symbol
-            and row.get("direction") == direction
+            str(row.get("symbol") or "").upper() == symbol
             for row in open_rows
         ):
-            return False, "duplicate category signal already open"
+            return False, "an XAUUSD position is already open"
+        if any(
+            str(row.get("setup_id") or "") == setup_id
+            for row in self._state.setdefault("positions", [])
+        ):
+            return False, "this XAUUSD sweep/structure setup was already traded"
+        if self._broker_has_open_epic(epic):
+            return False, "an account-wide XAUUSD position is already open"
         if self._epic_track_count(epic, external) >= self.max_tracks_per_epic:
             return False, "combined category/compound EPIC exposure cap reached"
         theme_counts = self._theme_counts(external)
@@ -218,31 +444,65 @@ class CategoryExecutionEngine:
         return True, "approved"
 
     def _open_candidate(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> None:
-        allowed, _ = self._may_open(candidate, external)
+        allowed, reason = self._may_open(candidate, external)
         if not allowed:
             return
 
         category = str(candidate.get("category") or "UNK").upper()
         ref = f"JSCAT_{category[:3]}_{uuid.uuid4().hex[:16].upper()}"[:30]
+        try:
+            sizing = self._risk_sized_order(candidate)
+        except RiskSizingError as exc:
+            self._journal(
+                "XAU_RISK_SIZE_REJECTED",
+                symbol=candidate.get("symbol"),
+                setup_id=candidate.get("setup_id"),
+                reason=str(exc),
+            )
+            self._state["last_risk_rejection"] = {
+                "at": time.time(),
+                "symbol": candidate.get("symbol"),
+                "setup_id": candidate.get("setup_id"),
+                "reason": str(exc),
+            }
+            return
+
         result = self.broker.open_epic_position(
             epic=str(candidate["ig_epic"]),
             direction=str(candidate["direction"]),
-            size=max(self.default_size, float(candidate.get("ig_min_deal_size") or 0.0)),
+            size=float(sizing["size"]),
             deal_reference=ref,
+            allow_size_increment_retry=False,
         ) or {}
         deal_id = result.get("dealId")
         if not deal_id:
             raise RuntimeError(f"IG DEMO did not return dealId: {result}")
 
         entry_level = result.get("level")
-        risk_plan = None
-        try:
-            if entry_level is not None:
-                risk_plan = build_risk_plan(
-                    candidate,
-                    entry_price=float(entry_level),
-                    direction=str(candidate["direction"]),
+        if entry_level is None:
+            try:
+                self.broker.close_position(str(deal_id))
+            finally:
+                raise RuntimeError(
+                    "IG DEMO opened XAUUSD without an entry level; position was closed immediately"
                 )
+
+        actual_size = float(result.get("size") or 0.0)
+        if actual_size <= 0 or actual_size > float(sizing["size"]) + 1e-12:
+            try:
+                self.broker.close_position(str(deal_id))
+            finally:
+                raise RuntimeError(
+                    "IG DEMO changed the risk-sized XAUUSD order upward; "
+                    "the position was closed immediately"
+                )
+
+        try:
+            risk_plan = build_risk_plan(
+                candidate,
+                entry_price=float(entry_level),
+                direction=str(candidate["direction"]),
+            )
         except Exception as exc:
             self._journal(
                 "RISK_PLAN_ERROR",
@@ -250,8 +510,25 @@ class CategoryExecutionEngine:
                 symbol=candidate.get("symbol"),
                 error=f"{type(exc).__name__}: {exc}",
             )
+            try:
+                self.broker.close_position(str(deal_id))
+            finally:
+                raise RuntimeError(
+                    "XAUUSD structural risk plan failed after entry; "
+                    "the IG DEMO position was closed immediately"
+                ) from exc
 
-        hold_seconds = max(900, int(candidate.get("holding_bars") or 4) * 15 * 60)
+        max_hold_seconds = max(
+            900,
+            int(
+                candidate.get("max_hold_seconds")
+                or int(candidate.get("holding_bars") or 48) * 15 * 60
+            ),
+        )
+        due_at = time.time() + max_hold_seconds
+        session_exit_at = float(candidate.get("session_exit_at") or 0.0)
+        if session_exit_at > time.time():
+            due_at = min(due_at, session_exit_at)
         position = {
             "track": "CATEGORY",
             "category": category,
@@ -267,7 +544,7 @@ class CategoryExecutionEngine:
             "size": result.get("size"),
             "entry_level": entry_level,
             "opened_at": time.time(),
-            "due_at": time.time() + hold_seconds,
+            "due_at": due_at,
             "status": "OPEN",
             "exposure_tags": list(candidate.get("exposure_tags") or []),
             "quant_confidence": candidate.get("quant_confidence"),
@@ -276,6 +553,17 @@ class CategoryExecutionEngine:
             "historical_profit_factor": candidate.get("historical_profit_factor"),
             "smart_fast_score": candidate.get("smart_fast_score"),
             "dual_track": self._is_dual_track(candidate.get("ig_epic"), external),
+            "setup_id": candidate.get("setup_id"),
+            "session_name": candidate.get("session_name"),
+            "session_snapshot": dict(candidate.get("session") or {}),
+            "south_africa_time_at_signal": candidate.get("south_africa_time"),
+            "london_new_york_overlap": bool(candidate.get("london_new_york_overlap")),
+            "risk_per_trade_pct": sizing.get("risk_per_trade_pct"),
+            "risk_cash_budget": sizing.get("risk_cash"),
+            "estimated_stop_risk_cash": sizing.get("estimated_stop_risk_cash"),
+            "risk_account_balance": sizing.get("account_balance"),
+            "risk_account_currency": sizing.get("account_currency"),
+            "risk_sized_order": sizing,
             "risk_policy_version": risk_plan.version if risk_plan else None,
             "planned_stop_pct": risk_plan.stop_pct if risk_plan else None,
             "planned_risk_price_distance": risk_plan.stop_distance if risk_plan else None,
@@ -288,7 +576,17 @@ class CategoryExecutionEngine:
 
         self._state.setdefault("positions", []).append(position)
         self._state["opens"] = int(self._state.get("opens") or 0) + 1
-        self._journal("OPEN", category=category, symbol=position["symbol"], deal_id=deal_id, dual_track=position["dual_track"])
+        self._journal(
+            "OPEN",
+            category=category,
+            symbol=position["symbol"],
+            deal_id=deal_id,
+            dual_track=position["dual_track"],
+            setup_id=position.get("setup_id"),
+            session=position.get("session_name"),
+            risk_pct=position.get("risk_per_trade_pct"),
+            estimated_stop_risk_cash=position.get("estimated_stop_risk_cash"),
+        )
 
         tracker = getattr(self, "_trade_excursion_tracker", None)
         register = getattr(tracker, "register_trade_plan", None)
@@ -480,7 +778,17 @@ class CategoryExecutionEngine:
             "enabled": self.enabled,
             "execution_mode": "IG_DEMO_ONLY",
             "deal_prefix": self.DEAL_PREFIX,
-            "risk_policy": "VOLATILITY_PLUS_SPREAD_R_BASED",
+            "active_strategy": "XAUUSD_LIQUIDITY_STRUCTURE_V1",
+            "active_symbol": self.ACTIVE_SYMBOL,
+            "old_entry_strategies_retired": True,
+            "risk_policy": "STRUCTURAL_STOP_PLUS_ACCOUNT_PERCENT_RISK",
+            "risk_per_trade_pct": self.risk_per_trade_pct,
+            "max_daily_entries_south_africa": self.max_daily_entries,
+            "entries_today_south_africa": self._opened_today_sast(),
+            "session_policy": (
+                "London or New York 08:00-17:00 local, daylight-saving aware"
+            ),
+            "minimum_target_r": 2.0,
             "open_positions": len(open_rows),
             "open_by_category": by_category,
             "dual_track_positions": dual,
@@ -495,6 +803,7 @@ class CategoryExecutionEngine:
             "closes": int(self._state.get("closes") or 0),
             "last_tick_at": self._state.get("last_tick_at"),
             "last_error": self._state.get("last_error"),
+            "last_risk_rejection": self._state.get("last_risk_rejection"),
             "state_path": self.state_path,
             "live_money_execution": False,
         }

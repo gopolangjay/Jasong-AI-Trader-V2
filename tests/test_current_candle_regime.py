@@ -5,21 +5,22 @@ import unittest
 
 import pandas as pd
 
+
 ROOT = os.path.dirname(os.path.dirname(__file__))
 BACKEND = os.path.join(ROOT, "backend")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-from category_strategy_engine import (
+from category_strategy_engine import (  # noqa: E402
+    ACTIVE_EXECUTION_KEYS,
     CATEGORY_MARKET_SEEDS,
     CATEGORY_ORDER,
     MODEL_AI_MIN_CONFIDENCE,
     QUANT_MIN_CONFIDENCE,
     TREND_ADX_MIN,
     CategoryStrategyEngine,
-    _feature_frame,
-    _live_router,
 )
+from xauusd_liquidity_strategy import STRATEGY_ID  # noqa: E402
 
 
 class FakeBroker:
@@ -30,62 +31,37 @@ class FakeBroker:
     def _min_deal_size(_details):
         return 0.1
 
-    def resolve_market(self, symbol, require_tradeable=False):
-        return {
-            "epic": f"FX.{symbol.replace('/', '')}",
-            "name": symbol,
-            "instrument_type": "CURRENCIES",
-            "market_status": "TRADEABLE",
-            "expiry": "-",
-            "details": {
-                "instrument": {
-                    "name": symbol,
-                    "type": "CURRENCIES",
-                    "expiry": "-",
-                },
-                "snapshot": {
-                    "marketStatus": "TRADEABLE",
-                    "bid": 1.2000,
-                    "offer": 1.20005,
-                },
-            },
-        }
-
     def resolve_global_market(self, **kwargs):
         key = kwargs.get("cache_key", "GLOBAL")
         return {
             "epic": f"GLOBAL.{key}",
-            "name": key,
-            "instrument_type": "INDICES",
+            "name": "Spot Gold" if key == "GOLD" else key,
+            "instrument_type": "COMMODITIES",
             "market_status": "TRADEABLE",
             "min_deal_size": 0.1,
             "expiry": "-",
-            "bid": 100.0,
-            "offer": 100.05,
+            "bid": 1999.5,
+            "offer": 2000.0,
         }
 
 
-def trending_frame(rows=400):
+def xau_frame(rows=800, up_prob=0.90):
     index = pd.date_range(
-        "2026-01-01",
+        end="2026-01-15 02:45:00+00:00",
         periods=rows,
         freq="15min",
-        tz="UTC",
     )
-    # Long trend with recurrent shallow pullbacks.
-    vals = []
-    price = 1.0
+    values = []
+    price = 2000.0
     for i in range(rows):
-        price += 0.00035
-        if i % 9 == 0:
-            price -= 0.00065
-        vals.append(price)
-
-    close = pd.Series(vals, index=index)
-    open_ = close.shift(1).fillna(close.iloc[0] - 0.0001)
-    high = pd.concat([open_, close], axis=1).max(axis=1) + 0.00035
-    low = pd.concat([open_, close], axis=1).min(axis=1) - 0.00035
-
+        price += 0.12
+        if i % 19 == 0:
+            price -= 0.75
+        values.append(price)
+    close = pd.Series(values, index=index)
+    open_ = close.shift(1).fillna(close.iloc[0] - 0.10)
+    high = pd.concat([open_, close], axis=1).max(axis=1) + 0.40
+    low = pd.concat([open_, close], axis=1).min(axis=1) - 0.40
     return pd.DataFrame(
         {
             "Open": open_,
@@ -93,14 +69,28 @@ def trending_frame(rows=400):
             "Low": low,
             "Close": close,
             "Volume": 1000.0,
-            "UP_PROB": 0.90,
+            "UP_PROB": up_prob,
         },
         index=index,
     )
 
 
-class CurrentCandleRegimeTests(unittest.TestCase):
-    def test_policy_constants(self):
+class ActiveXauRouterTests(unittest.TestCase):
+    def _engine(self, frame):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return CategoryStrategyEngine(
+            broker=FakeBroker(),
+            frame_func=lambda seed: frame.copy(),
+            state_path=os.path.join(tmp.name, "state.json"),
+            scan_interval_seconds=9999,
+        )
+
+    @staticmethod
+    def _seed(key):
+        return next(row for row in CATEGORY_MARKET_SEEDS if row["key"] == key)
+
+    def test_policy_constants_and_catalogue(self):
         self.assertEqual(QUANT_MIN_CONFIDENCE, 0.28)
         self.assertEqual(MODEL_AI_MIN_CONFIDENCE, 0.40)
         self.assertEqual(TREND_ADX_MIN, 25.0)
@@ -109,64 +99,54 @@ class CurrentCandleRegimeTests(unittest.TestCase):
             ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"),
         )
         self.assertEqual(len(CATEGORY_MARKET_SEEDS), 40)
+        self.assertEqual(ACTIVE_EXECUTION_KEYS, ("GOLD",))
 
     def test_forming_candle_is_not_the_execution_candle(self):
-        frame = _feature_frame(trending_frame())
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = CategoryStrategyEngine(
-                broker=FakeBroker(),
-                frame_func=lambda seed: trending_frame(),
-                state_path=os.path.join(tmp, "state.json"),
-                scan_interval_seconds=9999,
-            )
-            seed = next(
-                row for row in CATEGORY_MARKET_SEEDS
-                if row["key"] == "EURUSD"
-            )
-            result = engine._evaluate_seed(seed)
-            self.assertTrue(result["forming_candle_ignored"])
-            self.assertEqual(result["closed_candle_index_offset"], -2)
-            self.assertNotEqual(
-                result["closed_candle_timestamp"],
-                frame.index[-1].isoformat(),
-            )
+        frame = xau_frame()
+        result = self._engine(frame)._evaluate_seed(self._seed("GOLD"))
+        self.assertTrue(result["forming_candle_ignored"])
+        self.assertEqual(result["closed_candle_index_offset"], -2)
+        self.assertEqual(
+            result["closed_candle_timestamp"],
+            frame.index[-2].isoformat(),
+        )
+        self.assertNotEqual(
+            result["closed_candle_timestamp"],
+            frame.index[-1].isoformat(),
+        )
 
-    def test_no_ai_probability_cannot_pass_ai40(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = CategoryStrategyEngine(
-                broker=FakeBroker(),
-                frame_func=lambda seed: trending_frame().drop(columns=["UP_PROB"]),
-                state_path=os.path.join(tmp, "state.json"),
-            )
-            seed = next(
-                row for row in CATEGORY_MARKET_SEEDS
-                if row["key"] == "EURUSD"
-            )
-            result = engine._evaluate_seed(seed)
-            self.assertFalse(result["ai40_pass"])
-            self.assertFalse(result["standard_eligible"])
+    def test_non_gold_autonomous_entries_are_retired(self):
+        result = self._engine(xau_frame())._evaluate_seed(self._seed("EURUSD"))
+        self.assertEqual(result["strategy_id"], "RETIRED_ENTRY_STRATEGY")
+        self.assertEqual(result["direction"], "WAIT")
+        self.assertFalse(result["standard_eligible"])
+        self.assertIn("OLD_ENTRY_STRATEGY_RETIRED", result["rejection_reasons"])
 
-    def test_new_strategy_ids_are_versioned(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = CategoryStrategyEngine(
-                broker=FakeBroker(),
-                frame_func=lambda seed: trending_frame(),
-                state_path=os.path.join(tmp, "state.json"),
-            )
-            seed = next(
-                row for row in CATEGORY_MARKET_SEEDS
-                if row["key"] == "EURUSD"
-            )
-            result = engine._evaluate_seed(seed)
-            self.assertEqual(
-                result["strategy_id"],
-                "FX_CURRENT_CANDLE_REGIME_V3",
-            )
-            self.assertEqual(
-                result["strategy_selection_mode"],
-                "CURRENT_CLOSED_CANDLE_ONLY",
-            )
-            self.assertFalse(result["historical_execution_veto"])
+    def test_gold_uses_new_versioned_strategy(self):
+        result = self._engine(xau_frame())._evaluate_seed(self._seed("GOLD"))
+        self.assertEqual(result["strategy_id"], STRATEGY_ID)
+        self.assertEqual(
+            result["strategy_selection_mode"],
+            "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
+        )
+        self.assertEqual(
+            result["model_ai_confidence_source"],
+            "XAUUSD_RULE_CONFLUENCE_NOT_LEGACY_ML",
+        )
+        self.assertFalse(result["historical_execution_veto"])
+
+    def test_legacy_ml_probability_does_not_change_the_xau_setup(self):
+        low_ml = self._engine(xau_frame(up_prob=0.05))._evaluate_seed(
+            self._seed("GOLD")
+        )
+        high_ml = self._engine(xau_frame(up_prob=0.95))._evaluate_seed(
+            self._seed("GOLD")
+        )
+        self.assertEqual(low_ml["direction"], high_ml["direction"])
+        self.assertEqual(
+            low_ml["xauusd_strategy"]["selected_setup"]["checks"],
+            high_ml["xauusd_strategy"]["selected_setup"]["checks"],
+        )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, Optional
 
 
-VERSION = "v63-risk-exit-v1"
+VERSION = "v610-structural-risk-exit-v1"
 
 
 @dataclass(frozen=True)
@@ -83,6 +83,20 @@ def build_risk_plan(
     spread_multiplier = _env_float("CATEGORY_RISK_SPREAD_MULTIPLIER", 1.5, 0.0, 10.0)
     target_r = _env_float("CATEGORY_TAKE_PROFIT_R", 1.5, 0.25, 10.0)
 
+    strategy_id = str(candidate.get("strategy_id") or "").upper().strip()
+    structural_distance = _safe_float(
+        candidate.get("structural_stop_distance"),
+        0.0,
+    ) or 0.0
+    structural_target_r = _safe_float(candidate.get("target_r"), 0.0) or 0.0
+
+    if strategy_id.startswith("XAUUSD_LIQUIDITY_STRUCTURE"):
+        if structural_distance <= 0:
+            raise ValueError(
+                "XAUUSD liquidity/structure entry has no valid structural stop distance"
+            )
+        target_r = max(2.0, structural_target_r)
+
     median_abs_return_pct = _recent_absolute_return_pct(
         candidate.get("recent_returns") or []
     )
@@ -94,13 +108,26 @@ def build_risk_plan(
     ) or 0.0
     spread_pct = max(0.0, spread_bps * 0.01)
 
-    raw_stop_pct = (
-        median_abs_return_pct * vol_multiplier
-        + spread_pct * spread_multiplier
-    )
-    stop_pct = max(floor_pct, min(cap_pct, raw_stop_pct))
+    if strategy_id.startswith("XAUUSD_LIQUIDITY_STRUCTURE"):
+        stop_distance = structural_distance
+        stop_pct = stop_distance / entry * 100.0
+        source = (
+            "XAUUSD_STRUCTURE_INVALIDATION_PLUS_ATR_BUFFER"
+            f"_TARGET_{target_r:g}R"
+        )
+    else:
+        raw_stop_pct = (
+            median_abs_return_pct * vol_multiplier
+            + spread_pct * spread_multiplier
+        )
+        stop_pct = max(floor_pct, min(cap_pct, raw_stop_pct))
+        stop_distance = entry * stop_pct / 100.0
+        source = (
+            f"MEDIAN_ABS_RETURN_X{vol_multiplier:g}"
+            f"+SPREAD_X{spread_multiplier:g}"
+            f"_CLAMP_{floor_pct:g}_{cap_pct:g}_PCT"
+        )
 
-    stop_distance = entry * stop_pct / 100.0
     target_distance = stop_distance * target_r
 
     if clean_direction == "BUY":
@@ -112,12 +139,6 @@ def build_risk_plan(
 
     if stop_price <= 0 or target_price <= 0:
         raise ValueError("calculated risk levels are invalid")
-
-    source = (
-        f"MEDIAN_ABS_RETURN_X{vol_multiplier:g}"
-        f"+SPREAD_X{spread_multiplier:g}"
-        f"_CLAMP_{floor_pct:g}_{cap_pct:g}_PCT"
-    )
 
     return RiskPlan(
         version=VERSION,

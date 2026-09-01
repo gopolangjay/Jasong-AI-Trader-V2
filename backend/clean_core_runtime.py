@@ -15,7 +15,7 @@ from specialist_market_data import ResilientSpecialistMarketData
 from specialist_market_integration import install_specialist_market_system
 
 
-VERSION = "6.3-clean-core"
+VERSION = "6.10-xau-active"
 
 # The clean runtime owns only the current execution architecture.
 # Legacy paper/watcher/history/automanager modules are intentionally absent.
@@ -74,12 +74,12 @@ def _compound_candidates(_: float = 0.0) -> List[Dict[str, Any]]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jasong AI Trader V6.3 Clean Core API",
+        title="Jasong AI Trader V6.10 XAUUSD Active API",
         version=VERSION,
         description=(
-            "Clean runtime: specialist category intelligence, broker-settled "
-            "forward PRIME, controlled IG DEMO category execution, Elite "
-            "compound, MFE/MAE, mobile sync and ChatGPT diagnostics."
+            "Clean runtime: XAUUSD liquidity/structure execution on IG DEMO, "
+            "DST-aware London/New York sessions, structural risk sizing, "
+            "broker-settled evidence, MFE/MAE and diagnostics."
         ),
     )
 

@@ -22,7 +22,7 @@ bootstrap probability of positive expectancy: >= 75%
 max rolling drawdown: <= 6R
 All values can be changed with `FORWARD_*` environment variables.
 Provenance
-The current V6.9.3 specialist frame loader uses Yahoo Finance (`yfinance`) for public analysis data; the execution/preflight quote remains IG DEMO. The new registry records them separately and exposes missing/stale broker quotes instead of silently treating `UNAVAILABLE` as usable.
+The V6.10 XAUUSD strategy uses the resilient public-data path for Gold structure; the execution/preflight quote remains IG DEMO Spot Gold. Only the structural price distance is transferred to the fresh IG quote. The registry records the analysis and broker sources separately and exposes missing/stale broker quotes instead of silently treating `UNAVAILABLE` as usable.
 Key fields are `analysis_price_source`, `analysis_price_timestamp`, `broker_quote_source`, `broker_quote_timestamp`, `news_sources`, `news_timestamp`, `fallback_source`, `signal_age_seconds`, and `quote_age_seconds`.
 Learning
 `strategy_learning.py` only diagnoses recurring broker-settled mistakes. It does not rewrite a strategy after a single loss. Findings require repeated occurrences and include weak-trend entries, overextended RSI entries, stale signals/quotes, spread/slippage problems, entry timing and profit giveback.

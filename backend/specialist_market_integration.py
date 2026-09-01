@@ -218,12 +218,10 @@ def install_specialist_market_system(
         List[Any]
     ] = None,
 ) -> Dict[str, Any]:
-    """Install V6.9.4 specialist markets with resilient data acquisition.
+    """Install the active V6.10 XAUUSD execution architecture.
 
-    IMPORTANT:
-    The trading strategy is not modified here. The only new runtime replacement
-    is the raw OHLCV loader called underneath the existing specialist frame
-    function supplied by backend/main.py.
+    GOLD is the only autonomous-entry market. The former category strategies
+    remain visible for compatibility but cannot open new broker positions.
     """
     base_dir = (
         "/var/data"
@@ -329,7 +327,7 @@ def install_specialist_market_system(
             compound_engine
     )
 
-    # Existing V6.9.4 forward authority.
+    # Broker-settled forward evidence remains diagnostic/PRIME authority.
     intelligence.category_rankings = (
         forward_prime.category_rankings
     )
@@ -378,7 +376,7 @@ def install_specialist_market_system(
             intelligence.correlation_matrix
         )
 
-    # Existing controlled STRONG -> IG DEMO learning lane.
+    # Active qualifying XAUUSD setups execute directly on IG DEMO.
     portfolio = CategoryExecutionEngine(
         broker=broker,
         ranking_source=
@@ -427,14 +425,13 @@ def install_specialist_market_system(
     mobile_sync.start_thread()
 
     app.title = (
-        "Jasong AI Trader V6.9.4 Forward API"
+        "Jasong AI Trader V6.10 XAUUSD Active API"
     )
-    app.version = "6.9.4-forward"
+    app.version = "6.10-xau-active"
     app.description = (
-        "Jasong AI Trader — specialist market intelligence, "
-        "broker-settled forward PRIME validation, controlled "
-        "IG DEMO learning, adaptive 80/20 compound, resilient "
-        "market-data acquisition, and authenticated ChatGPT diagnostics."
+        "Jasong AI Trader — active IG DEMO XAUUSD liquidity/structure "
+        "execution during DST-aware London/New York sessions, structural "
+        "risk sizing, broker-settled evidence, and diagnostics."
     )
     app.openapi_schema = None
 
@@ -473,7 +470,7 @@ def install_specialist_market_system(
                 "/chatgpt-mcp/status",
                 lambda: {
                     "version":
-                        "6.9.4-forward",
+                        "6.10-xau-active",
                     "enabled": True,
                     "installed": False,
                     "runtime_ready": False,
@@ -538,7 +535,7 @@ def install_specialist_market_system(
     ]:
         return {
             "version":
-                "6.9.4-forward",
+                "6.10-xau-active",
             "categories": {
                 category:
                     intelligence.universe(
@@ -609,7 +606,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.9.4-forward",
+                    "6.10-xau-active",
                 "category":
                     clean,
                 "count":
@@ -639,7 +636,7 @@ def install_specialist_market_system(
 
         return {
             "version":
-                "6.9.4-forward",
+                "6.10-xau-active",
             "category":
                 clean,
             "count":
@@ -698,7 +695,7 @@ def install_specialist_market_system(
         )
         return {
             "version":
-                "6.9.4-forward",
+                "6.10-xau-active",
             "count":
                 len(rows),
             "candidates":
@@ -751,7 +748,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.9.4-forward",
+                    "6.10-xau-active",
                 "error":
                     "Unknown category",
                 "category":
@@ -787,7 +784,7 @@ def install_specialist_market_system(
         "/category-portfolio/positions",
         lambda: {
             "version":
-                "6.9.4-forward",
+                "6.10-xau-active",
             "positions":
                 portfolio.positions(),
             "live_money_execution":
@@ -860,5 +857,5 @@ def install_specialist_market_system(
         "mobile_sync":
             mobile_sync,
         "version":
-            "6.9.4-forward",
+            "6.10-xau-active",
     }

@@ -1,4 +1,4 @@
-"""V6.3 Clean Core import/startup smoke test.
+"""V6.10 XAUUSD Active Clean Core import/startup smoke test.
 
 Run from backend/:
     python clean_core_smoke.py
@@ -50,7 +50,7 @@ missing = sorted(required - paths)
 if missing:
     raise AssertionError("Missing clean-core routes: " + ", ".join(missing))
 
-print("V6.3 CLEAN CORE SMOKE PASS")
+print("V6.10 XAUUSD ACTIVE CLEAN CORE SMOKE PASS")
 print("routes:", len(paths))
 print("broker:", runtime.IG_DEMO_BROKER.status().get("environment"))
 print("live_money_execution: False")
