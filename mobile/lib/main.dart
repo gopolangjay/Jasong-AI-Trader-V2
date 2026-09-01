@@ -97,7 +97,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   final TextEditingController symbol =
       TextEditingController(
-    text: 'EURUSD=X',
+    text: 'GC=F',
   );
 
   final TextEditingController balance =
@@ -160,9 +160,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
-  // V6.8.1 / V6.9.4 market intelligence bridge.
+  // V6.10 XAUUSD liquidity-structure intelligence bridge.
   // The original mobile surface is preserved. These fields only add the
-  // broker-settled forward/category views exposed by the V6.9.4 backend.
+  // active Gold/category views exposed by the V6.10 backend.
   Map<String, dynamic>? globalMarketsStatus;
   List<Map<String, dynamic>> globalMarketCandidates = [];
   bool globalMarketsBusy = false;
@@ -1554,7 +1554,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     globalMarketsBusy = true;
 
     try {
-      // V6.9.4 source of truth. Keep these requests sequential so the phone
+      // V6.10 source of truth. Keep these requests sequential so the phone
       // cannot create a burst against Render while specialist analysis runs.
       final status = await getJson(
         Uri.parse('$apiBase/market-categories/status'),
@@ -1568,12 +1568,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
 
       const categories = <String>[
-        'FOREX',
-        'INDICES',
-        'CRYPTO',
         'METALS',
-        'ENERGY',
-        'SHARES',
       ];
 
       final rows = <Map<String, dynamic>>[];
@@ -2571,7 +2566,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     autoDashboardRefreshBusy = true;
 
     try {
-      // Legacy/diagnostic surfaces refresh less often. V6.9.4 markets,
+      // Legacy/diagnostic surfaces refresh less often. V6.10 Gold status,
       // forward evidence and trades are kept current by /mobile/sync.
       await loadAutoDashboard();
       await loadSystemOverview();
@@ -5345,15 +5340,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: watcherCard(w),
                 )),
           const SizedBox(height: 10),
-          sectionTitle('V6.5 learning policy'),
+          sectionTitle('V6.10 XAUUSD policy'),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Normal forward path', '≥ 30%', 'Verified + live direction agrees'),
+                _MidnightRuleRow('Structure', 'H4 / H1 / M15', 'Completed candles only'),
                 Divider(height: 24),
-                _MidnightRuleRow('AI forward path', '≥ 40%', 'AI approves + direction agrees'),
+                _MidnightRuleRow('Sessions', 'London / New York', '08:00-17:00 local • DST-aware'),
                 Divider(height: 24),
-                _MidnightRuleRow('Legacy 67% gate', 'OFF', 'Shadow-risk learning remains active'),
+                _MidnightRuleRow('Risk', '≤1% / ≥2R', 'Gold only • max 2 entries per SAST day'),
               ],
             ),
           ),
@@ -7583,9 +7578,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
 
     // =========================================================
-    // V6.9.4 FORWARD UI — original full mobile surface preserved
+    // V6.10 XAUUSD ACTIVE UI — original full mobile surface preserved
     // Visual contract follows the supplied six-screen reference:
-    // Home • Markets • Compound • Trades • AI • Settings.
+    // Home • Markets • Risk • Trades • AI • Settings.
     // All values below remain live API-backed; no demo values are fabricated.
     // =========================================================
 
@@ -7790,17 +7785,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     const SizedBox(width: 7),
                     templateTinyPill(systemGood ? 'ALL SYSTEMS GO' : 'CHECKING', color: systemGood ? templateGreen : templateAmber),
                     const Spacer(),
-                    const Text('V6.9.4-forward', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
+                    const Text('V6.10 XAU ACTIVE', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
                   ],
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  autoOn ? 'ADAPTIVE STRATEGY ACTIVE' : 'ADAPTIVE STRATEGY PAUSED',
+                  autoOn ? 'XAUUSD STRATEGY ACTIVE' : 'XAUUSD STRATEGY CHECKING',
                   style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, letterSpacing: .2),
                 ),
                 const SizedBox(height: 5),
                 Text(
-                  '15s opportunity assessment cycle',
+                  'H4 / H1 / M15 closed-candle assessment',
                   style: const TextStyle(color: Colors.white60, fontSize: 11),
                 ),
                 const SizedBox(height: 16),
@@ -7913,11 +7908,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
         children: [
           Row(children: const [
-            Expanded(child: Text('GLOBAL OPPORTUNITIES', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900))),
-            Text('V6.9.4-forward', style: TextStyle(color: Colors.white54, fontSize: 9)),
+            Expanded(child: Text('XAUUSD EXECUTION', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900))),
+            Text('V6.10 XAU ACTIVE', style: TextStyle(color: Colors.white54, fontSize: 9)),
           ]),
           const SizedBox(height: 3),
-          const Text('Live market intelligence • Assessed every 15s', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const Text('Gold liquidity structure • H4 / H1 / M15 • closed candles', style: TextStyle(color: Colors.white54, fontSize: 10)),
           const SizedBox(height: 12),
           templateCard(
             padding: const EdgeInsets.all(8),
@@ -8063,7 +8058,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Icon(Icons.autorenew_rounded, color: templateTeal),
                 const SizedBox(width: 9),
                 const Expanded(child: Text('ELITE 80/20 COMPOUND', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900))),
-                const Text('V6.9.4-forward', style: TextStyle(color: Colors.white54, fontSize: 9)),
+                const Text('V6.10 XAU ACTIVE', style: TextStyle(color: Colors.white54, fontSize: 9)),
               ]),
               const SizedBox(height: 8),
               templateTinyPill(compoundStatus.replaceAll('_', ' '), color: compoundEnabled ? templateGreen : templateAmber),
@@ -8443,7 +8438,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'FORWARD PRIME GATES (V6.9.4)',
+                  'FORWARD EVIDENCE (V6.10)',
                   style: TextStyle(
                     color: templateTeal,
                     fontSize: 9,
@@ -8562,7 +8557,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const SizedBox(height: 15),
               const Text('SYSTEM INFO', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
               const SizedBox(height: 8),
-              const _MidnightSystemRow('Version', 'V6.9.4-forward'),
+              const _MidnightSystemRow('Version', 'V6.10 XAU ACTIVE'),
               const Divider(height: 18, color: Colors.white10),
               const _MidnightSystemRow('Environment', 'DEMO ONLY'),
               const Divider(height: 18, color: Colors.white10),
@@ -8587,10 +8582,128 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       );
     }
 
+    Widget templateRiskPage() {
+      final status = categoryPortfolioStatus ?? <String, dynamic>{};
+      final engineEnabled = status['enabled'] == true;
+      final demoOnly = status['execution_mode'] == 'IG_DEMO_ONLY' &&
+          status['live_money_execution'] == false;
+      final retired = status['old_entry_strategies_retired'] == true;
+      final riskPct = status['risk_per_trade_pct'] ?? 1;
+      final dailyMax = status['max_daily_entries_south_africa'] ?? 2;
+      final entriesToday = status['entries_today_south_africa'] ?? 0;
+      final minimumR = status['minimum_target_r'] ?? 2;
+
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 105),
+        children: [
+          const Text(
+            'XAUUSD RISK & EXECUTION',
+            style: TextStyle(
+              color: templateTeal,
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 3),
+          const Text(
+            'Server-controlled execution • monitoring controls are read-only',
+            style: TextStyle(color: Colors.white54, fontSize: 10),
+          ),
+          const SizedBox(height: 12),
+          templateCard(
+            borderColor: demoOnly && engineEnabled && retired
+                ? templateGreen
+                : templateAmber,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.shield_outlined,
+                      color: templateTeal,
+                    ),
+                    const SizedBox(width: 9),
+                    const Expanded(
+                      child: Text(
+                        'ACTIVE SAFETY POLICY',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    templateTinyPill(
+                      demoOnly && engineEnabled && retired
+                          ? 'SAFE'
+                          : 'CHECK',
+                      color: demoOnly && engineEnabled && retired
+                          ? templateGreen
+                          : templateAmber,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                _MidnightSystemRow(
+                  'Environment',
+                  '${status['execution_mode'] ?? 'IG_DEMO_ONLY'}',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'Active strategy',
+                  '${status['active_strategy'] ?? 'XAUUSD_LIQUIDITY_STRUCTURE_V1'}',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'Active market',
+                  '${status['active_symbol'] ?? 'GOLD'} only',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow('Risk per trade', '$riskPct% maximum'),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'Daily entries (SAST)',
+                  '$entriesToday / $dailyMax',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow('Minimum target', '${minimumR}R'),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'London / New York',
+                  '${status['session_policy'] ?? '08:00-17:00 local, DST-aware'}',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'Live money',
+                  demoOnly ? 'DISABLED' : 'CHECK REQUIRED',
+                ),
+                const Divider(height: 18, color: Colors.white10),
+                _MidnightSystemRow(
+                  'Old entry strategies',
+                  retired ? 'RETIRED' : 'CHECK REQUIRED',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          templateCard(
+            child: const Text(
+              'The Android app does not place manual orders. The deployed server opens an IG DEMO Gold trade only after every H4/H1/M15 liquidity-structure condition and broker risk gate passes.',
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 10.5,
+                height: 1.5,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
     final pages = <Widget>[
       templateHomePage(),
       marketsPage(),
-      templateCompoundPage(),
+      templateRiskPage(),
       templateTradesPage(),
       templateAiPage(),
       templateSettingsPage(),
@@ -8619,7 +8732,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.9.4-forward • Broker-Settled Intelligence • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
+                  Text('V6.10 XAUUSD Liquidity Structure • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
                 ],
               ),
             ),
@@ -8666,7 +8779,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home_rounded), label: 'Home'),
           NavigationDestination(icon: Icon(Icons.radar_outlined), selectedIcon: Icon(Icons.radar_rounded), label: 'Markets'),
-          NavigationDestination(icon: Icon(Icons.dashboard_customize_outlined), selectedIcon: Icon(Icons.dashboard_customize_rounded), label: 'Compound'),
+          NavigationDestination(icon: Icon(Icons.shield_outlined), selectedIcon: Icon(Icons.shield_rounded), label: 'Risk'),
           NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long_rounded), label: 'Trades'),
           NavigationDestination(icon: Icon(Icons.psychology_alt_outlined), selectedIcon: Icon(Icons.psychology_alt_rounded), label: 'AI'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings_rounded), label: 'Settings'),

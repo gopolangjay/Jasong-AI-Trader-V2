@@ -17,8 +17,8 @@ class MobileSyncCache:
     never serially on Android resume.
     """
 
-    VERSION = "6.9.4-mobile-sync"
-    CATEGORIES = ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES")
+    VERSION = "6.10-xau-mobile-sync"
+    CATEGORIES = ("METALS",)
 
     def __init__(
         self,
@@ -105,51 +105,16 @@ class MobileSyncCache:
         positions: List[Dict[str, Any]],
         excursions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        open_rows = [
-            row
-            for row in positions
-            if str(row.get("status") or "").upper() == "OPEN"
-        ]
-        by_category: Dict[str, int] = {}
-        for row in open_rows:
-            cat = str(row.get("category") or "UNKNOWN").upper()
-            by_category[cat] = by_category.get(cat, 0) + 1
-        broker_open = [
-            row
-            for row in excursions
-            if str(row.get("status") or "").upper() == "OPEN"
-        ]
-        non_category = [
-            row
-            for row in broker_open
-            if not str(row.get("deal_reference") or "").upper().startswith("JSCAT_")
-        ]
-        state = getattr(self.portfolio, "_state", {})
-        return {
-            "version": getattr(self.portfolio, "VERSION", "6.9.4"),
-            "name": "JASONG CATEGORY PORTFOLIO",
-            "enabled": bool(getattr(self.portfolio, "enabled", True)),
-            "execution_mode": "IG_DEMO_ONLY",
-            "deal_prefix": getattr(self.portfolio, "DEAL_PREFIX", "JSCAT_"),
-            "open_positions": len(open_rows),
-            "open_by_category": by_category,
-            "max_open_positions": int(getattr(self.portfolio, "max_open_positions", 12)),
-            "global_ig_max_positions": int(getattr(self.portfolio, "global_ig_max_positions", 15)),
-            "external_open_positions": len(non_category),
-            "combined_open_positions": len(open_rows) + len(non_category),
-            "global_remaining_positions": max(
-                0,
-                int(getattr(self.portfolio, "global_ig_max_positions", 15))
-                - len(open_rows)
-                - len(non_category),
-            ),
-            "opens": int((state or {}).get("opens") or 0),
-            "closes": int((state or {}).get("closes") or 0),
-            "last_tick_at": (state or {}).get("last_tick_at"),
-            "last_error": (state or {}).get("last_error"),
-            "status_source": "CACHED_INTERNAL_STATE",
-            "live_money_execution": False,
-        }
+        del positions, excursions
+        try:
+            status = self._safe_copy(self.portfolio.status(), {})
+        except Exception:
+            status = {}
+        if not isinstance(status, dict):
+            status = {}
+        status["status_source"] = "CACHED_INTERNAL_STATE"
+        status["live_money_execution"] = False
+        return status
 
     def _compound_cached_status(self) -> Dict[str, Any]:
         lock = getattr(self.compound_engine, "_lock", None)
