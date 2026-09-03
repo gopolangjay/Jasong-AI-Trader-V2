@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from forex_liquidity_lines_strategy import (
+    LIQUID_FOREX_PAIRS,
+    STRATEGY_ID as FX_STRATEGY_ID,
+)
 from risk_exit_policy import build_risk_plan
+from xauusd_liquidity_strategy import STRATEGY_ID as XAU_STRATEGY_ID
 
 
 class RiskSizingError(RuntimeError):
@@ -21,10 +26,10 @@ class RiskSizingError(RuntimeError):
 class CategoryExecutionEngine:
     """Independent IG DEMO standard-category portfolio executor."""
 
-    VERSION = "6.10-xau-active-execution-v1"
+    VERSION = "6.11-fx-xau-active-execution-v1"
     DEAL_PREFIX = "JSCAT_"
-    ACTIVE_STRATEGY_PREFIX = "XAUUSD_LIQUIDITY_STRUCTURE"
-    ACTIVE_SYMBOL = "GOLD"
+    ACTIVE_STRATEGY_IDS = (XAU_STRATEGY_ID, FX_STRATEGY_ID)
+    ACTIVE_SYMBOLS = ("GOLD", *LIQUID_FOREX_PAIRS)
 
     def __init__(
         self,
@@ -49,11 +54,27 @@ class CategoryExecutionEngine:
         self.default_size = max(0.0001, float(os.getenv("CATEGORY_DEFAULT_SIZE", "0.5")))
         self.risk_per_trade_pct = max(
             0.10,
-            min(1.00, float(os.getenv("XAU_RISK_PER_TRADE_PCT", "1.0"))),
+            min(
+                1.00,
+                float(
+                    os.getenv(
+                        "CATEGORY_RISK_PER_TRADE_PCT",
+                        os.getenv("XAU_RISK_PER_TRADE_PCT", "1.0"),
+                    )
+                ),
+            ),
         )
         self.max_daily_entries = max(
             1,
             min(2, int(os.getenv("XAU_MAX_DAILY_ENTRIES", "2"))),
+        )
+        self.max_daily_fx_entries = max(
+            1,
+            min(12, int(os.getenv("FOREX_MAX_DAILY_ENTRIES", "4"))),
+        )
+        self.max_daily_fx_entries_per_pair = max(
+            1,
+            min(3, int(os.getenv("FOREX_MAX_DAILY_ENTRIES_PER_PAIR", "1"))),
         )
         self._sast = ZoneInfo("Africa/Johannesburg")
         self._lock = threading.RLock()
@@ -221,18 +242,29 @@ class CategoryExecutionEngine:
     def _is_active_strategy(self, candidate: Dict[str, Any]) -> bool:
         strategy = str(candidate.get("strategy_id") or "").upper().strip()
         symbol = str(candidate.get("symbol") or candidate.get("key") or "").upper().strip()
-        return (
-            strategy.startswith(self.ACTIVE_STRATEGY_PREFIX)
-            and symbol == self.ACTIVE_SYMBOL
+        category = str(candidate.get("category") or "").upper().strip()
+        return bool(
+            (
+                strategy == XAU_STRATEGY_ID
+                and symbol == "GOLD"
+                and category == "METALS"
+            )
+            or (
+                strategy == FX_STRATEGY_ID
+                and symbol in LIQUID_FOREX_PAIRS
+                and category == "FOREX"
+            )
         )
 
-    def _opened_today_sast(self) -> int:
+    def _opened_today_sast(self, category: Optional[str] = None) -> int:
         today = datetime.now(tz=self._sast).date()
+        wanted_category = str(category or "").upper().strip()
         count = 0
         for row in self._state.setdefault("positions", []):
-            if not str(row.get("strategy_id") or "").upper().startswith(
-                self.ACTIVE_STRATEGY_PREFIX
-            ):
+            strategy = str(row.get("strategy_id") or "").upper()
+            if strategy not in self.ACTIVE_STRATEGY_IDS:
+                continue
+            if wanted_category and str(row.get("category") or "").upper() != wanted_category:
                 continue
             opened_at = float(row.get("opened_at") or 0.0)
             if opened_at <= 0:
@@ -240,6 +272,19 @@ class CategoryExecutionEngine:
             if datetime.fromtimestamp(opened_at, tz=self._sast).date() == today:
                 count += 1
         return count
+
+    def _opened_symbol_today_sast(self, symbol: str) -> int:
+        today = datetime.now(tz=self._sast).date()
+        wanted = str(symbol or "").upper().strip()
+        return sum(
+            1
+            for row in self._state.setdefault("positions", [])
+            if str(row.get("symbol") or "").upper().strip() == wanted
+            and float(row.get("opened_at") or 0.0) > 0
+            and datetime.fromtimestamp(
+                float(row.get("opened_at")), tz=self._sast
+            ).date() == today
+        )
 
     def _account_for_risk(self) -> Dict[str, Any]:
         payload = self.broker.accounts() or {}
@@ -374,7 +419,7 @@ class CategoryExecutionEngine:
         if size + 1e-12 < min_size or size <= 0:
             minimum_risk = risk_per_size * min_size
             raise RiskSizingError(
-                "IG minimum size would exceed the 1% XAUUSD risk budget "
+                "IG minimum size would exceed the configured per-trade risk budget "
                 f"(budget {risk_cash:.2f} {account['currency']}; "
                 f"minimum-size risk {minimum_risk:.2f} {account['currency']})"
             )
@@ -382,7 +427,7 @@ class CategoryExecutionEngine:
         estimated_risk = risk_per_size * size
         if estimated_risk > risk_cash * 1.001:
             raise RiskSizingError(
-                "Rounded IG size exceeds the configured XAUUSD risk budget"
+                "Rounded IG size exceeds the configured per-trade risk budget"
             )
 
         return {
@@ -401,21 +446,27 @@ class CategoryExecutionEngine:
 
     def _may_open(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> tuple[bool, str]:
         if not self._is_active_strategy(candidate):
-            return False, "old autonomous entry strategy is retired; GOLD XAUUSD only"
+            return False, "old autonomous entry strategy is retired; only FX liquidity-lines and XAUUSD liquidity-structure are active"
         if not candidate.get("standard_eligible"):
             return False, "not standard eligible"
         if candidate.get("session_active") is not True:
-            return False, "outside London/New York execution session"
+            return False, "outside the market's approved geographic execution session"
         setup_id = str(candidate.get("setup_id") or "").strip()
         if not setup_id:
-            return False, "XAUUSD setup has no deterministic setup ID"
-        if self._opened_today_sast() >= self.max_daily_entries:
-            return False, "South Africa daily XAUUSD entry cap reached"
+            return False, "liquidity/structure setup has no deterministic setup ID"
+        category = str(candidate.get("category") or "").upper()
+        symbol = str(candidate.get("symbol") or "").upper()
+        daily_cap = self.max_daily_fx_entries if category == "FOREX" else self.max_daily_entries
+        if self._opened_today_sast(category) >= daily_cap:
+            return False, f"South Africa daily {category} entry cap reached"
+        if (
+            category == "FOREX"
+            and self._opened_symbol_today_sast(symbol) >= self.max_daily_fx_entries_per_pair
+        ):
+            return False, f"South Africa daily {symbol} entry cap reached"
         epic = str(candidate.get("ig_epic") or "").strip()
         if not epic:
             return False, "no IG EPIC"
-        category = str(candidate.get("category") or "").upper()
-        symbol = str(candidate.get("symbol") or "").upper()
         open_rows = self._open_positions()
         if len(open_rows) >= self.max_open_positions:
             return False, "category portfolio position cap reached"
@@ -427,14 +478,14 @@ class CategoryExecutionEngine:
             str(row.get("symbol") or "").upper() == symbol
             for row in open_rows
         ):
-            return False, "an XAUUSD position is already open"
+            return False, f"a {symbol} position is already open"
         if any(
             str(row.get("setup_id") or "") == setup_id
             for row in self._state.setdefault("positions", [])
         ):
-            return False, "this XAUUSD sweep/structure setup was already traded"
+            return False, "this liquidity/structure setup was already traded"
         if self._broker_has_open_epic(epic):
-            return False, "an account-wide XAUUSD position is already open"
+            return False, f"an account-wide {symbol} position is already open"
         if self._epic_track_count(epic, external) >= self.max_tracks_per_epic:
             return False, "combined category/compound EPIC exposure cap reached"
         theme_counts = self._theme_counts(external)
@@ -454,7 +505,7 @@ class CategoryExecutionEngine:
             sizing = self._risk_sized_order(candidate)
         except RiskSizingError as exc:
             self._journal(
-                "XAU_RISK_SIZE_REJECTED",
+                "CATEGORY_RISK_SIZE_REJECTED",
                 symbol=candidate.get("symbol"),
                 setup_id=candidate.get("setup_id"),
                 reason=str(exc),
@@ -484,7 +535,7 @@ class CategoryExecutionEngine:
                 self.broker.close_position(str(deal_id))
             finally:
                 raise RuntimeError(
-                    "IG DEMO opened XAUUSD without an entry level; position was closed immediately"
+                    "IG DEMO opened a category position without an entry level; position was closed immediately"
                 )
 
         actual_size = float(result.get("size") or 0.0)
@@ -493,7 +544,7 @@ class CategoryExecutionEngine:
                 self.broker.close_position(str(deal_id))
             finally:
                 raise RuntimeError(
-                    "IG DEMO changed the risk-sized XAUUSD order upward; "
+                    "IG DEMO changed the risk-sized category order upward; "
                     "the position was closed immediately"
                 )
 
@@ -514,7 +565,7 @@ class CategoryExecutionEngine:
                 self.broker.close_position(str(deal_id))
             finally:
                 raise RuntimeError(
-                    "XAUUSD structural risk plan failed after entry; "
+                    "Structural risk plan failed after entry; "
                     "the IG DEMO position was closed immediately"
                 ) from exc
 
@@ -778,15 +829,28 @@ class CategoryExecutionEngine:
             "enabled": self.enabled,
             "execution_mode": "IG_DEMO_ONLY",
             "deal_prefix": self.DEAL_PREFIX,
-            "active_strategy": "XAUUSD_LIQUIDITY_STRUCTURE_V1",
-            "active_symbol": self.ACTIVE_SYMBOL,
+            "active_strategy": f"{FX_STRATEGY_ID} + {XAU_STRATEGY_ID}",
+            "active_strategies": [
+                FX_STRATEGY_ID,
+                XAU_STRATEGY_ID,
+            ],
+            "active_symbol": "28_LIQUID_FX_PAIRS + GOLD",
+            "active_symbols": list(self.ACTIVE_SYMBOLS),
+            "active_categories": ["FOREX", "METALS"],
             "old_entry_strategies_retired": True,
             "risk_policy": "STRUCTURAL_STOP_PLUS_ACCOUNT_PERCENT_RISK",
             "risk_per_trade_pct": self.risk_per_trade_pct,
-            "max_daily_entries_south_africa": self.max_daily_entries,
-            "entries_today_south_africa": self._opened_today_sast(),
+            "max_daily_entries_south_africa": {
+                "METALS": self.max_daily_entries,
+                "FOREX": self.max_daily_fx_entries,
+                "FOREX_PER_PAIR": self.max_daily_fx_entries_per_pair,
+            },
+            "entries_today_south_africa": {
+                "METALS": self._opened_today_sast("METALS"),
+                "FOREX": self._opened_today_sast("FOREX"),
+            },
             "session_policy": (
-                "London or New York 08:00-17:00 local, daylight-saving aware"
+                "FX pair geography uses London/New York/Tokyo/Sydney; Gold uses London/New York; DST-aware"
             ),
             "minimum_target_r": 2.0,
             "open_positions": len(open_rows),

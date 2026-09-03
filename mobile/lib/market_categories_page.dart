@@ -28,12 +28,13 @@ class _MarketCategoriesPageState
   static const _purple = Color(0xFFB899FF);
 
   static const categories = <String>[
+    'FOREX',
     'METALS',
   ];
 
   final http.Client _client = http.Client();
 
-  String selected = 'METALS';
+  String selected = 'FOREX';
   List<Map<String, dynamic>> selections = [];
   Map<String, List<Map<String, dynamic>>> cachedRankings = {};
   Map<String, dynamic> portfolioStatus = {};

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, Optional
 
 
-VERSION = "v610-structural-risk-exit-v1"
+VERSION = "v611-fx-xau-structural-risk-exit-v1"
 
 
 @dataclass(frozen=True)
@@ -90,10 +90,13 @@ def build_risk_plan(
     ) or 0.0
     structural_target_r = _safe_float(candidate.get("target_r"), 0.0) or 0.0
 
-    if strategy_id.startswith("XAUUSD_LIQUIDITY_STRUCTURE"):
+    structural_strategy = strategy_id.startswith(
+        ("XAUUSD_LIQUIDITY_STRUCTURE", "FX_LIQUIDITY_LINES")
+    )
+    if structural_strategy:
         if structural_distance <= 0:
             raise ValueError(
-                "XAUUSD liquidity/structure entry has no valid structural stop distance"
+                "Liquidity/structure entry has no valid structural stop distance"
             )
         target_r = max(2.0, structural_target_r)
 
@@ -108,11 +111,11 @@ def build_risk_plan(
     ) or 0.0
     spread_pct = max(0.0, spread_bps * 0.01)
 
-    if strategy_id.startswith("XAUUSD_LIQUIDITY_STRUCTURE"):
+    if structural_strategy:
         stop_distance = structural_distance
         stop_pct = stop_distance / entry * 100.0
         source = (
-            "XAUUSD_STRUCTURE_INVALIDATION_PLUS_ATR_BUFFER"
+            "LIQUIDITY_STRUCTURE_INVALIDATION_PLUS_ATR_BUFFER"
             f"_TARGET_{target_r:g}R"
         )
     else:

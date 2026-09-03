@@ -15,7 +15,7 @@ from specialist_market_data import ResilientSpecialistMarketData
 from specialist_market_integration import install_specialist_market_system
 
 
-VERSION = "6.10-xau-active"
+VERSION = "6.11-fx-xau-active"
 
 # The clean runtime owns only the current execution architecture.
 # Legacy paper/watcher/history/automanager modules are intentionally absent.
@@ -74,12 +74,12 @@ def _compound_candidates(_: float = 0.0) -> List[Dict[str, Any]]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jasong AI Trader V6.10 XAUUSD Active API",
+        title="Jasong AI Trader V6.11 FX + XAUUSD Active API",
         version=VERSION,
         description=(
-            "Clean runtime: XAUUSD liquidity/structure execution on IG DEMO, "
-            "DST-aware London/New York sessions, structural risk sizing, "
-            "broker-settled evidence, MFE/MAE and diagnostics."
+            "Clean runtime: FX liquidity/lines and XAUUSD liquidity/structure "
+            "execution on IG DEMO, geography-aware DST sessions, structural "
+            "risk sizing, broker-settled evidence, MFE/MAE and diagnostics."
         ),
     )
 

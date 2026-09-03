@@ -10,6 +10,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
+from forex_liquidity_lines_strategy import (
+    LIQUID_FOREX_PAIRS,
+    STRATEGY_ID as FOREX_STRATEGY_ID,
+    STRATEGY_NAME as FOREX_STRATEGY_NAME,
+    VERSION as FOREX_STRATEGY_VERSION,
+    analyze_forex,
+)
 from xauusd_liquidity_strategy import (
     STRATEGY_ID as XAUUSD_STRATEGY_ID,
     STRATEGY_NAME as XAUUSD_STRATEGY_NAME,
@@ -20,24 +27,26 @@ from xauusd_liquidity_strategy import (
 
 # ============================================================================
 # JASONG AI TRADER V6.3 CLEAN CORE
-# ACTIVE XAUUSD LIQUIDITY / MARKET-STRUCTURE STRATEGY
+# ACTIVE FX + XAUUSD LIQUIDITY / MARKET-STRUCTURE STRATEGIES
 # ============================================================================
 #
 # EXECUTION AUTHORITY:
 #   H4 STRUCTURE -> PREMIUM/DISCOUNT -> M15 LIQUIDITY SWEEP -> H1/M15
 #   BOS/CHoCH -> OB/FVG RETEST -> CLOSED-CANDLE CONFIRMATION -> >=2R ROOM
-#   -> LONDON/NEW YORK SESSION -> IG TRADEABILITY/SPREAD -> IG DEMO ENTRY.
+#   -> PAIR-RELEVANT LONDON/NEW YORK/TOKYO/SYDNEY SESSION
+#   -> IG TRADEABILITY/SPREAD -> IG DEMO ENTRY.
 #
-# The former 40-market EMA/ADX/range entry router is retired from autonomous
-# execution. Its markets remain visible in the catalogue, while GOLD is the only
-# active entry market supported by the newly supplied XAUUSD course.
+# The former EMA/ADX/range entry router is retired from autonomous execution.
+# The active universe is Gold plus the 28 liquid combinations of the eight major
+# currencies. Exotics remain analysis-only because the supplied material marks
+# their spreads and volatility as unsuitable for this setup.
 #
 # A strategy ID is versioned when its live rules materially change. This prevents
 # old broker evidence from being silently mixed with a new strategy definition.
 # ============================================================================
 
-VERSION = "6.10-xau-liquidity-structure-active-v1"
-EVIDENCE_SCHEMA_VERSION = 5
+VERSION = "6.11-fx-xau-liquidity-active-v1"
+EVIDENCE_SCHEMA_VERSION = 6
 
 QUANT_MIN_CONFIDENCE = 0.28
 MODEL_AI_MIN_CONFIDENCE = 0.40
@@ -68,9 +77,9 @@ CATEGORY_ORDER = (
 
 CATEGORY_RULES: Dict[str, Dict[str, Any]] = {
     "FOREX": {
-        "strategy_id": "FX_CURRENT_CANDLE_REGIME_V3",
-        "strategy_name": "FX Current-Candle Trend / Range Router",
-        "holding_bars": 4,
+        "strategy_id": FOREX_STRATEGY_ID,
+        "strategy_name": FOREX_STRATEGY_NAME,
+        "holding_bars": 48,
         "spread_gate_bps": 8.0,
         "min_atr_pct": 0.010,
         "max_atr_q95_multiplier": 1.40,
@@ -170,9 +179,9 @@ def _seed(
     }
 
 
-# Preserve the existing 40-market universe exactly.
+# Preserve the original catalogue and add every liquid major-currency pair.
 CATEGORY_MARKET_SEEDS: List[Dict[str, Any]] = [
-    # FOREX (9)
+    # FOREX (28)
     _seed("EURUSD", "EUR/USD", "FOREX", "EURUSD=X", ig_search_terms=["EUR/USD"], expected_types=["CURRENCIES"], name_tokens=["EUR", "USD"], exposure_tags=["EUR", "USD", "FX_MAJOR"], ig_symbol="EUR/USD"),
     _seed("GBPUSD", "GBP/USD", "FOREX", "GBPUSD=X", ig_search_terms=["GBP/USD"], expected_types=["CURRENCIES"], name_tokens=["GBP", "USD"], exposure_tags=["GBP", "USD", "FX_MAJOR"], ig_symbol="GBP/USD"),
     _seed("USDJPY", "USD/JPY", "FOREX", "USDJPY=X", ig_search_terms=["USD/JPY"], expected_types=["CURRENCIES"], name_tokens=["USD", "JPY"], exposure_tags=["USD", "JPY", "FX_MAJOR"], ig_symbol="USD/JPY"),
@@ -182,6 +191,25 @@ CATEGORY_MARKET_SEEDS: List[Dict[str, Any]] = [
     _seed("USDCHF", "USD/CHF", "FOREX", "CHF=X", ig_search_terms=["USD/CHF"], expected_types=["CURRENCIES"], name_tokens=["USD", "CHF"], exposure_tags=["USD", "CHF", "FX_MAJOR"], ig_symbol="USD/CHF"),
     _seed("EURJPY", "EUR/JPY", "FOREX", "EURJPY=X", ig_search_terms=["EUR/JPY"], expected_types=["CURRENCIES"], name_tokens=["EUR", "JPY"], exposure_tags=["EUR", "JPY", "FX_CROSS"], ig_symbol="EUR/JPY"),
     _seed("GBPJPY", "GBP/JPY", "FOREX", "GBPJPY=X", ig_search_terms=["GBP/JPY"], expected_types=["CURRENCIES"], name_tokens=["GBP", "JPY"], exposure_tags=["GBP", "JPY", "FX_CROSS"], ig_symbol="GBP/JPY"),
+    _seed("EURGBP", "EUR/GBP", "FOREX", "EURGBP=X", ig_search_terms=["EUR/GBP"], expected_types=["CURRENCIES"], name_tokens=["EUR", "GBP"], exposure_tags=["EUR", "GBP", "FX_CROSS"], ig_symbol="EUR/GBP"),
+    _seed("EURCHF", "EUR/CHF", "FOREX", "EURCHF=X", ig_search_terms=["EUR/CHF"], expected_types=["CURRENCIES"], name_tokens=["EUR", "CHF"], exposure_tags=["EUR", "CHF", "FX_CROSS"], ig_symbol="EUR/CHF"),
+    _seed("EURCAD", "EUR/CAD", "FOREX", "EURCAD=X", ig_search_terms=["EUR/CAD"], expected_types=["CURRENCIES"], name_tokens=["EUR", "CAD"], exposure_tags=["EUR", "CAD", "FX_CROSS"], ig_symbol="EUR/CAD"),
+    _seed("EURAUD", "EUR/AUD", "FOREX", "EURAUD=X", ig_search_terms=["EUR/AUD"], expected_types=["CURRENCIES"], name_tokens=["EUR", "AUD"], exposure_tags=["EUR", "AUD", "FX_CROSS"], ig_symbol="EUR/AUD"),
+    _seed("EURNZD", "EUR/NZD", "FOREX", "EURNZD=X", ig_search_terms=["EUR/NZD"], expected_types=["CURRENCIES"], name_tokens=["EUR", "NZD"], exposure_tags=["EUR", "NZD", "FX_CROSS"], ig_symbol="EUR/NZD"),
+    _seed("GBPCHF", "GBP/CHF", "FOREX", "GBPCHF=X", ig_search_terms=["GBP/CHF"], expected_types=["CURRENCIES"], name_tokens=["GBP", "CHF"], exposure_tags=["GBP", "CHF", "FX_CROSS"], ig_symbol="GBP/CHF"),
+    _seed("GBPCAD", "GBP/CAD", "FOREX", "GBPCAD=X", ig_search_terms=["GBP/CAD"], expected_types=["CURRENCIES"], name_tokens=["GBP", "CAD"], exposure_tags=["GBP", "CAD", "FX_CROSS"], ig_symbol="GBP/CAD"),
+    _seed("GBPAUD", "GBP/AUD", "FOREX", "GBPAUD=X", ig_search_terms=["GBP/AUD"], expected_types=["CURRENCIES"], name_tokens=["GBP", "AUD"], exposure_tags=["GBP", "AUD", "FX_CROSS"], ig_symbol="GBP/AUD"),
+    _seed("GBPNZD", "GBP/NZD", "FOREX", "GBPNZD=X", ig_search_terms=["GBP/NZD"], expected_types=["CURRENCIES"], name_tokens=["GBP", "NZD"], exposure_tags=["GBP", "NZD", "FX_CROSS"], ig_symbol="GBP/NZD"),
+    _seed("AUDJPY", "AUD/JPY", "FOREX", "AUDJPY=X", ig_search_terms=["AUD/JPY"], expected_types=["CURRENCIES"], name_tokens=["AUD", "JPY"], exposure_tags=["AUD", "JPY", "FX_CROSS"], ig_symbol="AUD/JPY"),
+    _seed("AUDCHF", "AUD/CHF", "FOREX", "AUDCHF=X", ig_search_terms=["AUD/CHF"], expected_types=["CURRENCIES"], name_tokens=["AUD", "CHF"], exposure_tags=["AUD", "CHF", "FX_CROSS"], ig_symbol="AUD/CHF"),
+    _seed("AUDCAD", "AUD/CAD", "FOREX", "AUDCAD=X", ig_search_terms=["AUD/CAD"], expected_types=["CURRENCIES"], name_tokens=["AUD", "CAD"], exposure_tags=["AUD", "CAD", "FX_CROSS"], ig_symbol="AUD/CAD"),
+    _seed("AUDNZD", "AUD/NZD", "FOREX", "AUDNZD=X", ig_search_terms=["AUD/NZD"], expected_types=["CURRENCIES"], name_tokens=["AUD", "NZD"], exposure_tags=["AUD", "NZD", "FX_CROSS"], ig_symbol="AUD/NZD"),
+    _seed("NZDJPY", "NZD/JPY", "FOREX", "NZDJPY=X", ig_search_terms=["NZD/JPY"], expected_types=["CURRENCIES"], name_tokens=["NZD", "JPY"], exposure_tags=["NZD", "JPY", "FX_CROSS"], ig_symbol="NZD/JPY"),
+    _seed("NZDCHF", "NZD/CHF", "FOREX", "NZDCHF=X", ig_search_terms=["NZD/CHF"], expected_types=["CURRENCIES"], name_tokens=["NZD", "CHF"], exposure_tags=["NZD", "CHF", "FX_CROSS"], ig_symbol="NZD/CHF"),
+    _seed("NZDCAD", "NZD/CAD", "FOREX", "NZDCAD=X", ig_search_terms=["NZD/CAD"], expected_types=["CURRENCIES"], name_tokens=["NZD", "CAD"], exposure_tags=["NZD", "CAD", "FX_CROSS"], ig_symbol="NZD/CAD"),
+    _seed("CADJPY", "CAD/JPY", "FOREX", "CADJPY=X", ig_search_terms=["CAD/JPY"], expected_types=["CURRENCIES"], name_tokens=["CAD", "JPY"], exposure_tags=["CAD", "JPY", "FX_CROSS"], ig_symbol="CAD/JPY"),
+    _seed("CADCHF", "CAD/CHF", "FOREX", "CADCHF=X", ig_search_terms=["CAD/CHF"], expected_types=["CURRENCIES"], name_tokens=["CAD", "CHF"], exposure_tags=["CAD", "CHF", "FX_CROSS"], ig_symbol="CAD/CHF"),
+    _seed("CHFJPY", "CHF/JPY", "FOREX", "CHFJPY=X", ig_search_terms=["CHF/JPY"], expected_types=["CURRENCIES"], name_tokens=["CHF", "JPY"], exposure_tags=["CHF", "JPY", "FX_CROSS"], ig_symbol="CHF/JPY"),
 
     # INDICES (10)
     _seed("US500", "US 500", "INDICES", "^GSPC", ig_search_terms=["US 500"], expected_types=["INDICES"], name_tokens=["US", "500"], exposure_tags=["US_EQUITY", "GLOBAL_EQUITY"]),
@@ -227,23 +255,30 @@ CATEGORY_MARKET_SEEDS: List[Dict[str, Any]] = [
 
 
 def _active_execution_keys() -> Tuple[str, ...]:
-    """Only video-supported markets may create new autonomous entries.
-
-    The newly supplied course is explicitly an XAUUSD course. Existing
-    positions from retired strategies remain broker-managed until their own
-    stop, target or due-close; they are not force-closed during deployment.
-    """
+    """Resolve Gold and/or the 28-pair liquid FX execution universe."""
     configured = str(
-        os.getenv("JASONG_ACTIVE_EXECUTION_MARKETS", "GOLD")
+        os.getenv("JASONG_ACTIVE_EXECUTION_MARKETS", "GOLD,FOREX_ALL")
     )
     requested = {
         "".join(ch for ch in item.upper().strip() if ch.isalnum())
         for item in configured.split(",")
         if item.strip()
     }
-    supported = {"GOLD"}
-    clean = tuple(sorted(requested & supported))
-    return clean or ("GOLD",)
+    forex = set(LIQUID_FOREX_PAIRS)
+    if "FOREXALL" in requested or "ALLSUPPORTED" in requested:
+        requested.update(forex)
+    if "ALLSUPPORTED" in requested:
+        requested.add("GOLD")
+    supported = {"GOLD", *forex}
+    active = requested & supported
+    if not active:
+        # A malformed explicit override must narrow safely, never broaden.
+        active = {"GOLD"}
+    ordered = [
+        str(seed["key"]) for seed in CATEGORY_MARKET_SEEDS
+        if str(seed["key"]) in active
+    ]
+    return tuple(ordered)
 
 
 ACTIVE_EXECUTION_KEYS = _active_execution_keys()
@@ -838,10 +873,10 @@ def _live_fast_score(
 
 
 class CategoryStrategyEngine:
-    """XAUUSD active execution engine with the six-category API preserved.
+    """FX and XAUUSD execution engine with the six-category API preserved.
 
-    GOLD uses the multi-timeframe, session-aware liquidity/structure rules.
-    The other catalogue markets cannot create new autonomous entries.
+    Gold and liquid currency pairs use closed-candle, multi-timeframe
+    liquidity/structure rules. Other catalogue markets remain analysis-only.
     """
 
     VERSION = VERSION
@@ -1014,7 +1049,7 @@ class CategoryStrategyEngine:
                 **dict(row),
                 "execution_active": str(row.get("key") or "").upper() in active,
                 "execution_policy": (
-                    "XAUUSD_LIQUIDITY_STRUCTURE_ACTIVE"
+                    CATEGORY_RULES[str(row.get("category"))]["strategy_id"]
                     if str(row.get("key") or "").upper() in active
                     else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
                 ),
@@ -1069,42 +1104,43 @@ class CategoryStrategyEngine:
         category: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         with self._lock:
-            categories = (
+            requested_categories = (
                 [str(category).upper().strip()]
                 if category
                 else list(CATEGORY_ORDER)
             )
-            categories = [
-                c for c in categories if c in CATEGORY_ORDER
-            ]
+            active_seeds = _active_market_seeds()
+            pools = {
+                cat: [row for row in active_seeds if row["category"] == cat]
+                for cat in requested_categories
+                if cat in CATEGORY_ORDER
+            }
+            pools = {cat: rows for cat, rows in pools.items() if rows}
+            categories = list(pools)
             if not categories:
                 return []
 
-            each = (
-                max(1, self.batch_size // len(categories))
-                if not category
-                else self.batch_size
-            )
             batch: List[Dict[str, Any]] = []
             offsets = self._state.setdefault(
                 "offset_by_category",
                 {},
             )
-
-            for cat in categories:
-                pool = [
-                    row for row in _active_market_seeds()
-                    if row["category"] == cat
-                ]
-                if not pool:
-                    continue
-                offset = int(offsets.get(cat) or 0) % len(pool)
-                take = min(each, len(pool))
-                for i in range(take):
-                    batch.append(
-                        dict(pool[(offset + i) % len(pool)])
-                    )
-                offsets[cat] = (offset + take) % len(pool)
+            taken = {cat: 0 for cat in categories}
+            limit = self.batch_size
+            while len(batch) < limit:
+                progressed = False
+                for cat in categories:
+                    pool = pools[cat]
+                    if taken[cat] >= len(pool) or len(batch) >= limit:
+                        continue
+                    offset = int(offsets.get(cat) or 0) % len(pool)
+                    batch.append(dict(pool[(offset + taken[cat]) % len(pool)]))
+                    taken[cat] += 1
+                    progressed = True
+                if not progressed:
+                    break
+            for cat, count in taken.items():
+                offsets[cat] = (int(offsets.get(cat) or 0) + count) % len(pools[cat])
 
             self._state["last_batch_keys"] = [
                 row["key"] for row in batch
@@ -1291,20 +1327,26 @@ class CategoryStrategyEngine:
         latest_timestamp = frame.index[closed_pos]
 
         rule = CATEGORY_RULES[category]
-        xau = analyze_xauusd(frame.iloc[:closed_pos + 1].copy())
+        completed = frame.iloc[:closed_pos + 1].copy()
+        is_forex = category == "FOREX"
+        analysis = (
+            analyze_forex(completed, key)
+            if is_forex
+            else analyze_xauusd(completed)
+        )
         quality = _market_quality(latest, category)
         selected_checks = dict(
-            (xau.get("selected_setup") or {}).get("checks") or {}
+            (analysis.get("selected_setup") or {}).get("checks") or {}
         )
         live = {
-            "direction": xau.get("direction") or "WAIT",
-            "quant_confidence": xau.get("quant_confidence") or 0.0,
+            "direction": analysis.get("direction") or "WAIT",
+            "quant_confidence": analysis.get("quant_confidence") or 0.0,
             "regime": (
-                (xau.get("h4_structure") or {}).get("trend")
+                (analysis.get("h4_structure") or {}).get("trend")
                 or "NEUTRAL"
             ),
-            "strategy_branch": xau.get("strategy_branch"),
-            "strategy_reason": xau.get("strategy_reason"),
+            "strategy_branch": analysis.get("strategy_branch"),
+            "strategy_reason": analysis.get("strategy_reason"),
             "branch_checks": selected_checks,
             "volatility_pass": quality["volatility_pass"],
             "volatility_floor_pass": quality["volatility_floor_pass"],
@@ -1318,7 +1360,7 @@ class CategoryStrategyEngine:
         quant = _confidence01(live["quant_confidence"])
         legacy_rule_ml_ai = _directional_ai(latest, direction)
         ai = (
-            _confidence01(xau.get("directional_confidence"))
+            _confidence01(analysis.get("directional_confidence"))
             if direction in {"BUY", "SELL"}
             else 0.0
         )
@@ -1357,7 +1399,11 @@ class CategoryStrategyEngine:
             "strategy_name": rule["strategy_name"],
             "strategy_definition_version": self.VERSION,
             "strategy_selection_mode":
-                "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
+                (
+                    "FX_MULTI_SESSION_LIQUIDITY_LINES"
+                    if is_forex
+                    else "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+                ),
             "historical_validation_mode": "INFORMATIONAL_ONLY",
             "historical_execution_veto": False,
             "regime": live["regime"],
@@ -1372,7 +1418,11 @@ class CategoryStrategyEngine:
                 2,
             ),
             "model_ai_confidence_source":
-                "XAUUSD_RULE_CONFLUENCE_NOT_LEGACY_ML",
+                (
+                    "FX_RULE_CONFLUENCE_NOT_LEGACY_ML"
+                    if is_forex
+                    else "XAUUSD_RULE_CONFLUENCE_NOT_LEGACY_ML"
+                ),
             "legacy_rule_ml_directional_confidence": round(
                 legacy_rule_ml_ai,
                 6,
@@ -1439,7 +1489,7 @@ class CategoryStrategyEngine:
                 latest.get("BEAR_REVERSAL_CANDLE")
             ),
             "closed_candle_timestamp": (
-                xau.get("closed_candle_timestamp")
+                analysis.get("closed_candle_timestamp")
                 or (
                     latest_timestamp.isoformat()
                     if hasattr(latest_timestamp, "isoformat")
@@ -1450,34 +1500,50 @@ class CategoryStrategyEngine:
             "forming_candle_ignored": True,
             "holding_bars": int(rule["holding_bars"]),
             "analysis_source":
-                "XAUUSD_M15_H1_H4_LIQUIDITY_STRUCTURE",
+                (
+                    "FOREX_M15_H1_H4_LIQUIDITY_LINES"
+                    if is_forex
+                    else "XAUUSD_M15_H1_H4_LIQUIDITY_STRUCTURE"
+                ),
             "analysis_execution_price_basis": (
-                "PUBLIC_GOLD_FUTURES_STRUCTURE_DISTANCE_TRANSFERRED_TO_"
-                "FRESH_IG_SPOT_GOLD_QUOTE"
+                "ROUTED_CLOSED_CANDLE_STRUCTURE_DISTANCE_TRANSFERRED_TO_"
+                "FRESH_IG_DEMO_ENTRY_QUOTE"
             ),
-            "xauusd_strategy_version": XAUUSD_STRATEGY_VERSION,
-            "xauusd_strategy": xau,
-            "setup_id": xau.get("setup_id"),
-            "structural_stop_price": xau.get("structural_stop_price"),
-            "structural_stop_distance": xau.get("structural_stop_distance"),
-            "take_profit_target_price": xau.get("take_profit_target_price"),
-            "target_distance": xau.get("target_distance"),
-            "target_r": xau.get("target_r"),
+            "strategy_module_version": (
+                FOREX_STRATEGY_VERSION if is_forex else XAUUSD_STRATEGY_VERSION
+            ),
+            "forex_strategy_version": FOREX_STRATEGY_VERSION if is_forex else None,
+            "forex_strategy": analysis if is_forex else None,
+            "xauusd_strategy_version": XAUUSD_STRATEGY_VERSION if not is_forex else None,
+            "xauusd_strategy": analysis if not is_forex else None,
+            "candlestick_analyzed": bool(
+                analysis.get("candlestick_analyzed", True)
+            ),
+            "news_guard": dict(analysis.get("news_guard") or {}),
+            "setup_id": analysis.get("setup_id"),
+            "structural_stop_price": analysis.get("structural_stop_price"),
+            "structural_stop_distance": analysis.get("structural_stop_distance"),
+            "take_profit_target_price": analysis.get("take_profit_target_price"),
+            "target_distance": analysis.get("target_distance"),
+            "target_r": analysis.get("target_r"),
             "room_to_opposing_liquidity_r":
-                xau.get("room_to_opposing_liquidity_r"),
-            "session": dict(xau.get("session") or {}),
+                analysis.get("room_to_opposing_liquidity_r"),
+            "session": dict(analysis.get("session") or {}),
             "session_name":
-                (xau.get("session") or {}).get("name"),
+                (analysis.get("session") or {}).get("name"),
             "session_active": bool(
-                (xau.get("session") or {}).get("active")
+                (analysis.get("session") or {}).get("active")
             ),
             "london_new_york_overlap": bool(
-                (xau.get("session") or {}).get("overlap")
+                (analysis.get("session") or {}).get(
+                    "london_new_york_overlap",
+                    (analysis.get("session") or {}).get("overlap"),
+                )
             ),
             "south_africa_time":
-                (xau.get("session") or {}).get("south_africa_local"),
-            "session_exit_at": xau.get("session_exit_at"),
-            "max_hold_seconds": xau.get("max_hold_seconds"),
+                (analysis.get("session") or {}).get("south_africa_local"),
+            "session_exit_at": analysis.get("session_exit_at"),
+            "max_hold_seconds": analysis.get("max_hold_seconds"),
             "recent_returns": [
                 round(_safe_float(value), 10)
                 for value in frame["RET1"]
@@ -1593,13 +1659,17 @@ class CategoryStrategyEngine:
         row["spread_pass"] = spread_pass
 
         rejection_reasons: List[str] = list(
-            xau.get("rejection_reasons") or []
+            analysis.get("rejection_reasons") or []
         )
         if not live["panic_volatility_pass"]:
             rejection_reasons.append("PANIC_VOLATILITY")
         if direction not in {"BUY", "SELL"}:
             rejection_reasons.append(
-                "XAUUSD_FULL_CONFLUENCE_NOT_CONFIRMED"
+                (
+                    "FX_FULL_CONFLUENCE_NOT_CONFIRMED"
+                    if is_forex
+                    else "XAUUSD_FULL_CONFLUENCE_NOT_CONFIRMED"
+                )
             )
         if not live["volatility_pass"]:
             rejection_reasons.append(
@@ -1647,7 +1717,7 @@ class CategoryStrategyEngine:
             direction in {"BUY", "SELL"}
         )
         row["intelligence_source"] = (
-            "XAUUSD_LIQUIDITY_STRUCTURE_V1"
+            rule["strategy_id"]
         )
 
         # Rank only on current evidence. No historical WR/PF component.
@@ -1914,7 +1984,14 @@ class CategoryStrategyEngine:
                 reverse=True,
             )
             best = rows[0] if rows else {}
-            active_category = category == "METALS"
+            active_category = any(
+                row.get("category") == category for row in _active_market_seeds()
+            )
+            selection_mode = (
+                "FX_MULTI_SESSION_LIQUIDITY_LINES"
+                if category == "FOREX"
+                else "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+            )
             categories[category] = {
                 "market": best.get("market"),
                 "symbol": best.get("symbol"),
@@ -1932,7 +2009,7 @@ class CategoryStrategyEngine:
                     ),
                 "selection_mode":
                     (
-                        "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+                        selection_mode
                         if active_category
                         else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
                     ),
@@ -1946,17 +2023,17 @@ class CategoryStrategyEngine:
         return {
             "version": self.VERSION,
             "method":
-                "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
+                "FX_AND_XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
             "current_candle_only": True,
             "forming_candle_ignored": True,
             "active_execution_markets": list(ACTIVE_EXECUTION_KEYS),
             "higher_timeframe_rule": "H4 HH/HL or LH/LL structure",
             "setup_rule": (
-                "premium/discount + liquidity sweep + BOS/CHoCH + "
-                "OB/FVG retest + closed M15 confirmation"
+                "external/internal lines + premium/discount + liquidity sweep + "
+                "BOS/CHoCH/CISD/MSS + OB/FVG retest + closed M15 candlestick"
             ),
             "session_rule": (
-                "London or New York local 08:00-17:00, DST-aware"
+                "Pair geography: London/New York/Tokyo/Sydney local sessions, DST-aware"
             ),
             "risk_reward_rule": "minimum 1:2 structural R:R",
             "quant_min_pct": 28.0,
@@ -2118,7 +2195,14 @@ class CategoryStrategyEngine:
             standard_ready += standard
             compound_ready += compound
 
-            active_category = category == "METALS"
+            active_category = any(
+                row.get("category") == category for row in _active_market_seeds()
+            )
+            selection_mode = (
+                "FX_MULTI_SESSION_LIQUIDITY_LINES"
+                if category == "FOREX"
+                else "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+            )
             by_category[category] = {
                 "strategy":
                     (
@@ -2135,7 +2219,7 @@ class CategoryStrategyEngine:
                 "execution_active": active_category,
                 "selection_mode":
                     (
-                        "XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE"
+                        selection_mode
                         if active_category
                         else "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
                     ),
@@ -2164,7 +2248,7 @@ class CategoryStrategyEngine:
             return {
                 "version": self.VERSION,
                 "name":
-                    "JASONG V6.10 XAUUSD LIQUIDITY-STRUCTURE EXECUTION",
+                    "JASONG V6.11 FX + XAUUSD LIQUIDITY-STRUCTURE EXECUTION",
                 "enabled": bool(
                     self._state.get("enabled", True)
                 ),
@@ -2172,17 +2256,18 @@ class CategoryStrategyEngine:
                     "price_basis":
                         "CURRENT_CLOSED_CANDLE_ONLY",
                     "forming_candle_ignored": True,
-                    "active_market": "XAUUSD / GOLD ONLY",
+                    "active_market": "28 LIQUID FOREX PAIRS + XAUUSD / GOLD",
                     "higher_timeframe": "H4 market structure",
                     "confirmation_timeframe": "H1 structure",
                     "entry_timeframe": "M15 closed candle",
                     "session_policy": (
-                        "Europe/London 08:00-17:00 or "
-                        "America/New_York 08:00-17:00; DST-aware"
+                        "Pair-relevant London/New York/Tokyo/Sydney local "
+                        "sessions; DST-aware"
                     ),
                     "setup": (
-                        "premium/discount -> liquidity sweep -> BOS/CHoCH -> "
-                        "OB/FVG retest -> candle confirmation -> >=2R"
+                        "external line + premium/discount -> liquidity sweep -> "
+                        "BOS/CHoCH/CISD/MSS -> OB/FVG retest -> closed "
+                        "candlestick confirmation -> >=2R"
                     ),
                     "then":
                         "volatility + liquidity -> Quant -> AI -> FAST -> IG tradeability/spread",

@@ -24,6 +24,7 @@ from specialist_market_integration import (  # noqa: E402
     _enable_compound_category_coexistence,
     _extend_owned_prefix,
 )
+from forex_liquidity_lines_strategy import LIQUID_FOREX_PAIRS  # noqa: E402
 
 
 class NoCallBroker:
@@ -71,26 +72,33 @@ class SpecialistIntegrationTests(unittest.TestCase):
             CATEGORY_ORDER,
             ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"),
         )
-        self.assertEqual(ACTIVE_EXECUTION_KEYS, ("GOLD",))
+        self.assertEqual(
+            set(ACTIVE_EXECUTION_KEYS),
+            {"GOLD", *LIQUID_FOREX_PAIRS},
+        )
 
-    def test_catalogue_is_preserved_but_only_gold_is_execution_active(self):
+    def test_catalogue_has_all_liquid_fx_and_gold_active(self):
         engine = self._engine()
         universe = engine.universe()
-        self.assertEqual(len(universe), 40)
+        self.assertEqual(len(universe), 59)
         active = [row for row in universe if row["execution_active"]]
-        self.assertEqual([row["key"] for row in active], ["GOLD"])
+        self.assertEqual(len(active), 29)
+        self.assertEqual(
+            {row["key"] for row in active},
+            {"GOLD", *LIQUID_FOREX_PAIRS},
+        )
         self.assertTrue(
             all(
                 row["execution_policy"] == "ANALYSIS_ONLY_RETIRED_ENTRY_STRATEGY"
                 for row in universe
-                if row["key"] != "GOLD"
+                if row["key"] not in {"GOLD", *LIQUID_FOREX_PAIRS}
             )
         )
 
     def test_retired_market_does_not_request_market_data(self):
         engine = self._engine()
-        eurusd = next(row for row in CATEGORY_MARKET_SEEDS if row["key"] == "EURUSD")
-        result = engine._evaluate_seed(eurusd)
+        silver = next(row for row in CATEGORY_MARKET_SEEDS if row["key"] == "SILVER")
+        result = engine._evaluate_seed(silver)
         self.assertEqual(result["strategy_id"], "RETIRED_ENTRY_STRATEGY")
         self.assertFalse(result["standard_eligible"])
 

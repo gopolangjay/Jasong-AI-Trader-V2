@@ -17,8 +17,8 @@ class MobileSyncCache:
     never serially on Android resume.
     """
 
-    VERSION = "6.10-xau-mobile-sync"
-    CATEGORIES = ("METALS",)
+    VERSION = "6.11-fx-xau-mobile-sync"
+    CATEGORIES = ("FOREX", "METALS")
 
     def __init__(
         self,

@@ -218,9 +218,10 @@ def install_specialist_market_system(
         List[Any]
     ] = None,
 ) -> Dict[str, Any]:
-    """Install the active V6.10 XAUUSD execution architecture.
+    """Install the active V6.11 FX and XAUUSD execution architecture.
 
-    GOLD is the only autonomous-entry market. The former category strategies
+    The 28 liquid major-currency pairs and Gold may create new entries through
+    their dedicated liquidity/structure strategies. Other category strategies
     remain visible for compatibility but cannot open new broker positions.
     """
     base_dir = (
@@ -376,7 +377,7 @@ def install_specialist_market_system(
             intelligence.correlation_matrix
         )
 
-    # Active qualifying XAUUSD setups execute directly on IG DEMO.
+    # Active qualifying FX and XAUUSD setups execute directly on IG DEMO.
     portfolio = CategoryExecutionEngine(
         broker=broker,
         ranking_source=
@@ -425,13 +426,13 @@ def install_specialist_market_system(
     mobile_sync.start_thread()
 
     app.title = (
-        "Jasong AI Trader V6.10 XAUUSD Active API"
+        "Jasong AI Trader V6.11 FX + XAUUSD Active API"
     )
-    app.version = "6.10-xau-active"
+    app.version = "6.11-fx-xau-active"
     app.description = (
-        "Jasong AI Trader — active IG DEMO XAUUSD liquidity/structure "
-        "execution during DST-aware London/New York sessions, structural "
-        "risk sizing, broker-settled evidence, and diagnostics."
+        "Jasong AI Trader — active IG DEMO FX liquidity/lines and XAUUSD "
+        "liquidity/structure execution in geography-aware, DST-aware sessions, "
+        "with structural risk sizing, broker-settled evidence, and diagnostics."
     )
     app.openapi_schema = None
 
@@ -470,7 +471,7 @@ def install_specialist_market_system(
                 "/chatgpt-mcp/status",
                 lambda: {
                     "version":
-                        "6.10-xau-active",
+                        "6.11-fx-xau-active",
                     "enabled": True,
                     "installed": False,
                     "runtime_ready": False,
@@ -535,7 +536,7 @@ def install_specialist_market_system(
     ]:
         return {
             "version":
-                "6.10-xau-active",
+                "6.11-fx-xau-active",
             "categories": {
                 category:
                     intelligence.universe(
@@ -606,7 +607,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.10-xau-active",
+                    "6.11-fx-xau-active",
                 "category":
                     clean,
                 "count":
@@ -636,7 +637,7 @@ def install_specialist_market_system(
 
         return {
             "version":
-                "6.10-xau-active",
+                "6.11-fx-xau-active",
             "category":
                 clean,
             "count":
@@ -695,7 +696,7 @@ def install_specialist_market_system(
         )
         return {
             "version":
-                "6.10-xau-active",
+                "6.11-fx-xau-active",
             "count":
                 len(rows),
             "candidates":
@@ -748,7 +749,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.10-xau-active",
+                    "6.11-fx-xau-active",
                 "error":
                     "Unknown category",
                 "category":
@@ -784,7 +785,7 @@ def install_specialist_market_system(
         "/category-portfolio/positions",
         lambda: {
             "version":
-                "6.10-xau-active",
+                "6.11-fx-xau-active",
             "positions":
                 portfolio.positions(),
             "live_money_execution":
@@ -857,5 +858,5 @@ def install_specialist_market_system(
         "mobile_sync":
             mobile_sync,
         "version":
-            "6.10-xau-active",
+            "6.11-fx-xau-active",
     }

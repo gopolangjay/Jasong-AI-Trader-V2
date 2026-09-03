@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -19,8 +20,13 @@ from category_strategy_engine import (  # noqa: E402
     QUANT_MIN_CONFIDENCE,
     TREND_ADX_MIN,
     CategoryStrategyEngine,
+    _active_execution_keys,
 )
 from xauusd_liquidity_strategy import STRATEGY_ID  # noqa: E402
+from forex_liquidity_lines_strategy import (  # noqa: E402
+    LIQUID_FOREX_PAIRS,
+    STRATEGY_ID as FOREX_STRATEGY_ID,
+)
 
 
 class FakeBroker:
@@ -98,8 +104,20 @@ class ActiveXauRouterTests(unittest.TestCase):
             CATEGORY_ORDER,
             ("FOREX", "INDICES", "CRYPTO", "METALS", "ENERGY", "SHARES"),
         )
-        self.assertEqual(len(CATEGORY_MARKET_SEEDS), 40)
-        self.assertEqual(ACTIVE_EXECUTION_KEYS, ("GOLD",))
+        self.assertEqual(len(CATEGORY_MARKET_SEEDS), 59)
+        self.assertEqual(len(ACTIVE_EXECUTION_KEYS), 29)
+        self.assertEqual(
+            set(ACTIVE_EXECUTION_KEYS),
+            {"GOLD", *LIQUID_FOREX_PAIRS},
+        )
+
+    def test_invalid_market_override_fails_safe_to_gold(self):
+        with patch.dict(
+            os.environ,
+            {"JASONG_ACTIVE_EXECUTION_MARKETS": "not-a-real-market"},
+            clear=False,
+        ):
+            self.assertEqual(_active_execution_keys(), ("GOLD",))
 
     def test_forming_candle_is_not_the_execution_candle(self):
         frame = xau_frame()
@@ -115,12 +133,22 @@ class ActiveXauRouterTests(unittest.TestCase):
             frame.index[-1].isoformat(),
         )
 
-    def test_non_gold_autonomous_entries_are_retired(self):
-        result = self._engine(xau_frame())._evaluate_seed(self._seed("EURUSD"))
+    def test_non_fx_non_gold_autonomous_entries_are_retired(self):
+        result = self._engine(xau_frame())._evaluate_seed(self._seed("SILVER"))
         self.assertEqual(result["strategy_id"], "RETIRED_ENTRY_STRATEGY")
         self.assertEqual(result["direction"], "WAIT")
         self.assertFalse(result["standard_eligible"])
         self.assertIn("OLD_ENTRY_STRATEGY_RETIRED", result["rejection_reasons"])
+
+    def test_forex_uses_new_versioned_strategy(self):
+        result = self._engine(xau_frame())._evaluate_seed(self._seed("EURUSD"))
+        self.assertEqual(result["strategy_id"], FOREX_STRATEGY_ID)
+        self.assertEqual(
+            result["strategy_selection_mode"],
+            "FX_MULTI_SESSION_LIQUIDITY_LINES",
+        )
+        self.assertTrue(result["candlestick_analyzed"])
+        self.assertFalse(result["historical_execution_veto"])
 
     def test_gold_uses_new_versioned_strategy(self):
         result = self._engine(xau_frame())._evaluate_seed(self._seed("GOLD"))

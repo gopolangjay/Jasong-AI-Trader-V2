@@ -1,26 +1,28 @@
-# Jasong AI Trader V6.10
+# Jasong AI Trader V6.11
 
 Jasong is an autonomous IG DEMO trading service with a FastAPI backend and a
-Flutter mobile client. V6.10 executes one active strategy: a completed-candle,
-multi-timeframe XAUUSD liquidity/market-structure setup during DST-aware London
-and New York sessions.
+Flutter mobile client. V6.11 executes two completed-candle strategy families:
+the existing XAUUSD liquidity/market-structure setup and a new 28-pair liquid
+forex liquidity/trendline setup with geography-aware sessions.
 
 ## Active execution policy
 
-- New autonomous entries: `GOLD` / XAUUSD only.
+- New autonomous entries: `GOLD` plus all 28 combinations of EUR, GBP, USD,
+  JPY, CHF, CAD, AUD, and NZD. Exotics remain analysis-only.
 - Broker environment: IG DEMO only; live-money execution is disabled.
-- Signal path: H4 structure and premium/discount, M15 liquidity sweep, BOS/CHoCH,
-  order-block/FVG retest, closed-candle confirmation, and at least 2R room.
-- Weekday session window: London or New York 08:00-17:00 local time, evaluated
-  with IANA timezones and recorded in South African time.
+- Signal path: H4 structure/external trendline and premium/discount, M15
+  liquidity sweep, BOS/CHoCH/CISD/MSS, order-block/FVG retest, closed-candlestick
+  confirmation, and at least 2R room. The internal line adds entry confluence.
+- Forex session windows follow pair geography: London for EUR/GBP/CHF, New York
+  for USD/CAD, Tokyo for JPY, and Sydney for AUD/NZD. IANA timezones handle DST.
 - Risk: at most 1% of account balance per entry, structural 1R stop, minimum 2R
-  target, no broker size round-up, one account-wide Gold position, and at most
-  two entries per South African calendar day.
-- The former 40-market entry strategies are retired. Their catalogue entries
-  remain visible, and previously opened positions remain managed until exit.
+  target, no broker size round-up, one account-wide position per market, a
+  default four FX entries per SAST day and one entry per pair per SAST day.
+- The former EMA/ADX/range and non-FX/non-Gold entry strategies are retired.
+  Catalogue entries remain visible, and existing positions remain managed.
 
-See [the active strategy specification](backend/README_XAUUSD_ACTIVE.md) for the
-exact entry, session, sizing, stop, target, and duplicate rules.
+See [the forex strategy specification](backend/README_FOREX_ACTIVE.md) and
+[the Gold strategy specification](backend/README_XAUUSD_ACTIVE.md).
 
 ## Backend
 

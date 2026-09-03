@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 import yfinance as yf
 
-from ig_demo_broker import IGDemoBroker, IGDemoError
+from ig_demo_broker import IGDemoBroker
 
 
 # ============================================================
@@ -56,7 +56,7 @@ IG_DEMO_WARMUP_POINTS = max(
         int(
             os.getenv(
                 "IG_DEMO_WARMUP_POINTS",
-                "160",
+                "500",
             )
         ),
     ),
@@ -661,7 +661,8 @@ def download_ig_demo(
 ) -> pd.DataFrame:
     """Fetch/refresh a small rolling IG DEMO candle window.
 
-    First use warms ~160 points. Subsequent refreshes request only one newest
+    First use warms up to 500 points, enough to build 30 completed H4 bars from
+    M15 data. Subsequent refreshes request only one newest
     point every 30 minutes by default, conserving IG's historical-data quota.
     """
     if not IG_DEMO_MARKET_DATA_ENABLED:

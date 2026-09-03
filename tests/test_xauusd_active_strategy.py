@@ -20,6 +20,7 @@ from category_execution_engine import (  # noqa: E402
     RiskSizingError,
 )
 from risk_exit_policy import build_risk_plan  # noqa: E402
+from forex_liquidity_lines_strategy import STRATEGY_ID as FX_STRATEGY_ID  # noqa: E402
 from xauusd_liquidity_strategy import (  # noqa: E402
     STRATEGY_ID,
     _direction_setup,
@@ -277,6 +278,20 @@ def active_candidate(setup_id="setup-1"):
     }
 
 
+def active_fx_candidate(setup_id="fx-setup-1"):
+    return {
+        **active_candidate(setup_id),
+        "category": "FOREX",
+        "strategy_id": FX_STRATEGY_ID,
+        "strategy_name": "Forex Multi-Session Liquidity / Lines",
+        "symbol": "EURUSD",
+        "market": "EUR/USD",
+        "ig_epic": "CS.D.EURUSD.CFD.IP",
+        "session_name": "LONDON_NEW_YORK_OVERLAP",
+        "exposure_tags": ["EUR", "USD", "FX_MAJOR"],
+    }
+
+
 class RiskSizedExecutionTests(unittest.TestCase):
     def _engine(self, broker):
         tmp = tempfile.TemporaryDirectory()
@@ -312,7 +327,7 @@ class RiskSizedExecutionTests(unittest.TestCase):
         with self.assertRaises(RiskSizingError):
             engine._risk_sized_order(active_candidate())
 
-    def test_only_active_gold_strategy_can_open(self):
+    def test_only_active_fx_and_gold_strategies_can_open(self):
         broker = FakeRiskBroker()
         engine = self._engine(broker)
         retired = {
@@ -324,8 +339,29 @@ class RiskSizedExecutionTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("retired", reason)
 
+        lookalike = {
+            **active_fx_candidate(),
+            "strategy_id": "FX_LIQUIDITY_LINES_LEGACY",
+        }
+        allowed, reason = engine._may_open(lookalike, [])
+        self.assertFalse(allowed)
+        self.assertIn("retired", reason)
+
         allowed, reason = engine._may_open(active_candidate(), [])
         self.assertTrue(allowed, reason)
+
+        allowed, reason = engine._may_open(active_fx_candidate(), [])
+        self.assertTrue(allowed, reason)
+
+    def test_forex_uses_same_structural_two_r_policy(self):
+        plan = build_risk_plan(
+            active_fx_candidate(),
+            entry_price=2000.0,
+            direction="BUY",
+        )
+        self.assertEqual(plan.stop_distance, 10.0)
+        self.assertEqual(plan.target_r, 2.0)
+        self.assertEqual(plan.take_profit_target_price, 2020.0)
 
     def test_account_wide_gold_position_and_sast_daily_cap_block_entry(self):
         broker = FakeRiskBroker()
@@ -346,12 +382,13 @@ class RiskSizedExecutionTests(unittest.TestCase):
         ]
         allowed, reason = engine._may_open(active_candidate(), [])
         self.assertFalse(allowed)
-        self.assertIn("account-wide XAUUSD", reason)
+        self.assertIn("account-wide GOLD", reason)
 
         broker._positions = []
         engine._state["positions"] = [
             {
                 "strategy_id": STRATEGY_ID,
+                "category": "METALS",
                 "setup_id": f"old-{index}",
                 "opened_at": time.time(),
                 "status": "CLOSED",
@@ -360,7 +397,7 @@ class RiskSizedExecutionTests(unittest.TestCase):
         ]
         allowed, reason = engine._may_open(active_candidate("setup-new"), [])
         self.assertFalse(allowed)
-        self.assertIn("daily XAUUSD entry cap", reason)
+        self.assertIn("daily METALS entry cap", reason)
 
     def test_risk_sized_open_disables_broker_upward_retry(self):
         broker = FakeRiskBroker()

@@ -1,10 +1,9 @@
-# V6.10 active XAUUSD liquidity/structure strategy
+# V6.11 active XAUUSD liquidity/structure strategy
 
-This release replaces the former autonomous 40-market entry router. The
-40-market catalogue remains visible for API compatibility, but only `GOLD`
-(XAUUSD) may create a new broker position. Existing positions opened by an old
-strategy are not force-closed; IG protection, the server watchdog, and their
-scheduled exit continue to manage them.
+Gold retains its dedicated `XAUUSD_LIQUIDITY_STRUCTURE_V1` logic alongside the
+new forex strategy. Other category strategies remain retired. Existing
+positions opened by an old strategy are not force-closed; IG protection, the
+server watchdog, and their scheduled exit continue to manage them.
 
 ## Execution sequence
 
@@ -76,6 +75,7 @@ Configuration is deliberately capped at the strategy safety limits:
 ```text
 XAU_RISK_PER_TRADE_PCT=1.0    # accepted range 0.10-1.00
 XAU_MAX_DAILY_ENTRIES=2       # accepted range 1-2
+JASONG_ACTIVE_EXECUTION_MARKETS=GOLD,FOREX_ALL
 CATEGORY_AUTOTRADE=true
 ```
 
