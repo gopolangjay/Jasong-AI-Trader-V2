@@ -15,10 +15,7 @@ from specialist_market_data import ResilientSpecialistMarketData
 from specialist_market_integration import install_specialist_market_system
 
 
-VERSION = "6.11-fx-xau-active"
-
-# The clean runtime owns only the current execution architecture.
-# Legacy paper/watcher/history/automanager modules are intentionally absent.
+VERSION = "6.13-adaptive-fx-xau-weekend"
 RUNTIME: Dict[str, Any] = {}
 
 
@@ -26,9 +23,6 @@ def _state_dir() -> str:
     return "/var/data" if os.path.isdir("/var/data") else "/tmp"
 
 
-# specialist_market_integration replaces this symbol with its resilient loader.
-# Keeping the name preserves the current integration contract without importing
-# the legacy main.py module.
 def _v673_global_market_data(seed: Dict[str, Any]) -> pd.DataFrame:
     loader = RUNTIME.get("market_data")
     if loader is None:
@@ -38,51 +32,40 @@ def _v673_global_market_data(seed: Dict[str, Any]) -> pd.DataFrame:
 
 
 def specialist_frame(seed: Dict[str, Any]) -> pd.DataFrame:
-    """Current Rule + ML specialist analysis pipeline."""
     raw = _v673_global_market_data(seed)
     indicators = add_indicators(raw)
     model = train_model(indicators)
     enriched = enrich(indicators, model)
-
     if enriched is None or enriched.empty:
         raise ValueError(f"No Rule+ML enrichment for {seed.get('key')}")
-
-    # Preserve raw OHLCV when an older enrich() omits those fields.
     for column in ("Open", "High", "Low", "Close", "Volume"):
         if column in raw.columns and column not in enriched.columns:
             enriched[column] = raw[column].reindex(enriched.index)
-
     return enriched
 
 
 def _compound_candidates(_: float = 0.0) -> List[Dict[str, Any]]:
-    """Late-bound PRIME candidate source used to break bootstrap circularity."""
     system = RUNTIME.get("specialist_system")
     if not isinstance(system, dict):
         return []
-
     forward_prime = system.get("forward_prime")
     if forward_prime is None:
         return []
-
     try:
-        rows = forward_prime.compound_candidates()
-        return list(rows or [])
+        return list(forward_prime.compound_candidates() or [])
     except Exception:
         return []
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jasong AI Trader V6.11 FX + XAUUSD Active API",
+        title="Jasong AI Trader V6.13 Adaptive FX + XAUUSD + Weekend API",
         version=VERSION,
         description=(
-            "Clean runtime: FX liquidity/lines and XAUUSD liquidity/structure "
-            "execution on IG DEMO, geography-aware DST sessions, structural "
-            "risk sizing, broker-settled evidence, MFE/MAE and diagnostics."
+            "Clean IG DEMO runtime: adaptive FX and XAUUSD execution plus a "
+            "broker-driven fail-closed weekend market path."
         ),
     )
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -93,20 +76,13 @@ def create_app() -> FastAPI:
 
     broker = IGDemoBroker()
     RUNTIME["broker"] = broker
-
     compound = EliteCompoundEngine(
         broker=broker,
         candidate_source=_compound_candidates,
-        state_path=os.getenv(
-            "COMPOUND_STATE_PATH",
-            f"{_state_dir()}/jasong_elite_compound.json",
-        ),
+        state_path=os.getenv("COMPOUND_STATE_PATH", f"{_state_dir()}/jasong_elite_compound.json"),
     )
     RUNTIME["compound_engine"] = compound
 
-    # This module already owns the current architecture:
-    # category intelligence + broker-settled forward PRIME + JSCAT execution
-    # + MFE/MAE + mobile sync + ChatGPT MCP/actions.
     system = install_specialist_market_system(
         app=app,
         broker=broker,
@@ -117,7 +93,6 @@ def create_app() -> FastAPI:
     RUNTIME["specialist_system"] = system
     RUNTIME["market_data"] = system.get("market_data")
 
-    # Compound is started only after PRIME/category wiring exists.
     if hasattr(compound, "start_thread"):
         compound.start_thread()
 
@@ -136,12 +111,15 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> Dict[str, Any]:
+        weekend = RUNTIME.get("weekend_market_engine")
         return {
             "ok": True,
             "version": VERSION,
             "runtime": "CLEAN_CORE",
             "broker": broker.status(),
             "specialist_installed": bool(RUNTIME.get("specialist_system")),
+            "weekend_market_installed": weekend is not None,
+            "weekend_strategy_id": getattr(weekend, "_state", {}).get("strategy_id") if weekend is not None else None,
             "legacy_main_imported": False,
             "legacy_execution_reliability_imported": False,
             "live_money_execution": False,
@@ -151,8 +129,6 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
-# Compatibility aliases for diagnostics/mobile code that expect named globals.
 IG_DEMO_BROKER = RUNTIME["broker"]
 COMPOUND_ENGINE = RUNTIME["compound_engine"]
 V63_SPECIALIST_SYSTEM = RUNTIME["specialist_system"]
