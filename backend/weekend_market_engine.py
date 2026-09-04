@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from weekend_market_policy import STRATEGY_ID, assess_market, execution_guard
 
-VERSION = "6.13-weekend-structure-execution-v1"
+VERSION = "6.13-weekend-structure-execution-v2"
 
 CRYPTO_SEEDS = (
     {"symbol": "BITCOIN", "terms": ["Bitcoin"], "tokens": ["BITCOIN"]},
@@ -55,8 +55,6 @@ def structure_signal(m5: List[Dict[str, float]], m1: List[Dict[str, float]], spr
     """5m close beyond structure -> retest -> genuine 1m trigger, fail closed."""
     if len(m5) < 24 or len(m1) < 8 or spread <= 0:
         return {"eligible": False, "reason": "INSUFFICIENT_CANDLES_OR_SPREAD"}
-
-    # Last completed M5 candle is treated as the breakout candle; prior 20 form structure.
     breakout = m5[-2]
     prior = m5[-22:-2]
     swing_high = max(x["high"] for x in prior)
@@ -69,8 +67,6 @@ def structure_signal(m5: List[Dict[str, float]], m1: List[Dict[str, float]], spr
         direction, level = "SELL", swing_low
     if not direction:
         return {"eligible": False, "reason": "NO_M5_STRUCTURE_CLOSE"}
-
-    # Require a retest after the break. Tolerance is spread-aware, never zero.
     recent = m1[-7:-1]
     tolerance = max(spread * 1.5, abs(level) * 0.00015)
     if direction == "BUY":
@@ -79,7 +75,6 @@ def structure_signal(m5: List[Dict[str, float]], m1: List[Dict[str, float]], spr
         retest = any(x["high"] >= level - tolerance and x["close"] <= level + tolerance for x in recent)
     if not retest:
         return {"eligible": False, "reason": "NO_RETEST"}
-
     trigger = m1[-2]
     prev = m1[-3]
     if direction == "BUY":
@@ -98,16 +93,11 @@ def structure_signal(m5: List[Dict[str, float]], m1: List[Dict[str, float]], spr
         target = entry - risk * 1.5
     if not triggered or risk <= spread * 1.25:
         return {"eligible": False, "reason": "NO_M1_TRIGGER_OR_INVALID_RISK"}
-
-    return {
-        "eligible": True, "reason": "QUALIFIED", "direction": direction,
-        "entry_reference": entry, "structure_level": level, "stop": stop,
-        "target": target, "risk_distance": risk, "target_r": 1.5,
-    }
+    return {"eligible": True, "reason": "QUALIFIED", "direction": direction, "entry_reference": entry, "structure_level": level, "stop": stop, "target": target, "risk_distance": risk, "target_r": 1.5}
 
 
 class WeekendMarketEngine:
-    """DEMO-only unattended weekend/holiday scanner and structure executor."""
+    """DEMO-only unattended Friday/weekend/holiday scanner and structure executor."""
 
     def __init__(self, broker: Any) -> None:
         self.broker = broker
@@ -116,16 +106,25 @@ class WeekendMarketEngine:
         self.max_open = max(1, min(2, int(os.getenv("WEEKEND_MAX_OPEN_POSITIONS", "2"))))
         self.max_spread_bps = max(5.0, float(os.getenv("WEEKEND_MAX_SPREAD_BPS", "100")))
         self.default_size = max(0.0001, float(os.getenv("WEEKEND_DEFAULT_SIZE", "0.5")))
+        self.friday_start_utc = max(0, min(23, int(os.getenv("WEEKEND_FRIDAY_START_UTC", "18"))))
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state: Dict[str, Any] = {"version": VERSION, "strategy_id": STRATEGY_ID, "enabled": self.enabled, "last_scan_at": None, "last_error": None, "markets": [], "signals": [], "opens": 0}
 
-    @staticmethod
-    def _weekend_window() -> bool:
-        # Weekend strategy may also cover market holidays when explicitly forced.
+    def _scan_window(self) -> bool:
+        """Open discovery Friday evening + weekend; broker remains final authority.
+
+        The time gate only decides when discovery runs. It never declares a market
+        tradeable: _resolve and the pre-order guard still require a fresh IG
+        TRADEABLE status and usable quote. WEEKEND_FORCE_SCAN supports holidays.
+        """
         if str(os.getenv("WEEKEND_FORCE_SCAN", "false")).lower() in {"1", "true", "yes", "on"}:
             return True
-        return datetime.now(timezone.utc).weekday() >= 5
+        now = datetime.now(timezone.utc)
+        weekday = now.weekday()
+        if weekday >= 5:
+            return True
+        return weekday == 4 and now.hour >= self.friday_start_utc
 
     def _owned_open(self) -> List[Dict[str, Any]]:
         rows = []
@@ -142,13 +141,7 @@ class WeekendMarketEngine:
             instrument = details.get("instrument") or {}
             snap = details.get("snapshot") or {}
             quote = self.broker.extract_snapshot_quote(details)
-            snapshot = {
-                "epic": market["epic"], "instrumentName": instrument.get("name") or market.get("name"),
-                "instrumentType": instrument.get("type") or market.get("instrument_type"),
-                "category": "CRYPTO", "marketStatus": snap.get("marketStatus") or market.get("market_status"),
-                "bid": quote.get("bid"), "offer": quote.get("offer"), "symbol": seed["symbol"],
-                "expiry": instrument.get("expiry") or market.get("expiry") or "-",
-            }
+            snapshot = {"epic": market["epic"], "instrumentName": instrument.get("name") or market.get("name"), "instrumentType": instrument.get("type") or market.get("instrument_type"), "category": "CRYPTO", "marketStatus": snap.get("marketStatus") or market.get("market_status"), "bid": quote.get("bid"), "offer": quote.get("offer"), "symbol": seed["symbol"], "expiry": instrument.get("expiry") or market.get("expiry") or "-"}
             verdict = assess_market(snapshot)
             return snapshot if verdict.get("eligible") else None
         except Exception:
@@ -168,26 +161,17 @@ class WeekendMarketEngine:
         return {"symbol": market["symbol"], "epic": market["epic"], "spread_bps": spread_bps, **sig}
 
     def _execute(self, sig: Dict[str, Any]) -> Dict[str, Any]:
-        # Recheck broker status/quote immediately before order submission.
         details = self.broker.market_details(sig["epic"], require_quote=True)
         snap = details.get("snapshot") or {}
         quote = self.broker.extract_snapshot_quote(details)
         live = {"epic": sig["epic"], "category": "CRYPTO", "instrumentType": (details.get("instrument") or {}).get("type"), "marketStatus": snap.get("marketStatus"), "bid": quote.get("bid"), "offer": quote.get("offer")}
         if not execution_guard(live).get("eligible"):
             raise RuntimeError("PRE_ORDER_MARKET_GUARD_FAILED")
-
         instrument = details.get("instrument") or {}
         min_size = self.broker._min_deal_size(details)
         increment = self.broker._deal_size_increment(details)
         size = self.broker._normalise_deal_size(self.default_size, minimum_size=min_size, increment=increment)
-        payload = {
-            "currencyCode": self.broker._default_currency(instrument),
-            "dealReference": ("JSWKND_" + uuid.uuid4().hex[:20])[:30],
-            "direction": sig["direction"], "epic": sig["epic"],
-            "expiry": str(instrument.get("expiry") or "-"), "forceOpen": True,
-            "guaranteedStop": False, "orderType": "MARKET", "size": round(size, 12),
-            "stopLevel": round(float(sig["stop"]), 10), "limitLevel": round(float(sig["target"]), 10),
-        }
+        payload = {"currencyCode": self.broker._default_currency(instrument), "dealReference": ("JSWKND_" + uuid.uuid4().hex[:20])[:30], "direction": sig["direction"], "epic": sig["epic"], "expiry": str(instrument.get("expiry") or "-"), "forceOpen": True, "guaranteedStop": False, "orderType": "MARKET", "size": round(size, 12), "stopLevel": round(float(sig["stop"]), 10), "limitLevel": round(float(sig["target"]), 10)}
         ack = self.broker._request("POST", "/positions/otc", version=2, payload=payload)
         ref = str(ack.get("dealReference") or payload["dealReference"])
         confirmation = self.broker.confirm(ref)
@@ -198,7 +182,7 @@ class WeekendMarketEngine:
 
     def tick(self) -> Dict[str, Any]:
         self._state["last_scan_at"] = time.time()
-        if not self.enabled or not self._weekend_window():
+        if not self.enabled or not self._scan_window():
             self._state["markets"], self._state["signals"] = [], []
             return self.status()
         try:
@@ -219,7 +203,8 @@ class WeekendMarketEngine:
         return self.status()
 
     def status(self) -> Dict[str, Any]:
-        return {**self._state, "weekend_window": self._weekend_window(), "demo_only": True, "live_money_execution": False, "max_open_positions": self.max_open, "target_r": 1.5}
+        active = self._scan_window()
+        return {**self._state, "weekend_window": active, "scan_window": active, "friday_start_utc": self.friday_start_utc, "broker_status_is_final_authority": True, "demo_only": True, "live_money_execution": False, "max_open_positions": self.max_open, "target_r": 1.5}
 
     def start_thread(self) -> None:
         if self._thread and self._thread.is_alive():
