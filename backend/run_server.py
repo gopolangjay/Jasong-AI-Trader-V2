@@ -11,9 +11,10 @@ if str(
 os.environ.setdefault("IG_DEMO_POSITIONS_CACHE_SECONDS", "3")
 
 # V6.12 installs the adaptive FX signal, PRIME and structural-risk policy before
-# clean_core_runtime imports the execution stack.  Gold remains on its existing
+# clean_core_runtime imports the execution stack. Gold remains on its existing
 # XAUUSD liquidity/structure policy; the relaxed thresholds are FX-specific.
 import adaptive_fx_v612  # noqa: F401,E402
+import adaptive_fx_v612_status  # noqa: F401,E402
 
 import uvicorn
 from clean_core_runtime import app
