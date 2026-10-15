@@ -46,11 +46,7 @@ def install(app: Any, runtime: Dict[str, Any]) -> WeekendMarketEngine:
     def weekend_market_scan() -> Dict[str, Any]:
         return engine.tick()
 
-    app.title = "Jasong AI Trader V6.13 Adaptive FX + XAUUSD + Weekend API"
-    app.version = "6.13"
-    app.description = (
-        "IG DEMO only: adaptive FX and XAUUSD weekday/session execution plus "
-        "broker-driven fail-closed weekend crypto structure execution."
-    )
+    # The weekday runtime owns the app version; adding this independent
+    # engine must not relabel V6.14 as V6.13 in OpenAPI or mobile diagnostics.
     app.openapi_schema = None
     return engine

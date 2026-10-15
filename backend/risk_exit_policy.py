@@ -90,6 +90,33 @@ def build_risk_plan(
     ) or 0.0
     structural_target_r = _safe_float(candidate.get("target_r"), 0.0) or 0.0
 
+    from regime_strategy import STRATEGY_IDS
+    if strategy_id in STRATEGY_IDS:
+        reference = _safe_float(candidate.get("live_price"), 0.0) or 0.0
+        if reference <= 0 or structural_distance <= 0 or not 1.2 <= structural_target_r <= 10:
+            raise ValueError("Regime risk requires a valid reference, invalidation and >=1.2R target")
+        # Transfer relative price distances across analysis/broker quote units
+        # (e.g. EURUSD 1.20 versus an IG price quoted in points).
+        distance = structural_distance / reference * entry
+        spread_bps = _safe_float(candidate.get("ig_spread_bps"), 0.0) or 0.0
+        buffer = entry * max(0.0, spread_bps) / 10000.0
+        target_distance = distance * structural_target_r
+        distance += buffer
+        actual_r = target_distance/distance
+        if actual_r < 1.2:
+            raise ValueError("Spread leaves less than 1.2R to the strategy target")
+        sign = 1 if clean_direction == "BUY" else -1
+        stop, target = entry-sign*distance, entry+sign*target_distance
+        if stop <= 0 or target <= 0:
+            raise ValueError("Invalid regime protective levels")
+        return RiskPlan(
+            version="v614-regime-atr-structure-spread-risk-v1", category=category,
+            direction=clean_direction, entry_price=entry, stop_pct=distance/entry*100,
+            target_r=actual_r, stop_distance=distance, target_distance=target_distance,
+            protective_stop_price=stop, take_profit_target_price=target,
+            source="REGIME_ATR_STRUCTURE_PLUS_SPREAD_RELATIVE_PRICE_TRANSFER",
+        )
+
     structural_strategy = strategy_id.startswith(
         ("XAUUSD_LIQUIDITY_STRUCTURE", "FX_LIQUIDITY_LINES")
     )

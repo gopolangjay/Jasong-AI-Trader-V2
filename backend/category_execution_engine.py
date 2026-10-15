@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -17,6 +18,7 @@ from forex_liquidity_lines_strategy import (
 )
 from risk_exit_policy import build_risk_plan
 from xauusd_liquidity_strategy import STRATEGY_ID as XAU_STRATEGY_ID
+from regime_strategy import STRATEGY_IDS as REGIME_STRATEGY_IDS
 
 
 class RiskSizingError(RuntimeError):
@@ -369,6 +371,25 @@ class CategoryExecutionEngine:
             bid = snapshot.get("bid")
         if offer is None:
             offer = snapshot.get("offer")
+        is_regime = candidate.get("strategy_id") in REGIME_STRATEGY_IDS
+        if is_regime:
+            # A new regime order cannot use the earlier candidate's quote if
+            # the fresh broker snapshot is missing or the spread has widened.
+            try:
+                fresh_bid, fresh_offer = float(bid), float(offer)
+                mid = (fresh_bid+fresh_offer)/2
+                spread_bps = (fresh_offer-fresh_bid)/mid*10000
+                relative_atr = float(candidate["atr"])/float(candidate["live_price"])
+                valid_quote = (math.isfinite(fresh_bid) and math.isfinite(fresh_offer)
+                               and 0 < fresh_bid < fresh_offer
+                               and str(snapshot.get("marketStatus") or "").upper() == "TRADEABLE")
+                liquid = (0 < spread_bps <= float(candidate["spread_gate_bps"])
+                          and spread_bps/10000/relative_atr <= float(candidate["max_spread_atr"]))
+            except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                valid_quote, liquid = False, False
+            if not valid_quote or not liquid:
+                raise RiskSizingError("Fresh IG regime quote/spread/ATR liquidity guard failed")
+            candidate = {**candidate, "ig_spread_bps": spread_bps}
         if bid is None:
             bid = candidate.get("ig_bid")
         if offer is None:
@@ -378,11 +399,10 @@ class CategoryExecutionEngine:
         if entry_quote <= 0:
             raise RiskSizingError("Fresh IG entry-side quote is unavailable")
 
-        risk_plan = build_risk_plan(
-            candidate,
-            entry_price=entry_quote,
-            direction=direction,
-        )
+        try:
+            risk_plan = build_risk_plan(candidate, entry_price=entry_quote, direction=direction)
+        except (ValueError, TypeError) as exc:
+            raise RiskSizingError(str(exc)) from exc
         settlement_currency = self._default_settlement_currency(details)
 
         valuation = self.broker.estimate_closed_position_pnl(
@@ -518,12 +538,26 @@ class CategoryExecutionEngine:
             }
             return
 
+        protected: Dict[str, Any] = {}
+        if candidate.get("strategy_id") in REGIME_STRATEGY_IDS:
+            plan_at_quote = sizing["risk_plan_at_quote"]
+            allowed, reason = self._may_open(candidate, external)
+            if not allowed:
+                self._journal("REGIME_PRE_SUBMISSION_REJECTED", symbol=candidate.get("symbol"), reason=reason)
+                return
+            protected = {
+                "stop_level": plan_at_quote["protective_stop_price"],
+                "limit_level": plan_at_quote["take_profit_target_price"],
+                "max_spread_bps": min(float(candidate["spread_gate_bps"]),
+                                      float(candidate["atr"])/float(candidate["live_price"])*10000*float(candidate["max_spread_atr"])),
+            }
         result = self.broker.open_epic_position(
             epic=str(candidate["ig_epic"]),
             direction=str(candidate["direction"]),
             size=float(sizing["size"]),
             deal_reference=ref,
             allow_size_increment_retry=False,
+            **protected,
         ) or {}
         deal_id = result.get("dealId")
         if not deal_id:
@@ -539,7 +573,7 @@ class CategoryExecutionEngine:
                 )
 
         actual_size = float(result.get("size") or 0.0)
-        if actual_size <= 0 or actual_size > float(sizing["size"]) + 1e-12:
+        if not math.isfinite(actual_size) or actual_size <= 0 or actual_size > float(sizing["size"]) + 1e-12:
             try:
                 self.broker.close_position(str(deal_id))
             finally:
@@ -554,6 +588,27 @@ class CategoryExecutionEngine:
                 entry_price=float(entry_level),
                 direction=str(candidate["direction"]),
             )
+            if protected:
+                # Keep the position tracker aligned with the exact protection
+                # submitted to IG, and close if slippage breaks the cash budget.
+                entry = float(entry_level)
+                sign = 1 if candidate["direction"] == "BUY" else -1
+                stop = float(result.get("attached_stop_level") or 0)
+                target = float(result.get("attached_limit_level") or 0)
+                distance, reward = sign*(entry-stop), sign*(target-entry)
+                if stop <= 0 or target <= 0 or distance <= 0 or reward/distance < 1.2:
+                    raise ValueError("IG accepted no valid attached regime protection")
+                valuation = self.broker.estimate_closed_position_pnl(
+                    epic=str(candidate["ig_epic"]), direction=str(candidate["direction"]),
+                    entry_level=entry, exit_level=stop, size=actual_size,
+                    settlement_currency=sizing.get("valuation", {}).get("native_currency"),
+                    account_currency=sizing["account_currency"],
+                )
+                if abs(float(valuation["account_pnl"])) > float(sizing["risk_cash"])*1.001:
+                    raise ValueError("IG fill exceeds the regime cash risk budget")
+                risk_plan = replace(risk_plan, stop_distance=distance, stop_pct=distance/entry*100,
+                                    target_distance=reward, target_r=reward/distance,
+                                    protective_stop_price=stop, take_profit_target_price=target)
         except Exception as exc:
             self._journal(
                 "RISK_PLAN_ERROR",

@@ -6,7 +6,7 @@ def _c(o, h, l, c):
 
 
 def test_buy_requires_break_retest_and_m1_trigger():
-    prior = [_c(100, 101, 99, 100) for _ in range(20)]
+    prior = [_c(100, 101, 99, 100) for _ in range(22)]
     # Breakout closes above prior high=101; final bar is in-progress/ignored.
     m5 = prior + [_c(100.5, 103, 100.4, 102), _c(102, 102.2, 101.8, 102)]
     m1 = [
@@ -35,7 +35,7 @@ def test_no_m5_break_is_rejected():
 
 
 def test_missing_retest_is_rejected():
-    prior = [_c(100, 101, 99, 100) for _ in range(20)]
+    prior = [_c(100, 101, 99, 100) for _ in range(22)]
     m5 = prior + [_c(101, 103, 101.5, 102), _c(102, 102.2, 101.8, 102)]
     m1 = [_c(103, 103.3, 102.7, 103.1) for _ in range(8)]
     out = structure_signal(m5, m1, 0.05)

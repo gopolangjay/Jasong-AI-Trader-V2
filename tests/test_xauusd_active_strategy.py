@@ -279,10 +279,11 @@ def active_candidate(setup_id="setup-1"):
 
 
 def active_fx_candidate(setup_id="fx-setup-1"):
+    import category_execution_engine as installed_execution
     return {
         **active_candidate(setup_id),
         "category": "FOREX",
-        "strategy_id": FX_STRATEGY_ID,
+        "strategy_id": installed_execution.FX_STRATEGY_ID,
         "strategy_name": "Forex Multi-Session Liquidity / Lines",
         "symbol": "EURUSD",
         "market": "EUR/USD",

@@ -11,7 +11,8 @@ if str(
 
 os.environ.setdefault("IG_DEMO_POSITIONS_CACHE_SECONDS", "3")
 
-# V6.12 adaptive FX policy remains the weekday/session FX authority.
+# Keep the V6.12 policy available for rollback/legacy evidence. The clean
+# runtime explicitly selects V6.14 regime-aware engine classes for new entries.
 import adaptive_fx_v612  # noqa: F401,E402
 import adaptive_fx_v612_status  # noqa: F401,E402
 

@@ -141,11 +141,13 @@ class ActiveXauRouterTests(unittest.TestCase):
         self.assertIn("OLD_ENTRY_STRATEGY_RETIRED", result["rejection_reasons"])
 
     def test_forex_uses_new_versioned_strategy(self):
+        import category_strategy_engine as installed_engine
         result = self._engine(xau_frame())._evaluate_seed(self._seed("EURUSD"))
-        self.assertEqual(result["strategy_id"], FOREX_STRATEGY_ID)
+        self.assertEqual(result["strategy_id"], installed_engine.FOREX_STRATEGY_ID)
         self.assertEqual(
             result["strategy_selection_mode"],
-            "FX_MULTI_SESSION_LIQUIDITY_LINES",
+            ("FX_ADAPTIVE_SESSION_MOMENTUM" if installed_engine.FOREX_STRATEGY_ID.endswith("_ADAPTIVE")
+             else "FX_MULTI_SESSION_LIQUIDITY_LINES"),
         )
         self.assertTrue(result["candlestick_analyzed"])
         self.assertFalse(result["historical_execution_veto"])

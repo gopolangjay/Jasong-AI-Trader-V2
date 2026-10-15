@@ -1,77 +1,87 @@
-# Jasong AI Trader V6.12
+# Jasong AI Trader V6.14
 
-Jasong is an autonomous IG DEMO trading service with a FastAPI backend and a
-Flutter mobile client. V6.12 keeps the existing XAUUSD liquidity/market-structure
-setup and upgrades the 28-pair liquid forex path to Adaptive FX Session Momentum.
+IG DEMO trading service with a FastAPI backend and Flutter Android client.
+V6.14 routes the 28 liquid FX pairs and Gold between trend-following and
+range-reversal strategies. The V6.13 weekend crypto engine remains independent.
 
-## Active execution policy
+## Current strategies
 
-- New autonomous entries: `GOLD` plus all 28 combinations of EUR, GBP, USD,
-  JPY, CHF, CAD, AUD, and NZD. Exotics remain analysis-only.
-- Broker environment: IG DEMO only; live-money execution is disabled.
-- FX mandatory core: aligned H4/H1 directional bias, an M15 BOS/CHoCH/CISD/MSS
-  displacement, and an active pair-relevant session.
-- FX optional confluence: minimum 2 of 5 from H4 trendline, premium/discount,
-  liquidity sweep, OB/FVG/break-zone retest, and closed-candlestick confirmation.
-- FX minimums: 60% market-structure confluence, 20% Quant, 30% directional AI,
-  and 30% overall setup confidence.
-- FX grades: A requires at least 3/5 optional confirmations and at least 0.5R;
-  B requires at least 2/5 and at least 0.3R. The preferred target remains 2R+.
-- Forex session windows follow pair geography: London for EUR/GBP/CHF, New York
-  for USD/CAD, Tokyo for JPY, and Sydney for AUD/NZD. IANA timezones handle DST.
-- News clearance and IG tradeability/quote/spread/size checks do not decide
-  whether the technical FX signal exists, but remain hard DEMO execution guards.
-- Position sizing remains account-risk based, never rounds an unsafe broker size
-  upward, blocks duplicate exposure, and preserves daily/per-pair entry limits.
-- Gold remains on its existing XAUUSD liquidity/structure policy, including its
-  existing structural target requirements; the relaxed V6.12 thresholds are FX-only.
-- The former EMA/ADX/range and non-FX/non-Gold entry strategies are retired.
-  Catalogue entries remain visible, and existing positions remain managed.
+| Condition | Entry | Timeframe | Protection |
+| --- | --- | --- | --- |
+| Strong trend: H1 ADX >25 | EMA20/50 cross, then first confirmed EMA20 pullback | H1; H4 conflict veto when enough history exists | Swing/ATR stop; target 2R before spread costs |
+| Range or qualifying exhaustion | Confirmed price-pivot RSI14 divergence at Bollinger/support-resistance edge, then strong close | M15 or H1 | Pivot/ATR stop; target existing range mean with >=1.2R after costs |
+| Transition, stale/incomplete confirmation or panic volatility | Wait | — | No new entry |
 
-See [the forex strategy specification](backend/README_FOREX_ACTIVE.md) and
-[the Gold strategy specification](backend/README_XAUUSD_ACTIVE.md).
+The range threshold is H1 ADX <20. Qualifying exhaustion below 25 requires falling
+ADX and small EMA separation. Rule completion measures checks, not win probability.
+See the [detailed policy](backend/README_REGIME_ADAPTIVE.md).
 
-## Backend
+## Execution
+
+- IG DEMO only; pair-relevant DST-aware sessions and configured news guards apply.
+- Volatility widens ATR/structure stops and reduces size within the same cash budget.
+- Both category spread caps and spread/ATR liquidity checks apply. Missing volume
+  stays explicitly unknown; observed weak volume blocks entries.
+- New orders submit a broker-side stop and target together. Unsafe minimum sizes,
+  dealing distances, stale/invalid quotes and adverse fill risk reject or close
+  an entry rather than widening its risk budget.
+- Duplicate setups, exposure, portfolio capacity and daily limits remain enforced.
+  Existing positions and earlier strategy evidence continue to be managed.
+- New regime entries use the account-risk-sized category portfolio. They are
+  excluded from the older allocation-sized Compound order lane, which lacks
+  these attached-stop guarantees. Forward evidence still measures PRIME status.
+
+Earlier [FX](backend/README_FOREX_ACTIVE.md) and
+[Gold](backend/README_XAUUSD_ACTIVE.md) guides document retained legacy strategies.
+
+## FinancialData.Net / fdnpy
+
+Set `FDN_API_KEY` on the server to enable the optional
+[official fdnpy SDK](https://github.com/financialdatanet/fdnpy) analysis adapter.
+IG remains the broker and execution-quote source. Forex minute data requires the
+provider's Premium subscription. No credential is committed.
+
+The adapter supports FX, crypto and share minute endpoints; validates UTC OHLCV;
+and retains only complete M15 bars. Commodity/index daily prices never substitute
+for intraday candles. Unconfigured, unsupported, quota-limited or failed requests
+fall back to existing analysis sources. Timeouts, page/request budgets, caching
+and redacted errors bound SDK behavior. See [configuration](backend/.env.example).
+
+## Run and validate
 
 ```bash
 cd backend
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+# Activate the environment for your operating system.
 pip install -r requirements.txt
 python run_server.py
 ```
 
-Run validation from the repository root:
+From the repository root:
 
 ```bash
 python -m unittest discover -s tests -p 'test*.py' -v
 python backend/clean_core_smoke.py
+# Optional broader discovery (includes the function-style weekend tests):
+pip install 'pytest>=8,<10'
+python -m pytest -q tests -o 'python_files=test*.py'
 ```
 
-## Forward performance measures
-
-Judge V6.12 using genuine IG DEMO forward results: win rate, expectancy, profit
-factor, maximum drawdown, realized R-return, A/B-grade performance, confidence
-buckets, and execution-blocker frequencies.
+`/health`, `/strategy/regime-policy`, `/market-categories/status`,
+`/category-portfolio/status` and `/market-categories/data-health` expose the
+active policy, strategy IDs, protections and provider configuration.
 
 ## Android build
-
-Install Flutter and Android Studio, then:
 
 ```bash
 cd mobile
 flutter create . --platforms=android
 flutter pub get
+flutter analyze
 flutter build apk --release
 ```
 
-The APK is written to `mobile/build/app/outputs/flutter-apk/app-release.apk`.
-
-## Risk statement
-
-No trading strategy guarantees returns. The active execution path remains on
-IG DEMO. V6.12 deliberately separates technical-signal eligibility from broker
-execution safety: an eligible setup may be recorded for forward learning while
-an actual order is still blocked by news, market status, quote/spread, position
-size, duplicate exposure, or account-risk controls.
+APK output: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
+The V6.14 client shows regime, timeframe, ADX, volatility, rule status and blockers.
+Code tests do not establish profitability; evaluate returns using genuine
+broker-settled DEMO results.

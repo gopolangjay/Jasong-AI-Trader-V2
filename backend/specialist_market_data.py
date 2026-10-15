@@ -11,6 +11,7 @@ import pandas as pd
 import yfinance as yf
 
 import market_data_router as market_router
+from fdn_market_data import FinancialDataProvider, FDNDataError
 
 
 class ResilientSpecialistMarketData:
@@ -156,6 +157,7 @@ class ResilientSpecialistMarketData:
         self._yahoo_cooldown_until = 0.0
         self._original_loader = None
         self._installed = False
+        self.fdn = FinancialDataProvider()
 
     # ------------------------------------------------------------------
     # Keys / source telemetry
@@ -772,6 +774,16 @@ class ResilientSpecialistMarketData:
         """Return OHLCV only; strategy logic is intentionally untouched."""
         category = self._category(seed)
 
+        if self.fdn.configured and self.fdn.identifier(seed) is not None:
+            try:
+                frame = self.fdn.load(seed)
+                self._record_success(seed, self.fdn.SOURCE)
+                return frame
+            except FDNDataError:
+                # Preserve the original routed/cache sources on quota, network,
+                # entitlement or data-quality failures; FDN status explains why.
+                pass
+
         if category == "FOREX":
             return self._forex(seed)
 
@@ -831,14 +843,15 @@ class ResilientSpecialistMarketData:
         return {
             "version": self.VERSION,
             "installed": self._installed,
+            "financialdata_net": self.fdn.status(),
             "strategy_logic_changed": False,
             "execution_logic_changed": False,
             "forex_policy": (
-                "JASONG_ROUTER: IG_DEMO -> TWELVE_DATA -> "
+                "OPTIONAL_FDNPY -> JASONG_ROUTER: IG_DEMO -> TWELVE_DATA -> "
                 "YAHOO -> ROUTER_STALE -> SPECIALIST_PERSISTENT_CACHE"
             ),
             "non_forex_policy": (
-                "FRESH_CACHE -> SERIALIZED_YAHOO -> "
+                "OPTIONAL_FDNPY_INTRADAY_IF_SUPPORTED -> FRESH_CACHE -> SERIALIZED_YAHOO -> "
                 "STALE_PERSISTENT_CACHE"
             ),
             "cache_dir": str(self.cache_dir),

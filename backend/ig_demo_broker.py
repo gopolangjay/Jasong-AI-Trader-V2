@@ -1080,6 +1080,9 @@ class IGDemoBroker:
         size: Optional[float] = None,
         deal_reference: Optional[str] = None,
         allow_size_increment_retry: bool = True,
+        stop_level: Optional[float] = None,
+        limit_level: Optional[float] = None,
+        max_spread_bps: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Open an IG DEMO position on an already-resolved EPIC."""
         direction = str(direction or "").upper().strip()
@@ -1089,7 +1092,8 @@ class IGDemoBroker:
         if not clean_epic:
             raise IGDemoError("IG DEMO EPIC is empty")
 
-        details = self.market_details(clean_epic)
+        protected_order = stop_level is not None or limit_level is not None
+        details = self.market_details(clean_epic, require_quote=True) if protected_order else self.market_details(clean_epic)
         instrument = details.get("instrument") or {}
         snapshot = details.get("snapshot") or {}
         market_status = str(snapshot.get("marketStatus") or "").upper()
@@ -1108,6 +1112,8 @@ class IGDemoBroker:
             minimum_size=min_size,
             increment=size_increment,
         )
+        if not allow_size_increment_retry and final_size > requested_size+1e-12:
+            raise IGDemoError("IG minimum/increment would increase the risk-sized order")
         payload: Dict[str, Any] = {
             "currencyCode": self._default_currency(instrument),
             "dealReference": (deal_reference or f"JSCMP_{uuid.uuid4().hex[:20]}")[:30],
@@ -1119,6 +1125,32 @@ class IGDemoBroker:
             "orderType": "MARKET",
             "size": round(final_size, 12),
         }
+        if protected_order:
+            try:
+                stop, target = float(stop_level), float(limit_level)
+                quote = self.extract_snapshot_quote(details)
+                bid, offer = float(quote["bid"]), float(quote["offer"])
+                entry = offer if direction == "BUY" else bid
+                sign = 1 if direction == "BUY" else -1
+                spread_bps = (offer-bid)/((offer+bid)/2)*10000
+                valid = (all(math.isfinite(v) and v > 0 for v in (stop, target, bid, offer))
+                         and bid < offer and sign*(entry-stop) > 0 and sign*(target-entry) > 0
+                         and max_spread_bps is not None and math.isfinite(float(max_spread_bps))
+                         and spread_bps <= float(max_spread_bps))
+                minimum_rule = (details.get("dealingRules") or {}).get("minNormalStopOrLimitDistance") or {}
+                minimum = float(minimum_rule["value"])
+                unit = str(minimum_rule.get("unit") or "POINTS").upper()
+                if unit not in {"POINTS", "PERCENTAGE"} or not math.isfinite(minimum) or minimum < 0:
+                    valid = False
+                if unit == "PERCENTAGE":
+                    minimum = entry*minimum/100
+                # Reject a too-tight stop; never widen it after risk sizing.
+                valid = valid and sign*(entry-stop) >= minimum and sign*(target-entry) >= minimum
+            except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                valid = False
+            if not valid:
+                raise IGDemoError("Attached regime stop/target or fresh quote/dealing distance guard failed")
+            payload.update({"stopLevel": stop, "limitLevel": target})
         acknowledgement = self._request(
             "POST",
             "/positions/otc",
@@ -1233,6 +1265,8 @@ class IGDemoBroker:
             "dealId": confirmation.get("dealId"),
             "level": confirmation.get("level"),
             "dealStatus": confirmation.get("dealStatus"),
+            "attached_stop_level": payload.get("stopLevel"),
+            "attached_limit_level": payload.get("limitLevel"),
             "reason": confirmation.get("reason"),
             "live_money_execution": False,
         }

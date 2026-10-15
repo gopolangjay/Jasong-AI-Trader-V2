@@ -160,7 +160,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, dynamic>? integrityStatus;
   Map<String, dynamic>? autoManagerJob;
 
-  // V6.11 FX + XAUUSD liquidity-structure intelligence bridge.
+  // V6.14 regime-adaptive intelligence bridge.
   // The original mobile surface is preserved. These fields only add the
   // active currency/Gold views exposed by the V6.11 backend.
   Map<String, dynamic>? globalMarketsStatus;
@@ -5341,15 +5341,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   child: watcherCard(w),
                 )),
           const SizedBox(height: 10),
-          sectionTitle('V6.11 FX + XAUUSD policy'),
+          sectionTitle('V6.14 regime adaptive policy'),
           glassCard(
             child: const Column(
               children: [
-                _MidnightRuleRow('Structure', 'H4 / H1 / M15', 'Completed candles only'),
+                _MidnightRuleRow('Strategy', 'Trend / Range', 'EMA20/50 pullback or confirmed RSI14 divergence'),
                 Divider(height: 24),
                 _MidnightRuleRow('Sessions', 'Pair geography', 'London / New York / Tokyo / Sydney • DST-aware'),
                 Divider(height: 24),
-                _MidnightRuleRow('Risk', '≤1% / ≥2R', 'FX max 4/day • Gold max 2/day • SAST'),
+                _MidnightRuleRow('Risk', '≤1% / ≥1.2R', 'Trend targets 2R • Reversals target the range mean • Attached stop'),
               ],
             ),
           ),
@@ -7579,7 +7579,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
 
     // =========================================================
-    // V6.11 FX + XAUUSD ACTIVE UI — original full mobile surface preserved
+    // V6.14 REGIME ACTIVE UI — original full mobile surface preserved
     // Visual contract follows the supplied six-screen reference:
     // Home • Markets • Risk • Trades • AI • Settings.
     // All values below remain live API-backed; no demo values are fabricated.
@@ -7786,7 +7786,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     const SizedBox(width: 7),
                     templateTinyPill(systemGood ? 'ALL SYSTEMS GO' : 'CHECKING', color: systemGood ? templateGreen : templateAmber),
                     const Spacer(),
-                    const Text('V6.11 FX + XAU', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
+                    const Text('V6.14 REGIME', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w900, color: Colors.white70)),
                   ],
                 ),
                 const SizedBox(height: 18),
@@ -7910,10 +7910,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           Row(children: const [
             Expanded(child: Text('FX + XAUUSD EXECUTION', style: TextStyle(color: templateTeal, fontSize: 16, fontWeight: FontWeight.w900))),
-            Text('V6.11 FX + XAU', style: TextStyle(color: Colors.white54, fontSize: 9)),
+            Text('V6.14 REGIME', style: TextStyle(color: Colors.white54, fontSize: 9)),
           ]),
           const SizedBox(height: 3),
-          const Text('Liquidity lines + structure • H4 / H1 / M15 • closed candles', style: TextStyle(color: Colors.white54, fontSize: 10)),
+          const Text('Trend pullbacks / RSI divergence • H1 regime • closed candles', style: TextStyle(color: Colors.white54, fontSize: 10)),
           const SizedBox(height: 12),
           templateCard(
             padding: const EdgeInsets.all(8),
@@ -8059,10 +8059,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 const Icon(Icons.autorenew_rounded, color: templateTeal),
                 const SizedBox(width: 9),
                 const Expanded(child: Text('ELITE 80/20 COMPOUND', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900))),
-                const Text('V6.11 FX + XAU', style: TextStyle(color: Colors.white54, fontSize: 9)),
+                const Text('V6.14 REGIME', style: TextStyle(color: Colors.white54, fontSize: 9)),
               ]),
               const SizedBox(height: 8),
               templateTinyPill(compoundStatus.replaceAll('_', ' '), color: compoundEnabled ? templateGreen : templateAmber),
+              const SizedBox(height: 8),
+              const Text('Regime strategies use the risk-sized portfolio. Compound entries are excluded for these strategies.', style: TextStyle(color: Colors.white54, fontSize: 10)),
               const SizedBox(height: 8),
               const Text('• Best available 1–5 markets • top 2 category candidates\n• Adaptive target • 20% harvest • IG DEMO only\n• AI ≥40% • Quant ≥28% • Fast ≥45\n• PRIME = broker-settled forward only • 12+ settled • PF ≥1.20 • Exp ≥+0.05R • WR ≥45% • Bootstrap ≥75% • DD ≤6R', style: TextStyle(color: Colors.white60, fontSize: 9.5, height: 1.55)),
               const SizedBox(height: 13),
@@ -8215,6 +8217,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           0;
       final regime =
           top['regime']?.toString().toUpperCase() ?? 'UNKNOWN';
+      final isRegime = top['regime_strategy'] is Map;
+      final adxValue = double.tryParse('${top['adx'] ?? 0}') ?? 0;
+      final volatilityRatio = double.tryParse('${top['volatility_ratio'] ?? 0}') ?? 0;
+      final blockers = top['rejection_reasons'] is List
+          ? (top['rejection_reasons'] as List).join(', ')
+          : '';
 
       final forwardRaw = top['forward_validation'];
       final forward = forwardRaw is Map
@@ -8338,6 +8346,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ]),
           ),
           const SizedBox(height: 10),
+          if (isRegime) ...[
+            templateCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${top['timeframe'] ?? 'Waiting'} • ADX ${adxValue.toStringAsFixed(1)} • Volatility ${volatilityRatio.toStringAsFixed(2)}×',
+                    style: const TextStyle(color: templateTeal, fontSize: 10),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    blockers.isEmpty
+                        ? '${top['strategy_reason'] ?? 'Confirmed setup'}'
+                        : 'Waiting: ${blockers.replaceAll('_', ' ')}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 10),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Rule completion measures setup checks. It is not a win probability.',
+                    style: TextStyle(color: Colors.white54, fontSize: 9),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
           templateCard(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -8378,9 +8412,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                      const Text(
-                        'AI directional',
-                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      Text(
+                        isRegime ? 'ML diagnostic' : 'AI directional',
+                        style: const TextStyle(color: Colors.white54, fontSize: 8.5),
                       ),
                     ]),
                   ),
@@ -8393,9 +8427,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                      const Text(
-                        'Quant',
-                        style: TextStyle(color: Colors.white54, fontSize: 8.5),
+                      Text(
+                        isRegime ? 'Rule completion' : 'Quant',
+                        style: const TextStyle(color: Colors.white54, fontSize: 8.5),
                       ),
                     ]),
                   ),
@@ -8439,7 +8473,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'FORWARD EVIDENCE (V6.11)',
+                  'FORWARD EVIDENCE (V6.14)',
                   style: TextStyle(
                     color: templateTeal,
                     fontSize: 9,
@@ -8447,9 +8481,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                 ),
                 const SizedBox(height: 4),
-                gate('AI directional gate', '≥ 40%', '${aiPct.toStringAsFixed(1)}%', aiPct >= 40),
-                gate('Quant normal gate', '≥ 28%', '${qPct.toStringAsFixed(1)}%', qPct >= 28, icon: Icons.analytics_outlined),
-                gate('Live Fast quality', '≥ 45', fastNum.toStringAsFixed(0), fastNum >= 45, icon: Icons.speed_rounded),
+                if (isRegime) ...[
+                  gate('Confirmed regime setup', 'Required', top['signal_qualified'] == true ? 'Passed' : 'Waiting', top['signal_qualified'] == true),
+                  gate('Liquidity and spread', 'Required', top['liquidity_pass'] == true && top['spread_pass'] == true ? 'Passed' : 'Waiting', top['liquidity_pass'] == true && top['spread_pass'] == true),
+                  gate('Session and news', 'Required', top['execution_safety_pass'] == true ? 'Passed' : 'Waiting', top['execution_safety_pass'] == true),
+                ] else ...[
+                  gate('AI directional gate', '≥ 40%', '${aiPct.toStringAsFixed(1)}%', aiPct >= 40),
+                  gate('Quant normal gate', '≥ 28%', '${qPct.toStringAsFixed(1)}%', qPct >= 28, icon: Icons.analytics_outlined),
+                  gate('Live Fast quality', '≥ 45', fastNum.toStringAsFixed(0), fastNum >= 45, icon: Icons.speed_rounded),
+                ],
                 gate('Broker-settled sample', '≥ 12', '$settled', settled >= 12, icon: Icons.format_list_numbered_rounded),
                 gate('Profit factor', '≥ 1.20', pfNum.toStringAsFixed(2), pfNum >= 1.20, icon: Icons.show_chart_rounded),
                 gate('Expectancy', '≥ +0.05R', '${expNum >= 0 ? '+' : ''}${expNum.toStringAsFixed(2)}R', expNum >= .05, icon: Icons.trending_up_rounded),
@@ -8558,7 +8598,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const SizedBox(height: 15),
               const Text('SYSTEM INFO', style: TextStyle(color: templateTeal, fontSize: 9, fontWeight: FontWeight.w900)),
               const SizedBox(height: 8),
-              const _MidnightSystemRow('Version', 'V6.11 FX + XAU ACTIVE'),
+              const _MidnightSystemRow('Version', 'V6.14 REGIME ADAPTIVE'),
               const Divider(height: 18, color: Colors.white10),
               const _MidnightSystemRow('Environment', 'DEMO ONLY'),
               const Divider(height: 18, color: Colors.white10),
@@ -8566,7 +8606,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const Divider(height: 18, color: Colors.white10),
               _MidnightSystemRow('Last System Check', DateTime.now().toIso8601String().substring(0, 19).replaceFirst('T', ' ')),
               const Divider(height: 18, color: Colors.white10),
-              const _MidnightSystemRow('Qualification', '28Q / 40AI / 45Fast / 12 settled / 1.20PF / +0.05R / 45WR / 75 bootstrap / ≤6R DD'),
+              const _MidnightSystemRow('Qualification', 'Regime setup + liquidity + session/news + account risk • PRIME uses settled evidence'),
               const SizedBox(height: 14),
               SizedBox(
                 width: double.infinity,
@@ -8739,7 +8779,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   Text('Jasong AI Trader', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
                   SizedBox(height: 2),
-                  Text('V6.11 FX Lines + XAUUSD Structure • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
+                  Text('V6.14 Trend Pullbacks + RSI Divergence • IG DEMO', style: TextStyle(fontSize: 9.5, color: Colors.white54, letterSpacing: .2)),
                 ],
               ),
             ),

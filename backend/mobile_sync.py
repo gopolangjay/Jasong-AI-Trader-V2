@@ -33,6 +33,8 @@ class MobileSyncCache:
     ) -> None:
         self.intelligence = intelligence
         self.portfolio = portfolio
+        if str(getattr(portfolio, "VERSION", "")).startswith("6.14-"):
+            self.VERSION = portfolio.VERSION
         self.forward_prime = forward_prime
         self.compound_engine = compound_engine
         self.market_data = market_data
@@ -77,6 +79,8 @@ class MobileSyncCache:
                 return
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
+                return
+            if raw.get("version") != self.VERSION:
                 return
             raw["version"] = self.VERSION
             raw["restored_from_disk"] = True

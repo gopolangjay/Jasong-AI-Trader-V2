@@ -217,6 +217,7 @@ def install_specialist_market_system(
     ownership_components: Optional[
         List[Any]
     ] = None,
+    regime_mode: bool = False,
 ) -> Dict[str, Any]:
     """Install the active V6.11 FX and XAUUSD execution architecture.
 
@@ -290,7 +291,12 @@ def install_specialist_market_system(
     # EXISTING CATEGORY STRATEGY ENGINE
     # ========================================================
 
-    intelligence = CategoryStrategyEngine(
+    strategy_class, portfolio_class, prime_class = CategoryStrategyEngine, CategoryExecutionEngine, ForwardPrimeArchitecture
+    if regime_mode:
+        from regime_integration import RegimeStrategyEngine, RegimeExecutionEngine, RegimePrimeArchitecture
+        strategy_class, portfolio_class, prime_class = RegimeStrategyEngine, RegimeExecutionEngine, RegimePrimeArchitecture
+
+    intelligence = strategy_class(
         broker=broker,
         frame_func=provenance_frame_func,
         state_path=category_state_path,
@@ -314,7 +320,7 @@ def install_specialist_market_system(
         None,
     )
 
-    forward_prime = ForwardPrimeArchitecture(
+    forward_prime = prime_class(
         intelligence=intelligence,
         broker=broker,
         provenance_registry=
@@ -378,7 +384,7 @@ def install_specialist_market_system(
         )
 
     # Active qualifying FX and XAUUSD setups execute directly on IG DEMO.
-    portfolio = CategoryExecutionEngine(
+    portfolio = portfolio_class(
         broker=broker,
         ranking_source=
             forward_prime.category_rankings,
@@ -426,13 +432,15 @@ def install_specialist_market_system(
     mobile_sync.start_thread()
 
     app.title = (
-        "Jasong AI Trader V6.11 FX + XAUUSD Active API"
+        f"Jasong AI Trader {intelligence.VERSION} API"
     )
-    app.version = "6.11-fx-xau-active"
+    app.version = intelligence.VERSION
     app.description = (
-        "Jasong AI Trader — active IG DEMO FX liquidity/lines and XAUUSD "
-        "liquidity/structure execution in geography-aware, DST-aware sessions, "
-        "with structural risk sizing, broker-settled evidence, and diagnostics."
+        "IG DEMO only: closed-candle regime strategies with account risk sizing "
+        "and attached protection; geography-aware sessions, broker-settled "
+        "evidence and optional FDN analysis data."
+        if regime_mode else
+        "IG DEMO FX liquidity/lines and XAUUSD liquidity/structure execution."
     )
     app.openapi_schema = None
 
@@ -471,7 +479,7 @@ def install_specialist_market_system(
                 "/chatgpt-mcp/status",
                 lambda: {
                     "version":
-                        "6.11-fx-xau-active",
+                        intelligence.VERSION,
                     "enabled": True,
                     "installed": False,
                     "runtime_ready": False,
@@ -536,7 +544,7 @@ def install_specialist_market_system(
     ]:
         return {
             "version":
-                "6.11-fx-xau-active",
+                intelligence.VERSION,
             "categories": {
                 category:
                     intelligence.universe(
@@ -546,9 +554,10 @@ def install_specialist_market_system(
                 in CATEGORY_ORDER
             },
             "confidence_policy": {
-                "quant_min_pct": 28.0,
-                "model_ai_min_pct": 40.0,
-                "fast_score_min": 45.0,
+                "regime_rule_completion_basis": "NOT_WIN_PROBABILITY" if regime_mode else None,
+                "quant_min_pct": None if regime_mode else 28.0,
+                "model_ai_min_pct": None if regime_mode else 40.0,
+                "fast_score_min": None if regime_mode else 45.0,
                 "historical_validation_mode":
                     "INFORMATIONAL_ONLY",
                 "historical_execution_veto":
@@ -580,7 +589,7 @@ def install_specialist_market_system(
             "analysis_price_source":
                 "DYNAMIC_ROUTED_PER_MARKET",
             "analysis_price_policy": (
-                "FOREX uses Jasong market-data router; "
+                "Optional fdnpy intraday data, falling back to existing sources; FOREX uses Jasong market-data router; "
                 "non-FX uses serialized/cached public data"
             ),
             "broker_quote_source":
@@ -607,7 +616,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.11-fx-xau-active",
+                    intelligence.VERSION,
                 "category":
                     clean,
                 "count":
@@ -637,7 +646,7 @@ def install_specialist_market_system(
 
         return {
             "version":
-                "6.11-fx-xau-active",
+                intelligence.VERSION,
             "category":
                 clean,
             "count":
@@ -696,7 +705,7 @@ def install_specialist_market_system(
         )
         return {
             "version":
-                "6.11-fx-xau-active",
+                intelligence.VERSION,
             "count":
                 len(rows),
             "candidates":
@@ -749,7 +758,7 @@ def install_specialist_market_system(
         if clean not in CATEGORY_ORDER:
             return {
                 "version":
-                    "6.11-fx-xau-active",
+                    intelligence.VERSION,
                 "error":
                     "Unknown category",
                 "category":
@@ -785,7 +794,7 @@ def install_specialist_market_system(
         "/category-portfolio/positions",
         lambda: {
             "version":
-                "6.11-fx-xau-active",
+                intelligence.VERSION,
             "positions":
                 portfolio.positions(),
             "live_money_execution":
@@ -858,5 +867,5 @@ def install_specialist_market_system(
         "mobile_sync":
             mobile_sync,
         "version":
-            "6.11-fx-xau-active",
+            intelligence.VERSION,
     }

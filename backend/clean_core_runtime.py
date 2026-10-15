@@ -15,7 +15,7 @@ from specialist_market_data import ResilientSpecialistMarketData
 from specialist_market_integration import install_specialist_market_system
 
 
-VERSION = "6.13-adaptive-fx-xau-weekend"
+VERSION = "6.14-regime-adaptive-v1"
 RUNTIME: Dict[str, Any] = {}
 
 
@@ -59,10 +59,10 @@ def _compound_candidates(_: float = 0.0) -> List[Dict[str, Any]]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jasong AI Trader V6.13 Adaptive FX + XAUUSD + Weekend API",
+        title="Jasong AI Trader V6.14 Regime Adaptive + Weekend API",
         version=VERSION,
         description=(
-            "Clean IG DEMO runtime: adaptive FX and XAUUSD execution plus a "
+            "Clean IG DEMO runtime: regime-aware FX and XAUUSD execution plus a "
             "broker-driven fail-closed weekend market path."
         ),
     )
@@ -89,9 +89,16 @@ def create_app() -> FastAPI:
         compound_engine=compound,
         frame_func=specialist_frame,
         ownership_components=[],
+        regime_mode=True,
     )
     RUNTIME["specialist_system"] = system
     RUNTIME["market_data"] = system.get("market_data")
+
+    from regime_integration import policy_status
+
+    @app.get("/strategy/regime-policy")
+    def regime_policy() -> Dict[str, Any]:
+        return policy_status()
 
     if hasattr(compound, "start_thread"):
         compound.start_thread()
@@ -101,6 +108,7 @@ def create_app() -> FastAPI:
         return {
             "service": "Jasong AI Trader",
             "version": VERSION,
+            "strategy_ids": policy_status()["strategy_ids"],
             "runtime": "CLEAN_CORE",
             "broker_environment": "IG_DEMO",
             "prime_authority": "BROKER_SETTLED_FORWARD_ONLY",
@@ -119,6 +127,8 @@ def create_app() -> FastAPI:
             "broker": broker.status(),
             "specialist_installed": bool(RUNTIME.get("specialist_system")),
             "weekend_market_installed": weekend is not None,
+            "regime_strategy_ids": policy_status()["strategy_ids"],
+            "financialdata_net": RUNTIME["market_data"].fdn.status(),
             "weekend_strategy_id": getattr(weekend, "_state", {}).get("strategy_id") if weekend is not None else None,
             "legacy_main_imported": False,
             "legacy_execution_reliability_imported": False,
