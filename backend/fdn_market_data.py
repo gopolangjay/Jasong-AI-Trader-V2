@@ -13,8 +13,9 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
-import numpy as np
 import pandas as pd
+
+from candle_data import normalize_candles, CandleValidationError
 
 
 class FDNDataError(RuntimeError):
@@ -133,20 +134,11 @@ class FinancialDataProvider:
         frame = pd.DataFrame(rows)
         if frame.empty:
             raise FDNDataError("FDN has no intraday records")
-        frame.index = pd.to_datetime(frame.pop("Time"), utc=True, errors="coerce")
-        if frame.index.isna().any() or any(frame.index.asi8 % pd.Timedelta(minutes=1).value):
-            raise FDNDataError("FDN has invalid minute timestamps")
-        for col in frame.columns:
-            frame[col] = pd.to_numeric(frame[col], errors="coerce")
-        frame.Volume = frame.Volume.fillna(0.0)
-        ohlc = frame[["Open", "High", "Low", "Close"]]
-        if (not np.isfinite(ohlc).all().all() or (ohlc <= 0).any().any()
-                or (frame.High < frame[["Open", "Close", "Low"]].max(axis=1)).any()
-                or (frame.Low > frame[["Open", "Close", "High"]].min(axis=1)).any()
-                or not np.isfinite(frame.Volume).all() or (frame.Volume < 0).any()):
-            raise FDNDataError("FDN has invalid OHLCV values")
-        frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-        frame = frame[frame.index+pd.Timedelta(minutes=1) <= now]
+        frame.index = pd.Index(frame.pop("Time"))
+        try:
+            frame = normalize_candles(frame, interval="1min", now=now, closed_only=True)
+        except CandleValidationError as exc:
+            raise FDNDataError(str(exc)) from exc
         grouped = frame.resample("15min", label="left", closed="left", origin="start_day")
         bars = grouped.agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
         bars = bars[(grouped.Close.count() == 15) & (bars.index+pd.Timedelta(minutes=15) <= now)].dropna()

@@ -32,7 +32,8 @@ assert getattr(runtime, "app", None) is not None
 assert getattr(runtime, "IG_DEMO_BROKER", None) is not None
 assert getattr(runtime, "COMPOUND_ENGINE", None) is not None
 assert getattr(runtime, "V63_SPECIALIST_SYSTEM", None) is not None
-assert runtime.app.version == "6.14-regime-adaptive-v1"
+from runtime_version import VERSION
+assert runtime.app.version == VERSION
 assert type(runtime.CATEGORY_STRATEGY_ENGINE).__name__ == "RegimeStrategyEngine"
 assert type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__ == "RegimeExecutionEngine"
 

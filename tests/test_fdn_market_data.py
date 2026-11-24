@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import copy
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -19,6 +20,25 @@ def minute_records(date="2026-10-15", count=1440):
 
 
 class FDNTests(unittest.TestCase):
+    def test_identical_minutes_are_removed_but_conflicting_duplicates_fail_closed(self):
+        records = minute_records()
+        now = pd.Timestamp("2026-10-16 00:00Z")
+        expected = FinancialDataProvider.normalize(records, "EURUSD", now)
+        actual = FinancialDataProvider.normalize(records+[copy.deepcopy(records[0])], "EURUSD", now)
+        pd.testing.assert_frame_equal(actual, expected)
+        conflict = copy.deepcopy(records[0])
+        conflict["volume"] += 1
+        with self.assertRaisesRegex(FDNDataError, "Conflicting duplicate"):
+            FinancialDataProvider.normalize(records+[conflict], "EURUSD", now)
+
+    def test_subminute_and_numeric_times_cannot_be_promoted_to_complete_m15(self):
+        for stamp in ("2026-10-15T00:00:00.000000001Z", 1792022400000000000):
+            with self.subTest(stamp=stamp):
+                records = minute_records()
+                records[0]["time"] = stamp
+                with self.assertRaises(FDNDataError):
+                    FinancialDataProvider.normalize(records, "EURUSD", pd.Timestamp("2026-10-16 00:00Z"))
+
     def test_minute_records_become_complete_sorted_utc_m15(self):
         records = minute_records()
         bars = FinancialDataProvider.normalize(list(reversed(records)), "EURUSD", pd.Timestamp("2026-10-15 23:59Z"))

@@ -9,7 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-VERSION = "6.14-regime-adaptive-v1"
+from candle_data import normalize_candles
+from runtime_version import VERSION
 TREND_ID = "REGIME_EMA20_50_PULLBACK_V1"
 REVERSAL_ID = "REGIME_RSI14_DIVERGENCE_V1"
 STRATEGY_IDS = (TREND_ID, REVERSAL_ID)
@@ -33,30 +34,14 @@ class RegimeConfig:
 def completed_frames(raw: pd.DataFrame, now: Any = None) -> dict[str, pd.DataFrame]:
     """Input timestamps are UTC M15 bar opens; require every constituent bar.
 
-    A partial H1/H4 candle, a duplicate, or a missing M15 bar can never be
+    A partial H1/H4 candle, a conflicting duplicate, or a missing M15 bar cannot be
     promoted to a completed higher-timeframe signal.
     """
     if not isinstance(raw.index, pd.DatetimeIndex):
         raise ValueError("Regime strategy requires timestamped M15 OHLCV")
-    frame = raw.copy()
-    frame.index = pd.to_datetime(frame.index, utc=True)
-    if frame.index.has_duplicates:
-        raise ValueError("Duplicate M15 timestamps")
-    if any((frame.index.asi8 % pd.Timedelta(minutes=15).value) != 0):
-        raise ValueError("Regime input must use aligned M15 candle opens")
-    for col in OHLCV[:4]:
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame["Volume"] = pd.to_numeric(frame.get("Volume", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
-    values = frame[OHLCV[:4]]
-    valid = (np.isfinite(values).all(axis=1) & (values > 0).all(axis=1)
-             & (frame.High >= frame[["Open", "Close", "Low"]].max(axis=1))
-             & (frame.Low <= frame[["Open", "Close", "High"]].min(axis=1)))
-    if not valid.all() or not np.isfinite(frame.Volume).all() or (frame.Volume < 0).any():
-        raise ValueError("Invalid OHLCV in regime input")
+    frame = normalize_candles(raw, interval="15min", now=now, closed_only=True)[OHLCV]
     stamp = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
     stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
-    frame = frame[OHLCV].sort_index()
-    frame = frame[frame.index + pd.Timedelta(minutes=15) <= stamp]
     frames = {"M15": frame}
     for name, rule, count in (("H1", "1h", 4), ("H4", "4h", 16)):
         grouped = frame.resample(rule, label="left", closed="left", origin="start_day")

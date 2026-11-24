@@ -14,6 +14,7 @@ import pandas as pd
 import yfinance as yf
 
 from ig_demo_broker import IGDemoBroker
+from candle_data import CandleValidationError, normalize_candles, ig_prices_to_frame
 
 
 # ============================================================
@@ -340,33 +341,14 @@ def clean_ohlcv(
     required = ["Open", "High", "Low", "Close"]
 
     if not all(col in data.columns for col in required):
-        return pd.DataFrame()
+        if data.empty:
+            return pd.DataFrame()
+        raise CandleValidationError("Missing required OHLC columns")
 
     if "Volume" not in data.columns:
         data["Volume"] = 0.0
 
-    data = data[
-        ["Open", "High", "Low", "Close", "Volume"]
-    ].copy()
-
-    for col in data.columns:
-        data[col] = pd.to_numeric(
-            data[col],
-            errors="coerce",
-        )
-
-    data = data.dropna(subset=required)
-
-    if not isinstance(data.index, pd.DatetimeIndex):
-        data.index = pd.to_datetime(
-            data.index,
-            errors="coerce",
-            utc=True,
-        )
-
-    data = data[~data.index.isna()]
-
-    return data.sort_index()
+    return normalize_candles(data[["Open", "High", "Low", "Close", "Volume"]])
 
 
 # ============================================================
@@ -536,112 +518,8 @@ def _ig_resolution(
     return lookup[clean]
 
 
-def _ig_mid(
-    value,
-) -> Optional[float]:
-    if not isinstance(value, dict):
-        try:
-            return float(value)
-        except Exception:
-            return None
-
-    def number(key: str) -> Optional[float]:
-        raw = value.get(key)
-        if raw is None:
-            return None
-        try:
-            return float(raw)
-        except Exception:
-            return None
-
-    bid = number("bid")
-    ask = number("ask")
-    last = number("lastTraded")
-
-    if bid is not None and ask is not None:
-        return (bid + ask) / 2.0
-    if last is not None:
-        return last
-    if bid is not None:
-        return bid
-    if ask is not None:
-        return ask
-    return None
-
-
-def _ig_prices_to_frame(
-    prices: list,
-) -> pd.DataFrame:
-    rows = []
-    index = []
-
-    for item in prices or []:
-        if not isinstance(item, dict):
-            continue
-
-        timestamp = (
-            item.get("snapshotTimeUTC")
-            or item.get("snapshotTime")
-        )
-        parsed_time = pd.to_datetime(
-            timestamp,
-            utc=True,
-            errors="coerce",
-        )
-        if pd.isna(parsed_time):
-            continue
-
-        open_price = _ig_mid(
-            item.get("openPrice")
-        )
-        high_price = _ig_mid(
-            item.get("highPrice")
-        )
-        low_price = _ig_mid(
-            item.get("lowPrice")
-        )
-        close_price = _ig_mid(
-            item.get("closePrice")
-        )
-
-        if any(
-            value is None
-            for value in (
-                open_price,
-                high_price,
-                low_price,
-                close_price,
-            )
-        ):
-            continue
-
-        try:
-            volume = float(
-                item.get("lastTradedVolume")
-                or 0.0
-            )
-        except Exception:
-            volume = 0.0
-
-        index.append(parsed_time)
-        rows.append({
-            "Open": open_price,
-            "High": high_price,
-            "Low": low_price,
-            "Close": close_price,
-            "Volume": volume,
-        })
-
-    if not rows:
-        return pd.DataFrame()
-
-    frame = pd.DataFrame(
-        rows,
-        index=pd.DatetimeIndex(index),
-    )
-    frame.index.name = "datetime"
-
-    return clean_ohlcv(frame)
+def _ig_prices_to_frame(prices: list, *, interval: str = "15m", now=None) -> pd.DataFrame:
+    return ig_prices_to_frame(prices, interval=interval, now=now, closed_only=True)
 
 
 def _ig_history_key(
@@ -704,11 +582,12 @@ def download_ig_demo(
     ):
         return existing
 
-    points = (
-        1
-        if len(existing) >= 80
-        else IG_DEMO_WARMUP_POINTS
-    )
+    duration = pd.Timedelta(interval)
+    stamp = pd.Timestamp(now, unit="s", tz="UTC")
+    # Fetch every bar since the last completed cached open, plus the current
+    # forming bar. A single-point refresh can otherwise miss finalized bars.
+    points = (min(500, max(2, int((stamp-existing.index[-1]) / duration) + 1))
+              if len(existing) >= 80 else IG_DEMO_WARMUP_POINTS)
 
     _provider_request("IG_DEMO")
 
@@ -719,7 +598,7 @@ def download_ig_demo(
     )
 
     prices = payload.get("prices") or []
-    fresh = _ig_prices_to_frame(prices)
+    fresh = _ig_prices_to_frame(prices, interval=interval, now=stamp)
 
     if fresh.empty:
         raise RuntimeError(
@@ -733,11 +612,7 @@ def download_ig_demo(
         merged = pd.concat(
             [existing, fresh],
         )
-        merged = merged[
-            ~merged.index.duplicated(
-                keep="last",
-            )
-        ].sort_index()
+        merged = normalize_candles(merged, interval=interval, now=stamp, closed_only=True)
 
     merged = merged.tail(
         IG_DEMO_MAX_CACHE_ROWS

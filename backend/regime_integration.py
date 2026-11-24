@@ -10,6 +10,7 @@ from category_strategy_engine import CategoryStrategyEngine, CATEGORY_RULES, ACT
 from category_execution_engine import CategoryExecutionEngine
 from forex_liquidity_lines_strategy import LIQUID_FOREX_PAIRS, forex_session_context, news_blackout_context
 from prime_policy import ForwardPrimeArchitecture
+from candle_data import normalize_candles
 from regime_strategy import VERSION, STRATEGY_IDS, TREND_ID, REVERSAL_ID, analyze_regime, execution_reasons
 from xauusd_liquidity_strategy import session_context
 
@@ -43,7 +44,7 @@ class RegimeStrategyEngine(CategoryStrategyEngine):
         if key not in ACTIVE_EXECUTION_KEYS:
             return super()._evaluate_seed(seed)
         now = self._now()
-        raw = self.frame_func(seed)
+        raw = normalize_candles(self.frame_func(seed), interval="15min", now=now, closed_only=True)
         analysis = analyze_regime(raw, key, now=now)
         session = current_session(key, now)
         news = news_blackout_context(now, "XAUUSD" if key == "GOLD" else key)

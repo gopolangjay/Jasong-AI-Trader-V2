@@ -95,7 +95,7 @@ class RegimeExecutionTests(unittest.TestCase):
         self.assertEqual(row["strategy_id"], TREND_ID)
         self.assertTrue(row["standard_eligible"], row["rejection_reasons"])
         self.assertTrue(row["liquidity_pass"])
-        self.assertEqual(row["version"], "6.14-regime-adaptive-v1")
+        self.assertEqual(row["version"], "6.14-regime-adaptive-v2")
 
     def test_real_reversal_reaches_protected_risk_sizing(self):
         engine = RegimeStrategyEngine(broker=self.broker, frame_func=lambda _: range_candles(),
