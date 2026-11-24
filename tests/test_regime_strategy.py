@@ -190,8 +190,14 @@ class RegimeTests(unittest.TestCase):
 
     def test_duplicate_and_invalid_prices_fail_closed(self):
         frame = trend_candles()
-        with self.assertRaises(ValueError):
-            completed_frames(pd.concat([frame, frame.tail(1)]))
+        expected = completed_frames(frame, "2026-10-15 11:00Z")
+        actual = completed_frames(pd.concat([frame, frame.tail(1)]), "2026-10-15 11:00Z")
+        for name in expected:
+            pd.testing.assert_frame_equal(actual[name], expected[name])
+        conflict = frame.tail(1).copy()
+        conflict["Volume"] += 1
+        with self.assertRaisesRegex(ValueError, "Conflicting duplicate"):
+            completed_frames(pd.concat([frame, conflict]))
         frame.iloc[-1, frame.columns.get_loc("Close")] = np.inf
         with self.assertRaises(ValueError):
             completed_frames(frame)

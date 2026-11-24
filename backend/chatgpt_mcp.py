@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Authenticated read-only MCP bridge for Jasong AI Trader V6.9.3.
+"""Authenticated read-only MCP bridge for Jasong AI Trader.
 
 The bridge intentionally exposes diagnostics and trading state only. It does
 not expose order-entry, order-close, strategy mutation, or broker credential
@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover - deployment dependency guard
     ToolAnnotations = None  # type: ignore[assignment]
 
 
-VERSION = "6.9.3"
+from runtime_version import VERSION, build_info
 READ_SCOPE = "jasong.read"
 OFFLINE_SCOPE = "offline_access"
 ACCESS_TOKEN_TTL_SECONDS = 60 * 60
@@ -447,7 +447,7 @@ def _audit(tool: str, **details: Any) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "at": time.time(),
-            "version": VERSION,
+            **build_info(),
             "tool": tool,
             "details": _safe_json(details),
         }
@@ -535,7 +535,7 @@ def install_chatgpt_mcp(
     enabled = os.getenv("JASONG_MCP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     if not enabled:
         status = {
-            "version": VERSION,
+            **build_info(),
             "enabled": False,
             "installed": False,
             "reason": "JASONG_MCP_ENABLED is false",
@@ -555,7 +555,7 @@ def install_chatgpt_mcp(
         idempotent_hint=True,
         open_world_hint=True,
     )
-    mcp = MCPServer("Jasong AI Trader V6.9.3 Read-Only")
+    mcp = MCPServer(f"Jasong AI Trader {VERSION} Read-Only")
 
     def _ranked_rows() -> List[Dict[str, Any]]:
         rankings = intelligence.category_rankings()
@@ -603,7 +603,7 @@ def install_chatgpt_mcp(
         _audit("get_system_status")
         broker_configured = bool(getattr(broker, "configured", lambda: False)())
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "execution_mode": "IG_DEMO_ONLY",
             "live_money_execution": False,
             "category_system": intelligence.status(),
@@ -629,7 +629,7 @@ def install_chatgpt_mcp(
         if wanted_state:
             rows = [row for row in rows if str(row.get("state") or "").upper() == wanted_state]
         limit = max(1, min(int(limit), 100))
-        return {"version": VERSION, "count": len(rows[:limit]), "opportunities": rows[:limit]}
+        return {**build_info(), "count": len(rows[:limit]), "opportunities": rows[:limit]}
 
     @mcp.tool(
         title="Get market details",
@@ -648,7 +648,7 @@ def install_chatgpt_mcp(
             }
             if wanted in variants:
                 return _safe_json(row)
-        return {"version": VERSION, "found": False, "symbol": wanted, "message": "Market is not in the current top-five-per-category ranking surface."}
+        return {**build_info(), "found": False, "symbol": wanted, "message": "Market is not in the current top-five-per-category ranking surface."}
 
     @mcp.tool(
         title="Explain execution blockers",
@@ -662,7 +662,7 @@ def install_chatgpt_mcp(
             return details
         compound_eval = _compound_evaluation(symbol)
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "market": details.get("market") or details.get("name"),
             "symbol": details.get("symbol") or details.get("key"),
             "direction": details.get("direction"),
@@ -707,7 +707,7 @@ def install_chatgpt_mcp(
     def get_prime_markets() -> Dict[str, Any]:
         _audit("get_prime_markets")
         rows = [_compact_market(row) for row in intelligence.compound_candidates()]
-        return {"version": VERSION, "count": len(rows), "prime_markets": rows, "live_money_execution": False}
+        return {**build_info(), "count": len(rows), "prime_markets": rows, "live_money_execution": False}
 
     @mcp.tool(
         title="Get validation status",
@@ -758,7 +758,7 @@ def install_chatgpt_mcp(
         accounts = _call_first(broker, ("accounts",)) if configured else None
         positions = _call_first(broker, ("positions", "open_positions", "list_positions")) if configured else None
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "configured": configured,
             "environment": "IG_DEMO_ONLY",
             "broker_status": broker_status,
@@ -775,9 +775,9 @@ def install_chatgpt_mcp(
     def get_forward_evidence() -> Dict[str, Any]:
         _audit("get_forward_evidence")
         if evidence_source is None:
-            return {"version": VERSION, "available": False, "message": "Forward evidence source is not installed."}
+            return {**build_info(), "available": False, "message": "Forward evidence source is not installed."}
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "status": _call_first(evidence_source, ("status",)),
             "execution_guard": _call_first(evidence_source, ("execution_guard_snapshot",)),
             "live_money_execution": False,
@@ -791,11 +791,11 @@ def install_chatgpt_mcp(
     def get_trade_history(phase_id: int = 0) -> Dict[str, Any]:
         _audit("get_trade_history", phase_id=phase_id)
         if evidence_source is None or not hasattr(evidence_source, "phase_trade_analysis"):
-            return {"version": VERSION, "available": False, "message": "Broker-settled phase history is not installed."}
+            return {**build_info(), "available": False, "message": "Broker-settled phase history is not installed."}
         try:
             result = evidence_source.phase_trade_analysis(int(phase_id) if int(phase_id) > 0 else None)
         except Exception as exc:
-            return {"version": VERSION, "available": False, "error": f"{type(exc).__name__}: {exc}"}
+            return {**build_info(), "available": False, "error": f"{type(exc).__name__}: {exc}"}
         return _safe_json(result)
 
     @mcp.tool(
@@ -806,7 +806,7 @@ def install_chatgpt_mcp(
     def get_diagnostics() -> Dict[str, Any]:
         _audit("get_diagnostics")
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "category": intelligence.status(),
             "portfolio": portfolio.status(),
             "compound": _call_first(compound_engine, ("status",)),
@@ -837,7 +837,7 @@ def install_chatgpt_mcp(
                     continue
         except Exception:
             events = []
-        return {"version": VERSION, "count": len(events), "events": events}
+        return {**build_info(), "count": len(events), "events": events}
 
     @mcp.tool(
         title="Search Jasong live state",
@@ -852,7 +852,7 @@ def install_chatgpt_mcp(
             rows = [row for row in rows if needle in json.dumps(row, sort_keys=True).lower()]
         limit = max(1, min(int(limit), 50))
         return {
-            "version": VERSION,
+            **build_info(),
             "results": [
                 {
                     "id": f"market:{row.get('key')}",
@@ -894,7 +894,7 @@ def install_chatgpt_mcp(
             return get_mcp_audit()
         if lower.startswith("market:"):
             return get_market_details(resource_id.split(":", 1)[1])
-        return {"version": VERSION, "found": False, "id": resource_id, "message": "Unknown resource id."}
+        return {**build_info(), "found": False, "id": resource_id, "message": "Unknown resource id."}
 
     # Create transport before accessing session_manager.
     public = urlparse(_public_base_url())
@@ -974,7 +974,7 @@ def install_chatgpt_mcp(
         base = _public_base_url()
         return JSONResponse({
             "resource": _mcp_resource_url(),
-            "resource_name": "Jasong AI Trader V6.9.3 Read-Only",
+            "resource_name": f"Jasong AI Trader {VERSION} Read-Only",
             "authorization_servers": [base],
             "scopes_supported": [READ_SCOPE],
             "bearer_methods_supported": ["header"],
@@ -1087,7 +1087,7 @@ def install_chatgpt_mcp(
         return _json_error("unsupported_grant_type", "Use authorization_code or refresh_token")
 
     status = {
-        "version": VERSION,
+        **build_info(),
         "enabled": True,
         "installed": True,
         "endpoint": "/mcp",

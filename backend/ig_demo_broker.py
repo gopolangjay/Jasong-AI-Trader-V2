@@ -14,6 +14,9 @@ from urllib import request as urlrequest
 import math
 import re
 
+from candle_data import IG_INTERVALS, normalized_ig_prices
+from runtime_version import build_info
+
 
 class IGDemoError(RuntimeError):
     """Safe IG DEMO integration error."""
@@ -135,6 +138,7 @@ class IGDemoBroker:
         with self._lock:
             session = self._session
             return {
+                **build_info(),
                 "broker": "IG",
                 "environment": "DEMO",
                 "base_url": self.BASE_URL,
@@ -959,8 +963,9 @@ class IGDemoBroker:
         points = max(1, min(int(num_points), 500))
         response = self._request(
             "GET",
-            f"/prices/{urlparse.quote(clean_epic, safe='')}/{urlparse.quote(str(resolution), safe='')}/{points}",
-            version=2,
+            f"/prices/{urlparse.quote(clean_epic, safe='')}",
+            version=3,
+            query={"resolution": str(resolution), "max": points, "pageSize": 0},
         )
         return {
             "broker": "IG",
@@ -968,7 +973,7 @@ class IGDemoBroker:
             "epic": clean_epic,
             "resolution": str(resolution),
             "requested_points": points,
-            "prices": response.get("prices") or [],
+            "prices": normalized_ig_prices(response.get("prices") or [], interval=IG_INTERVALS.get(str(resolution))),
             "metadata": response.get("metadata") or {},
             "live_money_execution": False,
         }
@@ -1691,14 +1696,8 @@ class IGDemoBroker:
             )
 
         response = self._request(
-            "GET",
-            (
-                f"/prices/"
-                f"{urlparse.quote(epic, safe='')}/"
-                f"{urlparse.quote(str(resolution), safe='')}/"
-                f"{points}"
-            ),
-            version=2,
+            "GET", f"/prices/{urlparse.quote(epic, safe='')}", version=3,
+            query={"resolution": str(resolution), "max": points, "pageSize": 0},
         )
 
         return {
@@ -1708,7 +1707,7 @@ class IGDemoBroker:
             "epic": epic,
             "resolution": str(resolution),
             "requested_points": points,
-            "prices": response.get("prices") or [],
+            "prices": normalized_ig_prices(response.get("prices") or [], interval=IG_INTERVALS.get(str(resolution))),
             "metadata": response.get("metadata") or {},
             "live_money_execution": False,
         }

@@ -41,7 +41,16 @@ rollback. The existing V6.13 weekend crypto path is unchanged.
 ## Shared controls
 
 - Input is aligned M15 OHLCV with UTC bar-open timestamps. Every constituent bar
-  is required to form H1/H4. Duplicate timestamps and invalid prices fail closed.
+  is required to form H1/H4. Identical OHLCV duplicates are removed; conflicting
+  duplicates and malformed prices reject the batch. Sort only after validation.
+  Alignment requires minutes 00/15/30/45 and zero seconds, microseconds and
+  nanoseconds, independently of pandas timestamp resolution. No rounding or
+  OHLC repair is permitted, including in provider/cache cleaning.
+- Both IG history methods use `GET /prices/{epic}` version 3, with a bounded
+  `max` and paging disabled, to obtain `snapshotTimeUTC`. Local timestamps
+  without an explicit timezone reject the batch. The rolling analysis cache
+  stores only completed bars and fetches all missed bars on refresh; revised
+  completed candles conflict rather than silently replacing earlier values.
 - Ignore forming/future candles. Base data must be <=990 seconds old and the
   confirmation <=300 seconds old. Check session/news using current time, again
   before execution. News uses the existing configured feed/window policy.
@@ -80,6 +89,19 @@ minute, 300 per UTC day, connection/read timeouts 3/8 seconds. Request/page exha
 rejects an incomplete run. Provider failure falls back to the existing sources;
 stale fallback bars cannot create fresh regime signals. No key or keyed URL is
 included in provider status/errors. Request budgets are per running process.
+
+## Release and regression verification
+
+`runtime_version.py` defines the shared engine, broker, Actions and MCP release.
+The health and gateway status responses include `commit_sha` from
+`RENDER_GIT_COMMIT` (`unknown` outside a Render Git deployment). Component policy
+versions for the independent legacy/weekend engines remain distinct.
+
+Run `python -m pytest -q`, `python -m compileall -q backend`, and
+`cd backend && python clean_core_smoke.py`. The regression suite includes
+`tests_specialist_markets.py` through `pytest.ini`. CI runs the full suite and
+offline startup smoke check on Python 3.11 and 3.12. All broker requests in tests
+are mocked; tests do not submit orders.
 
 `/health` and `/market-categories/data-health` expose configuration, SDK availability,
 last success/error, cooldown and request counts. Without a key the adapter is

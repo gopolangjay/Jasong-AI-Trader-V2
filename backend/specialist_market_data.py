@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional
 import pandas as pd
 import yfinance as yf
 
+from candle_data import normalize_candles
+
 import market_data_router as market_router
 from fdn_market_data import FinancialDataProvider, FDNDataError
 
@@ -287,15 +289,7 @@ class ResilientSpecialistMarketData:
         keep = ["Open", "High", "Low", "Close", "Volume"]
         data = data[keep].copy()
 
-        for column in keep:
-            data[column] = pd.to_numeric(
-                data[column],
-                errors="coerce",
-            )
-
-        data = data.dropna(
-            subset=required
-        ).sort_index()
+        data = normalize_candles(data)
 
         if len(data) < int(min_rows):
             raise ValueError(

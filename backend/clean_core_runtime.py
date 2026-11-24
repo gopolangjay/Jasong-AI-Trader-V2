@@ -15,7 +15,8 @@ from specialist_market_data import ResilientSpecialistMarketData
 from specialist_market_integration import install_specialist_market_system
 
 
-VERSION = "6.14-regime-adaptive-v1"
+from runtime_version import VERSION, build_info
+from candle_data import normalize_candles
 RUNTIME: Dict[str, Any] = {}
 
 
@@ -33,6 +34,7 @@ def _v673_global_market_data(seed: Dict[str, Any]) -> pd.DataFrame:
 
 def specialist_frame(seed: Dict[str, Any]) -> pd.DataFrame:
     raw = _v673_global_market_data(seed)
+    raw = normalize_candles(raw, interval="15min", closed_only=True)
     indicators = add_indicators(raw)
     model = train_model(indicators)
     enriched = enrich(indicators, model)
@@ -107,7 +109,7 @@ def create_app() -> FastAPI:
     def root() -> Dict[str, Any]:
         return {
             "service": "Jasong AI Trader",
-            "version": VERSION,
+            **build_info(),
             "strategy_ids": policy_status()["strategy_ids"],
             "runtime": "CLEAN_CORE",
             "broker_environment": "IG_DEMO",
@@ -122,7 +124,7 @@ def create_app() -> FastAPI:
         weekend = RUNTIME.get("weekend_market_engine")
         return {
             "ok": True,
-            "version": VERSION,
+            **build_info(),
             "runtime": "CLEAN_CORE",
             "broker": broker.status(),
             "specialist_installed": bool(RUNTIME.get("specialist_system")),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Plus-compatible GPT Actions gateway for Jasong AI Trader V6.9.3.
+"""Plus-compatible GPT Actions gateway for Jasong AI Trader.
 
 Design goals:
 - API-key authenticated read + controlled write access for a private Custom GPT.
@@ -25,7 +25,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-VERSION = "6.9.4-forward-compact-actions-tp30"
+from runtime_version import VERSION, build_info
 HEADER_NAME = "X-Jasong-Action-Key"
 OWNED_CATEGORY_PREFIX = "JSCAT_"
 
@@ -133,7 +133,7 @@ def _audit(action: str, *, write: bool = False, **details: Any) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "at": time.time(),
-            "version": VERSION,
+            **build_info(),
             "action": action,
             "write": bool(write),
             "details": _safe_json(details),
@@ -904,7 +904,7 @@ def _compact_runtime_diagnostics(
     validator = getattr(evidence_source, "validator", None)
     store = getattr(validator, "store", None) or getattr(evidence_source, "store", None)
     return _safe_json({
-        "version": VERSION,
+        **build_info(),
         "category": {
             "enabled": bool((intelligence_state or {}).get("enabled", True)),
             "last_scan_at": (intelligence_state or {}).get("last_scan_at"),
@@ -980,8 +980,8 @@ def build_actions_openapi() -> Dict[str, Any]:
     return {
         "openapi": "3.1.0",
         "info": {
-            "title": "Jasong AI Trader V6.9.4 Forward Actions",
-            "version": VERSION,
+            "title": f"Jasong AI Trader {VERSION} Forward Actions",
+            **build_info(),
             "description": (
                 "Private read/write GPT Actions API for Jasong AI Trader. "
                 "All broker-changing operations are hard-limited to IG DEMO. "
@@ -1275,7 +1275,7 @@ def install_chatgpt_actions(
     }
 
     status: Dict[str, Any] = {
-        "version": VERSION,
+        **build_info(),
         "enabled": enabled,
         "installed": bool(enabled),
         "read_access": bool(enabled),
@@ -1335,7 +1335,7 @@ def install_chatgpt_actions(
         forward_rows = _merge_excursion_rows(broker, forward_rows)
         _audit("system")
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "execution_mode": "IG_DEMO_ONLY",
             "category": {
                 "ranked_markets": len(ranked),
@@ -1377,7 +1377,7 @@ def install_chatgpt_actions(
             open_positions=len(open_positions),
         )
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "available": assessment_ready,
             "authority": "BROKER_SETTLED_FORWARD_ONLY",
             "performance_assessment_ready": assessment_ready,
@@ -1418,14 +1418,14 @@ def install_chatgpt_actions(
             rows = [r for r in rows if str(r.get("state") or "").upper() == wanted_state]
         rows = rows[:max(1, min(int(limit), 30))]
         _audit("opportunities", category=wanted_category, state=wanted_state, count=len(rows))
-        return {"version": VERSION, "count": len(rows), "opportunities": rows}
+        return {**build_info(), "count": len(rows), "opportunities": rows}
 
     async def market_details(symbol: str, request: Request) -> Dict[str, Any]:
         _require_key(request)
         row = _find_market(intelligence, symbol)
         _audit("market_details", symbol=symbol)
         if row is None:
-            return {"version": VERSION, "found": False, "symbol": symbol}
+            return {**build_info(), "found": False, "symbol": symbol}
         return _safe_json(row)
 
     async def blockers(symbol: str, request: Request) -> Dict[str, Any]:
@@ -1433,9 +1433,9 @@ def install_chatgpt_actions(
         row = _find_market(intelligence, symbol)
         _audit("blockers", symbol=symbol)
         if row is None:
-            return {"version": VERSION, "found": False, "symbol": symbol}
+            return {**build_info(), "found": False, "symbol": symbol}
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "symbol": row.get("symbol") or row.get("key"),
             "market": row.get("market") or row.get("name"),
             "direction": row.get("direction"),
@@ -1485,7 +1485,7 @@ def install_chatgpt_actions(
         _require_key(request)
         rows = [_compact_market(row) for row in intelligence.compound_candidates()]
         _audit("prime", count=len(rows))
-        return {"version": VERSION, "count": len(rows), "prime_markets": rows}
+        return {**build_info(), "count": len(rows), "prime_markets": rows}
 
     async def validation(request: Request) -> Dict[str, Any]:
         _require_key(request)
@@ -1543,7 +1543,7 @@ def install_chatgpt_actions(
                 })
         _audit("ig_demo", configured=configured, open_positions=len(raw_positions))
         return _safe_json({
-            "version": VERSION,
+            **build_info(),
             "status": broker_status,
             "account": account,
             "open_positions_count": len(raw_positions),
@@ -1579,7 +1579,7 @@ def install_chatgpt_actions(
                 count=len(rows),
             )
             return _safe_json({
-                "version": VERSION,
+                **build_info(),
                 "available": True,
                 "authority": "BROKER_SETTLED_FORWARD_ONLY",
                 "source": "FORWARD_VALIDATION_STORE",
@@ -1602,13 +1602,13 @@ def install_chatgpt_actions(
                 return _safe_json(payload)
             except Exception as exc:
                 return {
-                    "version": VERSION,
+                    **build_info(),
                     "available": False,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
         _audit("trades", phase_id=phase_id, available=False)
         return {
-            "version": VERSION,
+            **build_info(),
             "available": False,
             "error": "No forward-validation store or legacy phase evidence source is available",
         }
