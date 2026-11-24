@@ -65,6 +65,42 @@ def range_candles(bearish=False):
 
 
 class RegimeTests(unittest.TestCase):
+    def test_aligned_timestamp_units_preserve_completed_frames_and_signals(self):
+        frame = trend_candles()
+        now = "2026-10-15 11:00Z"
+        expected_frames = completed_frames(frame, now)
+        expected_signal = analyze_regime(frame, "EURUSD", now=now)
+        for unit in ("s", "ms", "us", "ns"):
+            with self.subTest(unit=unit):
+                candidate = frame.copy()
+                candidate.index = candidate.index.as_unit(unit)
+                actual_frames = completed_frames(candidate, now)
+                for timeframe, expected in expected_frames.items():
+                    actual = actual_frames[timeframe]
+                    self.assertEqual(actual.index.tolist(), expected.index.tolist())
+                    pd.testing.assert_frame_equal(
+                        actual.reset_index(drop=True), expected.reset_index(drop=True)
+                    )
+                actual_signal = analyze_regime(candidate, "EURUSD", now=now)
+                self.assertTrue(actual_signal["eligible"], actual_signal)
+                for key in ("direction", "strategy_id", "setup_id",
+                            "structural_stop_distance", "target_r", "ema20", "rsi"):
+                    self.assertEqual(actual_signal[key], expected_signal[key])
+
+    def test_misaligned_or_missing_timestamps_are_rejected_in_every_unit(self):
+        for unit in ("s", "ms", "us", "ns"):
+            for missing in (False, True):
+                with self.subTest(unit=unit, missing=missing):
+                    frame = trend_candles()
+                    frame.index = frame.index.as_unit(unit)
+                    timestamps = frame.index.tolist()
+                    timestamps[-1] = pd.NaT if missing else (
+                        timestamps[-1] + pd.Timedelta(1, unit=unit)
+                    )
+                    frame.index = pd.DatetimeIndex(timestamps).as_unit(unit)
+                    with self.assertRaisesRegex(ValueError, "aligned M15 candle opens"):
+                        completed_frames(frame, "2026-10-15 11:00Z")
+
     def test_full_range_buy_and_sell_use_real_rsi_and_observed_mean(self):
         for bearish, direction in ((False, "BUY"), (True, "SELL")):
             with self.subTest(direction=direction):
