@@ -42,7 +42,7 @@ def completed_frames(raw: pd.DataFrame, now: Any = None) -> dict[str, pd.DataFra
     frame.index = pd.to_datetime(frame.index, utc=True)
     if frame.index.has_duplicates:
         raise ValueError("Duplicate M15 timestamps")
-    if any((frame.index.asi8 % pd.Timedelta(minutes=15).value) != 0):
+    if (frame.index != frame.index.floor("15min")).any():
         raise ValueError("Regime input must use aligned M15 candle opens")
     for col in OHLCV[:4]:
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
