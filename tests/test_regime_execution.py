@@ -15,6 +15,7 @@ from category_strategy_engine import CATEGORY_MARKET_SEEDS
 from category_execution_engine import RiskSizingError
 from risk_exit_policy import build_risk_plan
 from ig_demo_broker import IGDemoBroker, IGDemoError
+from runtime_version import VERSION
 from test_regime_strategy import trend_candles, range_candles
 
 NOW = pd.Timestamp("2026-10-15 11:00Z")
@@ -95,7 +96,7 @@ class RegimeExecutionTests(unittest.TestCase):
         self.assertEqual(row["strategy_id"], TREND_ID)
         self.assertTrue(row["standard_eligible"], row["rejection_reasons"])
         self.assertTrue(row["liquidity_pass"])
-        self.assertEqual(row["version"], "6.14-regime-adaptive-v2")
+        self.assertEqual(row["version"], VERSION)
 
     def test_real_reversal_reaches_protected_risk_sizing(self):
         engine = RegimeStrategyEngine(broker=self.broker, frame_func=lambda _: range_candles(),

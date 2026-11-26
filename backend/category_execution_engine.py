@@ -19,6 +19,9 @@ from forex_liquidity_lines_strategy import (
 from risk_exit_policy import build_risk_plan
 from xauusd_liquidity_strategy import STRATEGY_ID as XAU_STRATEGY_ID
 from regime_strategy import STRATEGY_IDS as REGIME_STRATEGY_IDS
+from openai_policy import STRATEGY_ID as OPENAI_STRATEGY_ID
+
+PROTECTED_STRATEGY_IDS = (*REGIME_STRATEGY_IDS, OPENAI_STRATEGY_ID)
 
 
 class RiskSizingError(RuntimeError):
@@ -371,24 +374,26 @@ class CategoryExecutionEngine:
             bid = snapshot.get("bid")
         if offer is None:
             offer = snapshot.get("offer")
-        is_regime = candidate.get("strategy_id") in REGIME_STRATEGY_IDS
-        if is_regime:
-            # A new regime order cannot use the earlier candidate's quote if
+        is_protected = candidate.get("strategy_id") in PROTECTED_STRATEGY_IDS
+        if is_protected:
+            is_openai = candidate.get("strategy_id") == OPENAI_STRATEGY_ID
+            # A protected order cannot use the earlier candidate's quote if
             # the fresh broker snapshot is missing or the spread has widened.
             try:
                 fresh_bid, fresh_offer = float(bid), float(offer)
                 mid = (fresh_bid+fresh_offer)/2
                 spread_bps = (fresh_offer-fresh_bid)/mid*10000
-                relative_atr = float(candidate["atr"])/float(candidate["live_price"])
+                relative_atr = (None if is_openai else float(candidate["atr"])/float(candidate["live_price"]))
                 valid_quote = (math.isfinite(fresh_bid) and math.isfinite(fresh_offer)
                                and 0 < fresh_bid < fresh_offer
                                and str(snapshot.get("marketStatus") or "").upper() == "TRADEABLE")
                 liquid = (0 < spread_bps <= float(candidate["spread_gate_bps"])
-                          and spread_bps/10000/relative_atr <= float(candidate["max_spread_atr"]))
+                          and (is_openai or spread_bps/10000/relative_atr <= float(candidate["max_spread_atr"])))
             except (TypeError, ValueError, KeyError, ZeroDivisionError):
                 valid_quote, liquid = False, False
             if not valid_quote or not liquid:
-                raise RiskSizingError("Fresh IG regime quote/spread/ATR liquidity guard failed")
+                raise RiskSizingError("Fresh IG quote or execution spread guard failed" if is_openai
+                                      else "Fresh IG regime quote/spread/ATR liquidity guard failed")
             candidate = {**candidate, "ig_spread_bps": spread_bps}
         if bid is None:
             bid = candidate.get("ig_bid")
@@ -464,12 +469,15 @@ class CategoryExecutionEngine:
             "valuation": valuation,
         }
 
+    def _entry_session_allowed(self, candidate: Dict[str, Any]) -> bool:
+        return candidate.get("session_active") is True
+
     def _may_open(self, candidate: Dict[str, Any], external: List[Dict[str, Any]]) -> tuple[bool, str]:
         if not self._is_active_strategy(candidate):
             return False, "old autonomous entry strategy is retired; only FX liquidity-lines and XAUUSD liquidity-structure are active"
         if not candidate.get("standard_eligible"):
             return False, "not standard eligible"
-        if candidate.get("session_active") is not True:
+        if not self._entry_session_allowed(candidate):
             return False, "outside the market's approved geographic execution session"
         setup_id = str(candidate.get("setup_id") or "").strip()
         if not setup_id:
@@ -539,7 +547,7 @@ class CategoryExecutionEngine:
             return
 
         protected: Dict[str, Any] = {}
-        if candidate.get("strategy_id") in REGIME_STRATEGY_IDS:
+        if candidate.get("strategy_id") in PROTECTED_STRATEGY_IDS:
             plan_at_quote = sizing["risk_plan_at_quote"]
             allowed, reason = self._may_open(candidate, external)
             if not allowed:
@@ -548,8 +556,9 @@ class CategoryExecutionEngine:
             protected = {
                 "stop_level": plan_at_quote["protective_stop_price"],
                 "limit_level": plan_at_quote["take_profit_target_price"],
-                "max_spread_bps": min(float(candidate["spread_gate_bps"]),
-                                      float(candidate["atr"])/float(candidate["live_price"])*10000*float(candidate["max_spread_atr"])),
+                "max_spread_bps": (float(candidate["spread_gate_bps"]) if candidate.get("strategy_id") == OPENAI_STRATEGY_ID
+                                   else min(float(candidate["spread_gate_bps"]),
+                                            float(candidate["atr"])/float(candidate["live_price"])*10000*float(candidate["max_spread_atr"]))),
             }
         result = self.broker.open_epic_position(
             epic=str(candidate["ig_epic"]),
@@ -596,7 +605,10 @@ class CategoryExecutionEngine:
                 stop = float(result.get("attached_stop_level") or 0)
                 target = float(result.get("attached_limit_level") or 0)
                 distance, reward = sign*(entry-stop), sign*(target-entry)
-                if stop <= 0 or target <= 0 or distance <= 0 or reward/distance < 1.2:
+                minimum_r = 0.0 if candidate.get("strategy_id") == OPENAI_STRATEGY_ID else 1.2
+                if (not all(math.isfinite(x) for x in (stop, target, distance, reward))
+                        or stop <= 0 or target <= 0 or distance <= 0 or reward <= 0
+                        or reward/distance < minimum_r):
                     raise ValueError("IG accepted no valid attached regime protection")
                 valuation = self.broker.estimate_closed_position_pnl(
                     epic=str(candidate["ig_epic"]), direction=str(candidate["direction"]),

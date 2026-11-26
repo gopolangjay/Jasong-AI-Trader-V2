@@ -22,7 +22,7 @@ class RuntimeVersionTests(unittest.TestCase):
             env = {"RENDER_GIT_COMMIT": "a"*40, "JASONG_MCP_AUTH_STATE_PATH": directory+"/oauth.json",
                    "JASONG_ACTIONS_AUDIT_PATH": directory+"/actions.jsonl",
                    "JASONG_ACTIONS_API_KEY": "version-test-key-"*3,
-                   "IG_DEMO_API_KEY": "", "IG_DEMO_IDENTIFIER": "", "IG_DEMO_PASSWORD": ""}
+                   "IG_DEMO_API_KEY": "", "IG_DEMO_IDENTIFIER": "", "IG_DEMO_PASSWORD": "", "OPENAI_API_KEY": ""}
             with patch.dict(os.environ, env):
                 with patch("threading.Thread.start", return_value=None):
                     runtime = importlib.import_module("clean_core_runtime")
@@ -41,6 +41,12 @@ class RuntimeVersionTests(unittest.TestCase):
                     self.assertEqual(health["broker"]["commit_sha"], "a"*40)
                     self.assertEqual(health["broker"]["environment"], "DEMO")
                     self.assertFalse(health["broker"]["live_money_execution"])
+                    self.assertEqual(health["analysis_mode"], "OPENAI")
+                    analysis = client.get("/strategy/openai-analysis").json()
+                    self.assertFalse(analysis["configured"])
+                    self.assertFalse(analysis["can_call_broker"])
+                    self.assertEqual(type(runtime.CATEGORY_STRATEGY_ENGINE).__name__, "OpenAIStrategyEngine")
+                    self.assertEqual(type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__, "OpenAIExecutionEngine")
                     self.assertEqual(client.get("/openapi.json").json()["info"]["version"], VERSION)
                     # No API key and no confirmation must still prevent writes.
                     self.assertEqual(client.post("/assistant/write/open-qualified", json={"symbol": "EURUSD", "confirm": True}).status_code, 401)

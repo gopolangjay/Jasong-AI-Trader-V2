@@ -218,6 +218,7 @@ def install_specialist_market_system(
         List[Any]
     ] = None,
     regime_mode: bool = False,
+    openai_mode: bool = False,
 ) -> Dict[str, Any]:
     """Install the active V6.11 FX and XAUUSD execution architecture.
 
@@ -295,6 +296,9 @@ def install_specialist_market_system(
     if regime_mode:
         from regime_integration import RegimeStrategyEngine, RegimeExecutionEngine, RegimePrimeArchitecture
         strategy_class, portfolio_class, prime_class = RegimeStrategyEngine, RegimeExecutionEngine, RegimePrimeArchitecture
+    if openai_mode:
+        from openai_integration import OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
+        strategy_class, portfolio_class, prime_class = OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
 
     intelligence = strategy_class(
         broker=broker,
@@ -302,6 +306,9 @@ def install_specialist_market_system(
         state_path=category_state_path,
     )
     intelligence.start_thread()
+    if openai_mode:
+        app.add_api_route("/strategy/openai-analysis", intelligence.analyst_status,
+                          methods=["GET"], name="openai_analysis_status")
 
     legacy_forward_evidence = next(
         (
@@ -436,10 +443,13 @@ def install_specialist_market_system(
     )
     app.version = intelligence.VERSION
     app.description = (
+        "IG DEMO only: OpenAI selects entries from closed candles; account-risk sizing, "
+        "fresh broker quotes, duplicate/exposure limits and attached protection remain enforced."
+        if openai_mode else
         "IG DEMO only: closed-candle regime strategies with account risk sizing "
         "and attached protection; geography-aware sessions, broker-settled "
         "evidence and optional FDN analysis data."
-        if regime_mode else
+        if (regime_mode or openai_mode) else
         "IG DEMO FX liquidity/lines and XAUUSD liquidity/structure execution."
     )
     app.openapi_schema = None
@@ -554,10 +564,10 @@ def install_specialist_market_system(
                 in CATEGORY_ORDER
             },
             "confidence_policy": {
-                "regime_rule_completion_basis": "NOT_WIN_PROBABILITY" if regime_mode else None,
-                "quant_min_pct": None if regime_mode else 28.0,
-                "model_ai_min_pct": None if regime_mode else 40.0,
-                "fast_score_min": None if regime_mode else 45.0,
+                "regime_rule_completion_basis": "NOT_WIN_PROBABILITY" if (regime_mode or openai_mode) else None,
+                "quant_min_pct": None if (regime_mode or openai_mode) else 28.0,
+                "model_ai_min_pct": None if (regime_mode or openai_mode) else 40.0,
+                "fast_score_min": None if (regime_mode or openai_mode) else 45.0,
                 "historical_validation_mode":
                     "INFORMATIONAL_ONLY",
                 "historical_execution_veto":

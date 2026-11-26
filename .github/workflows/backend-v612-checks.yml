@@ -37,4 +37,6 @@ jobs:
         run: python -m pytest -q tests
       - name: Smoke-test clean runtime without broker orders
         working-directory: backend
-        run: python clean_core_smoke.py
+        run: |
+          JASONG_ANALYSIS_MODE=OPENAI python clean_core_smoke.py
+          JASONG_ANALYSIS_MODE=REGIME python clean_core_smoke.py

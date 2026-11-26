@@ -284,8 +284,8 @@ def _active_execution_keys() -> Tuple[str, ...]:
 ACTIVE_EXECUTION_KEYS = _active_execution_keys()
 
 
-def _active_market_seeds() -> List[Dict[str, Any]]:
-    active = set(ACTIVE_EXECUTION_KEYS)
+def _active_market_seeds(keys=None) -> List[Dict[str, Any]]:
+    active = set(ACTIVE_EXECUTION_KEYS if keys is None else keys)
     return [
         row for row in CATEGORY_MARKET_SEEDS
         if str(row.get("key") or "").upper() in active
@@ -880,6 +880,10 @@ class CategoryStrategyEngine:
     """
 
     VERSION = VERSION
+    ACTIVE_EXECUTION_KEYS = ACTIVE_EXECUTION_KEYS
+
+    def _active_market_seeds(self):
+        return _active_market_seeds(self.ACTIVE_EXECUTION_KEYS)
 
     def __init__(
         self,
@@ -950,7 +954,7 @@ class CategoryStrategyEngine:
                 "started_at": None,
                 "completed_at": None,
                 "processed": 0,
-                "total": len(_active_market_seeds()),
+                "total": len(self._active_market_seeds()),
                 "current_key": None,
                 "errors": 0,
                 "last_error": None,
@@ -996,7 +1000,7 @@ class CategoryStrategyEngine:
                     if (
                         excluded
                         or source_version != self.VERSION
-                        or len(current) < len(_active_market_seeds())
+                        or len(current) < len(self._active_market_seeds())
                     ):
                         state["migration_at"] = time.time()
                         state["full_refresh"]["processed"] = len(current)
@@ -1043,7 +1047,7 @@ class CategoryStrategyEngine:
                 row for row in rows
                 if row["category"] == clean
             ]
-        active = set(ACTIVE_EXECUTION_KEYS)
+        active = set(self.ACTIVE_EXECUTION_KEYS)
         return [
             {
                 **dict(row),
@@ -1069,7 +1073,7 @@ class CategoryStrategyEngine:
     def evidence_coverage(self) -> Dict[str, Any]:
         current = self._current_evaluations()
         universe_keys = [
-            str(seed["key"]) for seed in _active_market_seeds()
+            str(seed["key"]) for seed in self._active_market_seeds()
         ]
         completed = [
             key for key in universe_keys if key in current
@@ -1087,7 +1091,7 @@ class CategoryStrategyEngine:
             "current_candle_strategy_complete": len(pending) == 0,
             "completed_keys": completed,
             "pending_keys": pending,
-            "active_execution_keys": list(ACTIVE_EXECUTION_KEYS),
+            "active_execution_keys": list(self.ACTIVE_EXECUTION_KEYS),
             "retired_market_count": max(
                 0,
                 len(CATEGORY_MARKET_SEEDS) - len(universe_keys),
@@ -1109,7 +1113,7 @@ class CategoryStrategyEngine:
                 if category
                 else list(CATEGORY_ORDER)
             )
-            active_seeds = _active_market_seeds()
+            active_seeds = self._active_market_seeds()
             pools = {
                 cat: [row for row in active_seeds if row["category"] == cat]
                 for cat in requested_categories
@@ -1293,7 +1297,7 @@ class CategoryStrategyEngine:
             raise ValueError(f"Unsupported category: {category}")
 
         key = str(seed.get("key") or "").upper().strip()
-        if key not in set(ACTIVE_EXECUTION_KEYS):
+        if key not in set(self.ACTIVE_EXECUTION_KEYS):
             return {
                 **seed,
                 "version": self.VERSION,
@@ -1985,7 +1989,7 @@ class CategoryStrategyEngine:
             )
             best = rows[0] if rows else {}
             active_category = any(
-                row.get("category") == category for row in _active_market_seeds()
+                row.get("category") == category for row in self._active_market_seeds()
             )
             selection_mode = (
                 "FX_MULTI_SESSION_LIQUIDITY_LINES"
@@ -2026,7 +2030,7 @@ class CategoryStrategyEngine:
                 "FX_AND_XAUUSD_MULTI_TIMEFRAME_LIQUIDITY_STRUCTURE",
             "current_candle_only": True,
             "forming_candle_ignored": True,
-            "active_execution_markets": list(ACTIVE_EXECUTION_KEYS),
+            "active_execution_markets": list(self.ACTIVE_EXECUTION_KEYS),
             "higher_timeframe_rule": "H4 HH/HL or LH/LL structure",
             "setup_rule": (
                 "external/internal lines + premium/discount + liquidity sweep + "
@@ -2072,7 +2076,7 @@ class CategoryStrategyEngine:
                     "started_at": time.time(),
                     "completed_at": None,
                     "processed": 0,
-                    "total": len(_active_market_seeds()),
+                    "total": len(self._active_market_seeds()),
                     "current_key": None,
                     "errors": 0,
                     "last_error": None,
@@ -2080,7 +2084,7 @@ class CategoryStrategyEngine:
                 self._persist()
 
             for idx, seed in enumerate(
-                _active_market_seeds(),
+                self._active_market_seeds(),
                 start=1,
             ):
                 if self._stop.is_set():
@@ -2196,7 +2200,7 @@ class CategoryStrategyEngine:
             compound_ready += compound
 
             active_category = any(
-                row.get("category") == category for row in _active_market_seeds()
+                row.get("category") == category for row in self._active_market_seeds()
             )
             selection_mode = (
                 "FX_MULTI_SESSION_LIQUIDITY_LINES"
@@ -2290,14 +2294,14 @@ class CategoryStrategyEngine:
                 },
                 "categories": by_category,
                 "category_count": len(CATEGORY_ORDER),
-                "universe_size": len(_active_market_seeds()),
+                "universe_size": len(self._active_market_seeds()),
                 "catalogue_size": len(CATEGORY_MARKET_SEEDS),
-                "active_execution_keys": list(ACTIVE_EXECUTION_KEYS),
+                "active_execution_keys": list(self.ACTIVE_EXECUTION_KEYS),
                 "retired_entry_markets": [
                     str(row.get("key"))
                     for row in CATEGORY_MARKET_SEEDS
                     if str(row.get("key") or "").upper()
-                    not in set(ACTIVE_EXECUTION_KEYS)
+                    not in set(self.ACTIVE_EXECUTION_KEYS)
                 ],
                 "fresh_evaluations":
                     len(self._fresh_rows()),
