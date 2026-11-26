@@ -1,38 +1,34 @@
-# Jasong AI Trader V6.14
+# Jasong AI Trader V6.15
 
 IG DEMO trading service with a FastAPI backend and Flutter Android client.
-V6.14 routes the 28 liquid FX pairs and Gold between trend-following and
-range-reversal strategies. The V6.13 weekend crypto engine remains independent.
+OpenAI now selects BUY, SELL or WAIT from validated completed M15/H1/H4 price
+history. The active AI universe is the 28 liquid FX pairs, Gold and Bitcoin.
 
-## Current strategies
+## Entry analysis and execution
 
-| Condition | Entry | Timeframe | Protection |
-| --- | --- | --- | --- |
-| Strong trend: H1 ADX >25 | EMA20/50 cross, then first confirmed EMA20 pullback | H1; H4 conflict veto when enough history exists | Swing/ATR stop; target 2R before spread costs |
-| Range or qualifying exhaustion | Confirmed price-pivot RSI14 divergence at Bollinger/support-resistance edge, then strong close | M15 or H1 | Pivot/ATR stop; target existing range mean with >=1.2R after costs |
-| Transition, stale/incomplete confirmation or panic volatility | Wait | — | No new entry |
+- The OpenAI Responses API selects up to three proposals per analysis, with an
+  observed invalidation stop, target and holding horizon. An empty list means WAIT.
+- The prior EMA/ADX/RSI entry sequence, ML/FAST confidence floors, geographic
+  session veto and fixed minimum reward/risk threshold do not gate AI entries.
+- Every entry remains IG DEMO-only and requires fresh valid data/quotes, correct
+  instrument identity, IG tradeability, category spread-cost limits and any
+  explicitly configured high-impact-news guard.
+- Account-risk sizing remains capped at 1% per trade. Existing daily, duplicate,
+  capacity, account-wide EPIC and theme-exposure controls remain enforced.
+- Initial orders include a broker stop and target. Invalid protection, excess
+  filled risk or upward size changes close the order. Existing position management
+  and broker-settled evidence continue across the upgrade.
+- Bitcoin may be selected on weekdays when IG is tradeable. The old independent
+  weekend entry worker is disabled in AI mode, preventing competing entry lanes.
+- One bounded analysis batch per M15 period is shared by all market evaluations.
+  Default: 96 paid requests per UTC day, 45-second timeout, no automatic retries,
+  at most 4,000 output tokens, and no account identifiers or credentials in inputs.
+  API failures, refusals, malformed decisions and missing credentials produce WAIT.
 
-The range threshold is H1 ADX <20. Qualifying exhaustion below 25 requires falling
-ADX and small EMA separation. Rule completion measures checks, not win probability.
-See the [detailed policy](backend/README_REGIME_ADAPTIVE.md).
-
-## Execution
-
-- IG DEMO only; pair-relevant DST-aware sessions and configured news guards apply.
-- Volatility widens ATR/structure stops and reduces size within the same cash budget.
-- Both category spread caps and spread/ATR liquidity checks apply. Missing volume
-  stays explicitly unknown; observed weak volume blocks entries.
-- New orders submit a broker-side stop and target together. Unsafe minimum sizes,
-  dealing distances, stale/invalid quotes and adverse fill risk reject or close
-  an entry rather than widening its risk budget.
-- Duplicate setups, exposure, portfolio capacity and daily limits remain enforced.
-  Existing positions and earlier strategy evidence continue to be managed.
-- New regime entries use the account-risk-sized category portfolio. They are
-  excluded from the older allocation-sized Compound order lane, which lacks
-  these attached-stop guarantees. Forward evidence still measures PRIME status.
-
-Earlier [FX](backend/README_FOREX_ACTIVE.md) and
-[Gold](backend/README_XAUUSD_ACTIVE.md) guides document retained legacy strategies.
+See the [OpenAI analyst guide](backend/README_OPENAI_ANALYST.md). The
+[regime strategy](backend/README_REGIME_ADAPTIVE.md), earlier
+[FX](backend/README_FOREX_ACTIVE.md) and [Gold](backend/README_XAUUSD_ACTIVE.md)
+implementations remain available for rollback and existing-position evidence.
 
 ## FinancialData.Net / fdnpy
 
@@ -60,16 +56,16 @@ python run_server.py
 From the repository root:
 
 ```bash
-python -m unittest discover -s tests -p 'test*.py' -v
-python backend/clean_core_smoke.py
-# Optional broader discovery (includes the function-style weekend tests):
-pip install 'pytest>=8,<10'
-python -m pytest -q tests -o 'python_files=test*.py'
+pip install -r backend/requirements-dev.txt
+python -m pytest -q
+python -m compileall -q backend
+(cd backend && python clean_core_smoke.py)
 ```
 
-`/health`, `/strategy/regime-policy`, `/market-categories/status`,
-`/category-portfolio/status` and `/market-categories/data-health` expose the
-active policy, strategy IDs, protections and provider configuration.
+`/health`, `/strategy/openai-analysis`, `/strategy/regime-policy`,
+`/market-categories/status`, `/category-portfolio/status` and
+`/market-categories/data-health` expose active policy, decisions, protections and
+provider configuration. Reading status never starts a paid analysis or an order.
 
 ## Android build
 
@@ -82,6 +78,7 @@ flutter build apk --release
 ```
 
 APK output: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
-The V6.14 client shows regime, timeframe, ADX, volatility, rule status and blockers.
+The existing client consumes live category rankings and protected portfolio state.
+AI rationale is also exposed in compact Actions/MCP market responses.
 Code tests do not establish profitability; evaluate returns using genuine
 broker-settled DEMO results.

@@ -34,8 +34,11 @@ assert getattr(runtime, "COMPOUND_ENGINE", None) is not None
 assert getattr(runtime, "V63_SPECIALIST_SYSTEM", None) is not None
 from runtime_version import VERSION
 assert runtime.app.version == VERSION
-assert type(runtime.CATEGORY_STRATEGY_ENGINE).__name__ == "RegimeStrategyEngine"
-assert type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__ == "RegimeExecutionEngine"
+from openai_policy import enabled as openai_enabled
+expected_strategy = "OpenAIStrategyEngine" if openai_enabled() else "RegimeStrategyEngine"
+expected_execution = "OpenAIExecutionEngine" if openai_enabled() else "RegimeExecutionEngine"
+assert type(runtime.CATEGORY_STRATEGY_ENGINE).__name__ == expected_strategy
+assert type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__ == expected_execution
 
 loaded_forbidden = sorted(name for name in FORBIDDEN if name in sys.modules)
 if loaded_forbidden:
@@ -57,7 +60,7 @@ missing = sorted(required - paths)
 if missing:
     raise AssertionError("Missing clean-core routes: " + ", ".join(missing))
 
-print("V6.14 REGIME ADAPTIVE CLEAN CORE SMOKE PASS")
+print("PROTECTED DEMO CLEAN CORE SMOKE PASS", expected_strategy)
 print("routes:", len(paths))
 print("broker:", runtime.IG_DEMO_BROKER.status().get("environment"))
 print("live_money_execution: False")

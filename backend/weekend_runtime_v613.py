@@ -24,6 +24,12 @@ VERIFIED_WEEKEND_MARKETS = {
 def install(app: Any, runtime: Dict[str, Any]) -> WeekendMarketEngine:
     broker = runtime["broker"]
     engine = WeekendMarketEngine(broker)
+    from openai_policy import enabled as openai_enabled
+    if openai_enabled():
+        # The AI portfolio owns new entries, including Bitcoin. Existing broker
+        # stops/targets and portfolio reconciliation continue to manage holdings.
+        engine.enabled = False
+        engine._state.update({"enabled": False, "disabled_reason": "OPENAI_IS_ENTRY_AUTHORITY"})
 
     # Seed only identities already verified against IG DEMO. The engine still
     # calls market_details for this exact epic and assess_market must see

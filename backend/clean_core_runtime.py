@@ -17,6 +17,7 @@ from specialist_market_integration import install_specialist_market_system
 
 from runtime_version import VERSION, build_info
 from candle_data import normalize_candles
+from openai_policy import enabled as openai_enabled
 RUNTIME: Dict[str, Any] = {}
 
 
@@ -35,6 +36,9 @@ def _v673_global_market_data(seed: Dict[str, Any]) -> pd.DataFrame:
 def specialist_frame(seed: Dict[str, Any]) -> pd.DataFrame:
     raw = _v673_global_market_data(seed)
     raw = normalize_candles(raw, interval="15min", closed_only=True)
+    if openai_enabled():
+        # Model analysis consumes observed closed OHLCV. Legacy ML is not a gate.
+        return raw
     indicators = add_indicators(raw)
     model = train_model(indicators)
     enriched = enrich(indicators, model)
@@ -61,7 +65,7 @@ def _compound_candidates(_: float = 0.0) -> List[Dict[str, Any]]:
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Jasong AI Trader V6.14 Regime Adaptive + Weekend API",
+        title="Jasong AI Trader OpenAI DEMO Analyst API",
         version=VERSION,
         description=(
             "Clean IG DEMO runtime: regime-aware FX and XAUUSD execution plus a "
@@ -91,12 +95,16 @@ def create_app() -> FastAPI:
         compound_engine=compound,
         frame_func=specialist_frame,
         ownership_components=[],
-        regime_mode=True,
+        regime_mode=not openai_enabled(),
+        openai_mode=openai_enabled(),
     )
     RUNTIME["specialist_system"] = system
     RUNTIME["market_data"] = system.get("market_data")
 
-    from regime_integration import policy_status
+    if openai_enabled():
+        from openai_integration import policy_status
+    else:
+        from regime_integration import policy_status
 
     @app.get("/strategy/regime-policy")
     def regime_policy() -> Dict[str, Any]:
@@ -130,6 +138,8 @@ def create_app() -> FastAPI:
             "specialist_installed": bool(RUNTIME.get("specialist_system")),
             "weekend_market_installed": weekend is not None,
             "regime_strategy_ids": policy_status()["strategy_ids"],
+            "analysis_mode": "OPENAI" if openai_enabled() else "REGIME",
+            "openai_analyst": (system["intelligence"].analyst_status() if openai_enabled() else None),
             "financialdata_net": RUNTIME["market_data"].fdn.status(),
             "weekend_strategy_id": getattr(weekend, "_state", {}).get("strategy_id") if weekend is not None else None,
             "legacy_main_imported": False,
