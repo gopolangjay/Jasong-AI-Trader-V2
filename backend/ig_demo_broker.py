@@ -696,9 +696,16 @@ class IGDemoBroker:
                 if value is None or value == "":
                     return None
                 number = float(value)
-                return number if number == number else None
+                return number if math.isfinite(number) else None
             except Exception:
                 return None
+
+        # market_details(require_quote=True) retains a successfully fetched v3
+        # pair here when the v4 snapshot has no usable top-of-book quote.
+        fallback = (details or {}).get("_quote_snapshot") or {}
+        fallback_bid, fallback_offer = _num(fallback.get("bid")), _num(fallback.get("offer"))
+        if fallback_bid is not None and fallback_offer is not None:
+            return {"bid": fallback_bid, "offer": fallback_offer}
 
         bid = _num(snapshot.get("bid"))
         offer = _num(

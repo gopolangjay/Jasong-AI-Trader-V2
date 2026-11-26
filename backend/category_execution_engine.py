@@ -20,6 +20,7 @@ from risk_exit_policy import build_risk_plan
 from xauusd_liquidity_strategy import STRATEGY_ID as XAU_STRATEGY_ID
 from regime_strategy import STRATEGY_IDS as REGIME_STRATEGY_IDS
 from openai_policy import STRATEGY_ID as OPENAI_STRATEGY_ID
+from ig_demo_broker import IGDemoBroker
 
 PROTECTED_STRATEGY_IDS = (*REGIME_STRATEGY_IDS, OPENAI_STRATEGY_ID)
 
@@ -366,14 +367,12 @@ class CategoryExecutionEngine:
         except TypeError:
             details = self.broker.market_details(epic) or {}
 
-        quote_snapshot = dict(details.get("_quote_snapshot") or {})
         snapshot = dict(details.get("snapshot") or {})
-        bid = quote_snapshot.get("bid")
-        offer = quote_snapshot.get("offer")
-        if bid is None:
-            bid = snapshot.get("bid")
-        if offer is None:
-            offer = snapshot.get("offer")
+        # Use the same fresh quote parser as analysis and final broker preflight:
+        # IG v4 can provide only priceLadder, while a resolved v3 pair is stored
+        # in _quote_snapshot. Neither requires relaxing quote/spread checks.
+        quote = IGDemoBroker.extract_snapshot_quote(details)
+        bid, offer = quote.get("bid"), quote.get("offer")
         is_protected = candidate.get("strategy_id") in PROTECTED_STRATEGY_IDS
         if is_protected:
             is_openai = candidate.get("strategy_id") == OPENAI_STRATEGY_ID
