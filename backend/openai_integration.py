@@ -244,7 +244,10 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
                             "liquidity_pass": math.isfinite(bid) and math.isfinite(offer) and 0 < bid < offer})
             except Exception as exc:
                 row["ig_preflight_error"] = f"BROKER_PREFLIGHT_FAILED:{type(exc).__name__}"
-        reasons = execution_reasons(row, now=now)
+        # Analysis and broker requests can advance the clock. Validate against
+        # completion time so a freshly received quote is not compared with the
+        # timestamp captured before I/O; genuine future/stale values still fail.
+        reasons = execution_reasons(row, now=self._now())
         row.update({"rejection_reasons": reasons, "standard_eligible": not reasons, "trade_eligible": not reasons,
                     "execution_safety_pass": not reasons, "direction_match": row["direction"] in {"BUY", "SELL"},
                     "quality_tier": "AI_SELECTED" if not reasons else None, "deep_status": "VERIFIED" if not reasons else "OBSERVE"})

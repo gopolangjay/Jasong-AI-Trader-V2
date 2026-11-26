@@ -192,6 +192,22 @@ class OpenAIIntegrationTests(unittest.TestCase):
         crypto = next(r for r in self.engine.universe("CRYPTO") if r["key"] == "BITCOIN")
         self.assertTrue(crypto["execution_active"])
 
+    def test_quote_validation_uses_clock_after_slow_broker_requests(self):
+        clock = [NOW]
+        self.engine._now = lambda: clock[0]
+        self.execution._now = lambda: clock[0]
+        original = self.broker.market_details
+        def delayed_details(epic, require_quote=False):
+            clock[0] += pd.Timedelta(seconds=2)
+            return original(epic, require_quote=require_quote)
+        with patch("openai_integration.time.time", side_effect=lambda: clock[0].timestamp()), \
+             patch.object(self.broker, "market_details", side_effect=delayed_details):
+            row = self.engine._evaluate_seed(self.seed)
+        self.assertGreater(row["ig_quote_timestamp"], NOW.timestamp())
+        self.assertTrue(row["standard_eligible"], row["rejection_reasons"])
+        allowed, reason = self.execution._may_open(row, [])
+        self.assertTrue(allowed, reason)
+
     def test_ai_can_choose_a_setup_without_legacy_direction_or_geographic_gate(self):
         row = self.selected()
         row["session_active"] = False
@@ -214,6 +230,7 @@ class OpenAIIntegrationTests(unittest.TestCase):
         for changes, reason in (({"signal_timestamp": (NOW-pd.Timedelta(minutes=6)).isoformat()}, "DECISION_STALE"),
                                 ({"signal_timestamp": (NOW+pd.Timedelta(seconds=1)).isoformat()}, "DECISION_STALE"),
                                 ({"ig_quote_timestamp": NOW.timestamp()-181}, "QUOTE_STALE"),
+                                ({"ig_quote_timestamp": NOW.timestamp()+1}, "QUOTE_STALE"),
                                 ({"ig_market_status": "CLOSED"}, "NOT_TRADEABLE"),
                                 ({"ig_offer": float("nan")}, "QUOTE_INVALID")):
             with self.subTest(changes=changes):

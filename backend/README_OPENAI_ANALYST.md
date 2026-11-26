@@ -25,6 +25,8 @@ Analysis, risk sizing and final broker preflight share the same parser for flat
 quotes, v4 price ladders and a successfully fetched v3 fallback pair. Missing,
 non-finite, inverted or excessively wide fresh quotes still prevent submission.
 Ranked eligibility is false whenever an operational rejection reason remains.
+Freshness validation reads the clock after analysis and broker I/O completes,
+so network latency cannot make a newly received quote appear future-dated.
 An explicitly configured required news guard still applies. Data older than 20
 minutes, decisions older than 5 minutes and quotes older than 3 minutes cannot
 authorize an entry. Cached decisions retain their original creation timestamp.
