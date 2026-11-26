@@ -19,6 +19,7 @@ from chatgpt_mcp import install_chatgpt_mcp
 from prime_policy import ForwardPrimeArchitecture
 from provenance import ProvenanceRegistry
 from specialist_market_data import ResilientSpecialistMarketData
+from openai_policy import discretionary_enabled
 
 
 def _position_identity(row: Dict[str, Any]) -> tuple[str, str]:
@@ -300,10 +301,13 @@ def install_specialist_market_system(
         from openai_integration import OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
         strategy_class, portfolio_class, prime_class = OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
 
+    discretionary = bool(openai_mode and discretionary_enabled())
+    ai_options = {"discretionary": discretionary} if openai_mode else {}
     intelligence = strategy_class(
         broker=broker,
         frame_func=provenance_frame_func,
         state_path=category_state_path,
+        **ai_options,
     )
     intelligence.start_thread()
     if openai_mode:
@@ -335,6 +339,7 @@ def install_specialist_market_system(
         legacy_evidence_source=
             legacy_forward_evidence,
         state_dir=base_dir,
+        **ai_options,
     )
     forward_prime.install(
         compound_engine=
@@ -401,7 +406,11 @@ def install_specialist_market_system(
                 intelligence,
             ),
         state_path=portfolio_state_path,
+        **ai_options,
     )
+    if discretionary:
+        portfolio.analysis_engine = intelligence
+        intelligence.position_source = portfolio.discretionary_position_context
     forward_prime.attach_category_portfolio(
         portfolio
     )
@@ -418,6 +427,7 @@ def install_specialist_market_system(
             "TRADE_EXCURSION_STATE_PATH",
             f"{base_dir}/jasong_trade_excursions.json",
         ),
+        discretionary=discretionary,
     )
     excursion_tracker.install_broker_observer()
     excursion_tracker.start_thread()
@@ -443,6 +453,9 @@ def install_specialist_market_system(
     )
     app.version = intelligence.VERSION
     app.description = (
+        "IG DEMO only: OpenAI directs entries and closes; discretionary orders have no app risk caps "
+        "or mandatory attached stops/targets. IG applies its own order and margin rules."
+        if discretionary else
         "IG DEMO only: OpenAI selects entries from closed candles; account-risk sizing, "
         "fresh broker quotes, duplicate/exposure limits and attached protection remain enforced."
         if openai_mode else

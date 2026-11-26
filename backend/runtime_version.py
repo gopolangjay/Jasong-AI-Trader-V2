@@ -1,7 +1,7 @@
 """One release identity for the engine and its broker/API gateways."""
 import os
 
-VERSION = "6.15-openai-analyst-v3"
+VERSION = "6.16-ai-discretionary-demo-v1"
 
 
 def build_info() -> dict[str, str]:
