@@ -20,6 +20,7 @@ from category_strategy_engine import CATEGORY_MARKET_SEEDS
 from regime_strategy import analyze_regime
 from test_regime_strategy import range_candles
 from test_regime_execution import DemoBroker
+from ig_demo_broker import IGDemoBroker
 
 NOW = pd.Timestamp("2026-10-15 11:00Z")
 
@@ -135,6 +136,7 @@ class AnalystTests(unittest.TestCase):
 
 class ProtectedBroker(DemoBroker):
     BASE_URL = "https://demo-api.ig.com/gateway/deal"
+    extract_snapshot_quote = staticmethod(IGDemoBroker.extract_snapshot_quote)
 
     def status(self):
         return {"account_id": "DEMO1", "environment": "DEMO", "base_url": self.BASE_URL, "live_money_execution": False}
@@ -242,6 +244,43 @@ class OpenAIIntegrationTests(unittest.TestCase):
         self.assertEqual(self.broker.closed, ["D1"])
         self.assertEqual(self.execution._state["positions"], [])
 
+    def test_ladder_and_v3_fallback_quotes_reach_protected_risk_sizing(self):
+        original = self.broker.market_details
+        for quote_format in ("ladder_ask", "ladder_offer", "v3_fallback"):
+            with self.subTest(quote_format=quote_format):
+                def details(epic, require_quote=False):
+                    result = copy.deepcopy(original(epic, require_quote=require_quote))
+                    snapshot = result["snapshot"]
+                    bid, offer = snapshot.pop("bid"), snapshot.pop("offer")
+                    if quote_format == "v3_fallback":
+                        result.update(_quote_fallback_v3=True, _quote_snapshot={"bid": bid, "offer": offer})
+                    else:
+                        key = "ask" if quote_format == "ladder_ask" else "offer"
+                        snapshot["priceLadder"] = [{"bid": bid, key: offer}]
+                    return result
+                self.execution._state["positions"] = []
+                before = len(self.broker.opened)
+                with patch.object(self.broker, "market_details", side_effect=details):
+                    self.execution._open_candidate(self.selected(), [])
+                self.assertEqual(len(self.broker.opened), before+1)
+                order = self.broker.opened[-1]
+                self.assertIn("stop_level", order)
+                self.assertIn("limit_level", order)
+                position = self.execution.positions()[0]
+                self.assertLessEqual(position["estimated_stop_risk_cash"], position["risk_cash_budget"]*1.001)
+
+    def test_invalid_and_widened_ladder_quotes_still_block_fresh_submission(self):
+        row = self.selected()
+        original = self.broker.market_details(row["ig_epic"])
+        for bid, offer in ((None, 1.2), (float("nan"), 1.2), (1.2, 1.1999), (1.1, 1.2)):
+            with self.subTest(bid=bid, offer=offer):
+                details = copy.deepcopy(original)
+                details["snapshot"] = {"marketStatus": "TRADEABLE", "priceLadder": [{"bid": bid, "ask": offer}]}
+                with patch.object(self.broker, "market_details", return_value=details):
+                    self.execution._open_candidate(row, [])
+                self.assertEqual(self.broker.opened, [])
+                self.assertIn("Fresh IG", self.execution._state["last_risk_rejection"]["reason"])
+
     def test_bad_or_stale_market_evidence_never_reaches_openai(self):
         for mode in ("invalid", "stale"):
             with self.subTest(mode=mode):
@@ -326,6 +365,18 @@ class OpenAIIntegrationTests(unittest.TestCase):
             self.assertTrue(compact["openai_validated"])
             self.assertTrue(compact["standard_eligible"])
             self.assertEqual(compact["openai_analysis"]["model"], self.analyst.model)
+
+    def test_reported_operational_blockers_cannot_remain_marked_eligible(self):
+        from provenance import ProvenanceRegistry
+        row = {**self.selected(), "rejection_reasons": ["BROKER_QUOTE_STALE"]}
+        self.engine._state["evaluations"] = {row["symbol"]: row}
+        prime = OpenAIPrimeArchitecture(intelligence=self.engine, broker=self.broker,
+            provenance_registry=ProvenanceRegistry(default_analysis_source="SYNTHETIC_UNIT_TEST"),
+            legacy_evidence_source=None, state_dir=self.directory.name)
+        ranked = prime.category_rankings("FOREX")["FOREX"][0]
+        self.assertIn("BROKER_QUOTE_STALE", ranked["rejection_reasons"])
+        for key in ("strong_qualified", "standard_eligible", "trade_eligible", "execution_eligible", "eligible"):
+            self.assertFalse(ranked[key], key)
 
 
 if __name__ == "__main__":

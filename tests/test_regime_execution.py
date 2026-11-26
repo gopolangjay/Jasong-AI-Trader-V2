@@ -209,6 +209,22 @@ class AttachedOrderBrokerTests(unittest.TestCase):
                                                   stop_level=stop, limit_level=target, max_spread_bps=8)
         self.broker._request.assert_not_called()
 
+    def test_attached_orders_accept_ladder_and_resolved_v3_quotes(self):
+        for quote_format in ("ladder_ask", "ladder_offer", "v3_fallback"):
+            with self.subTest(quote_format=quote_format):
+                self.details["snapshot"] = {"marketStatus": "TRADEABLE"}
+                self.details.pop("_quote_snapshot", None)
+                if quote_format == "v3_fallback":
+                    self.details["_quote_snapshot"] = {"bid": 1.1999, "offer": 1.2}
+                else:
+                    key = "ask" if quote_format == "ladder_ask" else "offer"
+                    self.details["snapshot"]["priceLadder"] = [{"bid": 1.1999, key: 1.2}]
+                result = self.broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1,
+                    allow_size_increment_retry=False, stop_level=1.19, limit_level=1.22, max_spread_bps=8)
+                payload = self.broker._request.call_args.kwargs["payload"]
+                self.assertEqual((payload["stopLevel"], payload["limitLevel"]), (1.19, 1.22))
+                self.assertEqual(result["attached_limit_level"], 1.22)
+
 
 if __name__ == "__main__":
     unittest.main()

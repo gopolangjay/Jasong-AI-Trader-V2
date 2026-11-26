@@ -293,10 +293,17 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
     def enrich(self, raw, *, forward_metrics=None):
         row = super().enrich(raw, forward_metrics=forward_metrics)
         if row.get("strategy_id") == STRATEGY_ID:
-            row.update({"eligible": row["standard_eligible"], "execution_eligible": row["standard_eligible"],
-                        "execution_basis": "OPENAI_ANALYST_WITH_PROTECTED_EXECUTOR" if row["standard_eligible"] else "OPENAI_WAIT_OR_EXECUTION_GUARD",
+            reasons = [r for r in row["rejection_reasons"] if r != "FORWARD_VALIDATION_NOT_YET_PRIME"]
+            eligible = bool(row["standard_eligible"] and not reasons)
+            row.update({"eligible": eligible, "execution_eligible": eligible,
+                        "standard_eligible": eligible, "trade_eligible": eligible,
+                        "strong_qualified": eligible, "confidence_qualified": eligible,
+                        "prime_qualified": bool(eligible and row.get("prime_qualified")),
+                        "ig_demo_learning_eligible": eligible,
+                        "learning_eligible": bool(eligible and not row.get("prime_qualified")),
+                        "execution_basis": "OPENAI_ANALYST_WITH_PROTECTED_EXECUTOR" if eligible else "OPENAI_WAIT_OR_EXECUTION_GUARD",
                         "fast_score_source": "OPENAI_PRIORITY_NOT_WIN_PROBABILITY",
-                        "rejection_reasons": [r for r in row["rejection_reasons"] if r != "FORWARD_VALIDATION_NOT_YET_PRIME"],
+                        "rejection_reasons": reasons,
                         "compound_eligible": False})
         return row
 

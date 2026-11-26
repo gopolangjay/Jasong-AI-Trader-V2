@@ -21,6 +21,10 @@ WAIT remains a valid outcome. No win-probability claim is derived from its outpu
 
 Execution retains strict UTC M15 alignment, valid OHLCV, closed bars, fresh evidence,
 fresh exact-instrument quotes, IG tradeability and existing category spread caps.
+Analysis, risk sizing and final broker preflight share the same parser for flat
+quotes, v4 price ladders and a successfully fetched v3 fallback pair. Missing,
+non-finite, inverted or excessively wide fresh quotes still prevent submission.
+Ranked eligibility is false whenever an operational rejection reason remains.
 An explicitly configured required news guard still applies. Data older than 20
 minutes, decisions older than 5 minutes and quotes older than 3 minutes cannot
 authorize an entry. Cached decisions retain their original creation timestamp.
