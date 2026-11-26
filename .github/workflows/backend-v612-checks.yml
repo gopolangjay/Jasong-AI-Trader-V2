@@ -38,5 +38,6 @@ jobs:
       - name: Smoke-test clean runtime without broker orders
         working-directory: backend
         run: |
-          JASONG_ANALYSIS_MODE=OPENAI python clean_core_smoke.py
+          JASONG_ANALYSIS_MODE=OPENAI JASONG_DEMO_EXECUTION_POLICY=DISCRETIONARY python clean_core_smoke.py
+          JASONG_ANALYSIS_MODE=OPENAI JASONG_DEMO_EXECUTION_POLICY=PROTECTED python clean_core_smoke.py
           JASONG_ANALYSIS_MODE=REGIME python clean_core_smoke.py

@@ -47,6 +47,9 @@ class RuntimeVersionTests(unittest.TestCase):
                     self.assertFalse(analysis["can_call_broker"])
                     self.assertEqual(type(runtime.CATEGORY_STRATEGY_ENGINE).__name__, "OpenAIStrategyEngine")
                     self.assertEqual(type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__, "OpenAIExecutionEngine")
+                    self.assertTrue(runtime.CATEGORY_PORTFOLIO_ENGINE.discretionary)
+                    self.assertTrue(runtime.CATEGORY_STRATEGY_ENGINE.discretionary)
+                    self.assertFalse(runtime.V63_SPECIALIST_SYSTEM["excursion_tracker"].status()["server_r_watchdog_enabled"])
                     self.assertEqual(client.get("/openapi.json").json()["info"]["version"], VERSION)
                     # No API key and no confirmation must still prevent writes.
                     self.assertEqual(client.post("/assistant/write/open-qualified", json={"symbol": "EURUSD", "confirm": True}).status_code, 401)

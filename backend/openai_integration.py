@@ -20,12 +20,13 @@ from forex_liquidity_lines_strategy import news_blackout_context
 from openai_analyst import OpenAIAnalyst, AnalystUnavailable
 from openai_policy import STRATEGY_ID, STRATEGY_NAME, policy_status as base_policy
 from runtime_version import VERSION
+from ai_demo_execution import DiscretionaryDemoMixin, entry_reasons as discretionary_reasons
 
 AI_ACTIVE_KEYS = (*ACTIVE_EXECUTION_KEYS, "BITCOIN")
 
 
-def policy_status():
-    return {**base_policy(), "active_symbols": list(AI_ACTIVE_KEYS)}
+def policy_status(discretionary=None):
+    return {**base_policy(discretionary), "active_symbols": list(AI_ACTIVE_KEYS)}
 
 
 def _seconds(value):
@@ -90,10 +91,13 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
     VERSION = VERSION
     ACTIVE_EXECUTION_KEYS = AI_ACTIVE_KEYS
 
-    def __init__(self, *, analyst=None, now_func=None, **kwargs):
+    def __init__(self, *, analyst=None, now_func=None, discretionary=False, **kwargs):
+        self.discretionary = bool(discretionary)
+        self.position_source = lambda: []
         self._now = now_func or (lambda: pd.Timestamp.now(tz="UTC"))
         self.analyst = analyst or OpenAIAnalyst(state_path=os.getenv(
-            "OPENAI_ANALYST_BUDGET_PATH", str(Path(kwargs["state_path"]).with_name("jasong_openai_budget.json"))))
+            "OPENAI_ANALYST_BUDGET_PATH", str(Path(kwargs["state_path"]).with_name("jasong_openai_budget.json"))),
+            discretionary=self.discretionary)
         self._analysis_lock = threading.Lock()
         self._analysis_period = None
         self._frames = {}
@@ -151,7 +155,8 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
                     # Source errors may contain keyed URLs; expose only the error type.
                     self._data_errors[symbol] = f"MARKET_EVIDENCE_UNAVAILABLE:{type(exc).__name__}"
             self._frames = collected
-            self._decision = self.analyst.analyse(snapshots, as_of=now.isoformat())
+            self._decision = self.analyst.analyse(snapshots, as_of=now.isoformat(),
+                **({"positions": self.position_source()} if self.discretionary else {}))
         except AnalystUnavailable:
             self._decision = None
         except Exception:
@@ -159,6 +164,14 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
             self._decision = None
         finally:
             self._analysis_running = False
+            self._analysis_lock.release()
+
+    def decision_snapshot(self):
+        if not self._analysis_lock.acquire(blocking=False):
+            return None
+        try:
+            return dict(self._decision) if self._decision else None
+        finally:
             self._analysis_lock.release()
 
     def _resolve_execution_market(self, seed):
@@ -214,40 +227,49 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
         if selected and frames:
             reference = row["live_price"]
             sign = 1 if selected["direction"] == "BUY" else -1
-            distance = sign*(reference-selected["stop_price"])
-            reward = sign*(selected["target_price"]-reference)
+            stop, target = selected.get("stop_price"), selected.get("target_price")
+            distance = sign*(reference-stop) if stop is not None else None
+            reward = sign*(target-reference) if target is not None else None
             row.update({"direction": selected["direction"], "live_direction": selected["direction"],
                         "openai_validated": True, "signal_qualified": True,
                         "signal_timestamp": pd.Timestamp(decision["created_at"], unit="s", tz="UTC").isoformat(),
                         "setup_id": hashlib.sha256((STRATEGY_ID+symbol+decision["context_id"]).encode()).hexdigest(),
-                        "structural_stop_distance": distance, "target_r": reward/distance,
-                        "max_hold_seconds": selected["holding_minutes"]*60,
+                        "structural_stop_distance": distance,
+                        "target_r": reward/distance if distance and reward is not None else None,
+                        "max_hold_seconds": selected["holding_minutes"]*60 if selected.get("holding_minutes") else None,
+                        "openai_size": selected.get("size"), "model_stop_price": stop,
+                        "model_target_price": target, "model_holding_minutes": selected.get("holding_minutes"),
                         "openai_priority": proposals.index(selected)+1,
                         "smart_fast_score": 100-proposals.index(selected), "category_rank_score": 100-proposals.index(selected)})
             try:
                 market = self._resolve_execution_market(seed)
                 epic = market.get("epic")
-                details = self.broker.market_details(epic, require_quote=True)
-                if symbol == "BITCOIN" and "BITCOIN" not in str((details.get("instrument") or {}).get("name") or "").upper():
-                    raise ValueError("BITCOIN_INSTRUMENT_IDENTITY_MISMATCH")
-                quote = (self.broker.extract_snapshot_quote(details) if hasattr(self.broker, "extract_snapshot_quote")
-                         else {**(details.get("snapshot") or {}), "source": "FRESH_EPIC_SNAPSHOT"})
-                snapshot = details.get("snapshot") or {}
-                bid, offer = float(quote["bid"]), float(quote["offer"])
-                bps = (offer-bid)/((offer+bid)/2)*10000
-                row.update({"ig_epic": epic, "ig_market_name": market.get("name"),
-                            "ig_market_status": str(snapshot.get("marketStatus") or "").upper(),
-                            "ig_tradeable": str(snapshot.get("marketStatus") or "").upper() == "TRADEABLE",
-                            "ig_bid": bid, "ig_offer": offer, "ig_quote_source": quote.get("source") or "FRESH_EPIC_SNAPSHOT",
-                            "ig_quote_timestamp": time.time(), "ig_spread_bps": bps, "spread_bps": bps,
-                            "spread_pass": math.isfinite(bps) and 0 < bps <= row["spread_gate_bps"],
-                            "liquidity_pass": math.isfinite(bid) and math.isfinite(offer) and 0 < bid < offer})
+                if self.discretionary:
+                    row.update(ig_epic=epic, ig_market_name=market.get("name"),
+                               application_quote_preflight=False, execution_policy="AI_DISCRETIONARY_DEMO")
+                else:
+                    details = self.broker.market_details(epic, require_quote=True)
+                    if symbol == "BITCOIN" and "BITCOIN" not in str((details.get("instrument") or {}).get("name") or "").upper():
+                        raise ValueError("BITCOIN_INSTRUMENT_IDENTITY_MISMATCH")
+                    quote = (self.broker.extract_snapshot_quote(details) if hasattr(self.broker, "extract_snapshot_quote")
+                             else {**(details.get("snapshot") or {}), "source": "FRESH_EPIC_SNAPSHOT"})
+                    snapshot = details.get("snapshot") or {}
+                    bid, offer = float(quote["bid"]), float(quote["offer"])
+                    bps = (offer-bid)/((offer+bid)/2)*10000
+                    row.update({"ig_epic": epic, "ig_market_name": market.get("name"),
+                                "ig_market_status": str(snapshot.get("marketStatus") or "").upper(),
+                                "ig_tradeable": str(snapshot.get("marketStatus") or "").upper() == "TRADEABLE",
+                                "ig_bid": bid, "ig_offer": offer, "ig_quote_source": quote.get("source") or "FRESH_EPIC_SNAPSHOT",
+                                "ig_quote_timestamp": time.time(), "ig_spread_bps": bps, "spread_bps": bps,
+                                "spread_pass": math.isfinite(bps) and 0 < bps <= row["spread_gate_bps"],
+                                "liquidity_pass": math.isfinite(bid) and math.isfinite(offer) and 0 < bid < offer})
             except Exception as exc:
                 row["ig_preflight_error"] = f"BROKER_PREFLIGHT_FAILED:{type(exc).__name__}"
         # Analysis and broker requests can advance the clock. Validate against
         # completion time so a freshly received quote is not compared with the
         # timestamp captured before I/O; genuine future/stale values still fail.
-        reasons = execution_reasons(row, now=self._now())
+        reasons = (discretionary_reasons(row, self._now()) if self.discretionary
+                   else execution_reasons(row, now=self._now()))
         row.update({"rejection_reasons": reasons, "standard_eligible": not reasons, "trade_eligible": not reasons,
                     "execution_safety_pass": not reasons, "direction_match": row["direction"] in {"BUY", "SELL"},
                     "quality_tier": "AI_SELECTED" if not reasons else None, "deep_status": "VERIFIED" if not reasons else "OBSERVE"})
@@ -260,14 +282,15 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
     def analyst_status(self):
         return {**self.analyst.status(), "analysis_running": self._analysis_running,
                 "current_period": self._analysis_period, "fresh_input_markets": len(self._frames),
-                "data_errors_by_market": dict(self._data_errors), "policy": policy_status()}
+                "data_errors_by_market": dict(self._data_errors), "policy": policy_status(self.discretionary)}
 
     def status(self):
         out = super().status()
         out.update({"version": VERSION, "name": "JASONG OPENAI DEMO ANALYST", "analysis_mode": "OPENAI",
-                    "openai_analyst": self.analyst_status(), "regime_policy": policy_status(),
+                    "openai_analyst": self.analyst_status(), "regime_policy": policy_status(self.discretionary),
                     "strategy_sequence": {"setup": "OpenAI BUY/SELL/WAIT from closed-candle evidence",
-                                          "then": "Fresh broker quote -> costs -> account risk -> attached stop/target"},
+                                          "then": "AI-selected DEMO market order and model-directed closes" if self.discretionary
+                                          else "Fresh broker quote -> costs -> account risk -> attached stop/target"},
                     "confidence_policy": {"basis": "OPENAI_DECISION_NOT_WIN_PROBABILITY", "fixed_thresholds": False}})
         for category in ("FOREX", "METALS", "CRYPTO"):
             info = out.get("categories", {}).get(category, {})
@@ -282,10 +305,16 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
 class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
     VERSION = VERSION
 
+    def __init__(self, *, discretionary=False, **kwargs):
+        self.discretionary = bool(discretionary)
+        super().__init__(**kwargs)
+
     def _strong_gate(self, row, provenance):
         if row.get("strategy_id") != STRATEGY_ID:
             return False, ["RETIRED_ENTRY_STRATEGY"]
-        reasons = execution_reasons(row) + list(provenance.get("issues") or [])
+        reasons = (discretionary_reasons(row, pd.Timestamp(time.time(), unit="s", tz="UTC"))
+                   if getattr(self, "discretionary", False)
+                   else execution_reasons(row) + list(provenance.get("issues") or []))
         return not reasons, list(dict.fromkeys(reasons))
 
     def _live_fast_score(self, row, provenance):
@@ -304,7 +333,8 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
                         "prime_qualified": bool(eligible and row.get("prime_qualified")),
                         "ig_demo_learning_eligible": eligible,
                         "learning_eligible": bool(eligible and not row.get("prime_qualified")),
-                        "execution_basis": "OPENAI_ANALYST_WITH_PROTECTED_EXECUTOR" if eligible else "OPENAI_WAIT_OR_EXECUTION_GUARD",
+                        "execution_basis": ("AI_DISCRETIONARY_DEMO" if getattr(self, "discretionary", False)
+                                            else "OPENAI_ANALYST_WITH_PROTECTED_EXECUTOR") if eligible else "OPENAI_WAIT_OR_EXECUTION_GUARD",
                         "fast_score_source": "OPENAI_PRIORITY_NOT_WIN_PROBABILITY",
                         "rejection_reasons": reasons,
                         "compound_eligible": False})
@@ -319,12 +349,13 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
         return result
 
 
-class OpenAIExecutionEngine(CategoryExecutionEngine):
+class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
     VERSION = VERSION
     ACTIVE_SYMBOLS = AI_ACTIVE_KEYS
     ACTIVE_STRATEGY_IDS = (*CategoryExecutionEngine.ACTIVE_STRATEGY_IDS, *REGIME_IDS, STRATEGY_ID)
 
-    def __init__(self, *, now_func=None, **kwargs):
+    def __init__(self, *, now_func=None, discretionary=False, **kwargs):
+        self.discretionary = bool(discretionary)
         self._now = now_func or (lambda: pd.Timestamp.now(tz="UTC"))
         super().__init__(**kwargs)
 
@@ -339,6 +370,8 @@ class OpenAIExecutionEngine(CategoryExecutionEngine):
         return candidate.get("strategy_id") == STRATEGY_ID
 
     def _may_open(self, candidate, external):
+        if self.discretionary:
+            return self._discretionary_may_open(candidate)
         if not demo_only(self.broker):
             return False, "IG_DEMO_REQUIRED"
         reasons = execution_reasons(candidate, now=self._now())
@@ -346,13 +379,44 @@ class OpenAIExecutionEngine(CategoryExecutionEngine):
             return False, ", ".join(reasons)
         return super()._may_open(candidate, external)
 
+    def _open_candidate(self, candidate, external):
+        if self.discretionary:
+            return self._discretionary_open(candidate)
+        return super()._open_candidate(candidate, external)
+
+    def _due_closes(self):
+        if self.discretionary:
+            return self._discretionary_closes()
+        return super()._due_closes()
+
+    def _reconcile(self):
+        rows = super()._reconcile()
+        if self.discretionary:
+            self._recover_discretionary_orders(rows)
+        return rows
+
+    def tick(self):
+        if self.discretionary:
+            return self._discretionary_tick()
+        return super().tick()
+
     def status(self):
         out = super().status()
         out.update({"version": VERSION, "active_strategy": STRATEGY_ID, "active_strategies": [STRATEGY_ID],
                     "active_symbol": "OPENAI_ACTIVE_MARKETS", "active_categories": ["FOREX", "METALS", "CRYPTO"],
-                    "analysis_mode": "OPENAI", "regime_policy": policy_status(), "minimum_target_r": None,
+                    "analysis_mode": "OPENAI", "regime_policy": policy_status(self.discretionary), "minimum_target_r": None,
                     "session_policy": "IG broker market hours; no geographic-session entry veto",
                     "risk_policy": "AI_INVALIDATION_TARGET_ACCOUNT_RISK_WITH_ATTACHED_PROTECTION"})
         out["max_daily_entries_south_africa"]["CRYPTO"] = self.max_daily_entries
         out["entries_today_south_africa"]["CRYPTO"] = self._opened_today_sast("CRYPTO")
+        for legacy_field in ("minimum_target_r_by_market", "preferred_target_r_by_market", "forex_demo_policy"):
+            out.pop(legacy_field, None)
+        if self.discretionary:
+            out.update(execution_policy="AI_DISCRETIONARY_DEMO", risk_policy="MODEL_DISCRETION_NO_APPLICATION_RISK_CAPS",
+                       risk_per_trade_pct=None, max_daily_entries_south_africa=None, max_open_positions=None,
+                       global_ig_max_positions=None, global_remaining_positions=None, max_per_category=None,
+                       max_tracks_per_epic=None, mandatory_attached_protection=False,
+                       quote_spread_dealing_distance_preflight=False, exit_policy="MODEL_CLOSE_DECISIONS",
+                       last_order_error=self._state.get("last_order_error"),
+                       last_model_close_error=self._state.get("last_model_close_error"))
         return out

@@ -146,6 +146,7 @@ class CategoryExecutionEngine:
                 "market_status": market.get("marketStatus"),
                 "bid": market.get("bid"),
                 "offer": market.get("offer"),
+                "profit_loss": position.get("profit") if position.get("profit") is not None else position.get("profitLoss"),
             })
         return rows
 

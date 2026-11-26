@@ -1,85 +1,72 @@
-# OpenAI DEMO analyst
+# OpenAI DEMO analyst and executor
 
-The server reuses its existing `OPENAI_API_KEY`. No credential is copied to the
-repository, API responses, model evidence, mobile client or logs. The model reads
-only a bounded snapshot of closed price candles and trusted market identifiers.
-It has no broker tools and cannot change account configuration or execution limits.
+The server reuses its existing `OPENAI_API_KEY`. Credentials never enter model
+context, source control, public responses or logs. The hard-coded broker remains
+IG DEMO, and live-money execution is unavailable.
 
-## Policy
+## Discretionary DEMO policy
 
-The AI portfolio covers 28 liquid FX pairs, Gold and Bitcoin. Each batch returns
-zero to three BUY/SELL proposals; all other markets WAIT. A proposal supplies its
-symbol, direction, stop, target, 15–240 minute horizon and concise rationale. It
-must echo the exact evidence context ID and cannot include size, EPIC, account,
-live-money, override or arbitrary execution parameters. Duplicate/unknown symbols,
-wrong-side stops/targets, incomplete outputs and refusals reject the entire batch.
+`JASONG_ANALYSIS_MODE=OPENAI` and
+`JASONG_DEMO_EXECUTION_POLICY=DISCRETIONARY` are the defaults for the explicitly
+requested discretionary simulation. The model analyses completed M15/H1/H4 candles
+for 28 liquid FX pairs, Gold and Bitcoin. It returns up to three BUY/SELL proposals
+or WAIT, and explicit closes for supplied open-position aliases.
 
-EMA crosses, ADX regimes, RSI divergence, ML probability/FAST floors, geographical
-session hours, fixed minimum reward/risk and historical PRIME status do not decide
-AI entry eligibility. The model chooses a defensible setup from observed prices;
-WAIT remains a valid outcome. No win-probability claim is derived from its output.
+Application account-percent risk sizing, daily entry caps, portfolio/category/
+theme/EPIC capacity limits, geographic/news vetoes, quote/spread thresholds and
+mandatory attached-stop/target/dealing-distance preflight do not gate these orders.
+A positive model `size` is in IG contract units; null uses the existing configured
+IG default. IG's own minimum-size, increment, market, margin and order rules still
+apply. The executor records rejections rather than claiming an accepted trade.
 
-Execution retains strict UTC M15 alignment, valid OHLCV, closed bars, fresh evidence,
-fresh exact-instrument quotes, IG tradeability and existing category spread caps.
-Analysis, risk sizing and final broker preflight share the same parser for flat
-quotes, v4 price ladders and a successfully fetched v3 fallback pair. Missing,
-non-finite, inverted or excessively wide fresh quotes still prevent submission.
-Ranked eligibility is false whenever an operational rejection reason remains.
-Freshness validation reads the clock after analysis and broker I/O completes,
-so network latency cannot make a newly received quote appear future-dated.
-An explicitly configured required news guard still applies. Data older than 20
-minutes, decisions older than 5 minutes and quotes older than 3 minutes cannot
-authorize an entry. Cached decisions retain their original creation timestamp.
+Discretionary orders are market orders without attached stop or limit levels.
+Model stop/target levels and review horizons are optional advice, not entry gates
+or automatic exits. The model sees owned open positions, their last reconciled
+broker quotes, entry, size, available P&L and original rationale, and explicitly
+chooses closes. The server R/profit watchdog and native amendments are disabled
+in this mode; excursion reporting remains observational.
 
-The protected category executor continues account-risk sizing (maximum 1%), daily
-entry caps, duplicate setup/symbol/EPIC protection and portfolio/theme limits. Model
-levels transfer proportionally across analysis/broker price units. Spread buffers
-reduce available reward/risk; no artificial target is invented to force admission.
-Broker minimum size and dealing-distance failures reject the order. A stop and
-target are submitted initially; absent protection or excessive filled cash risk
-requires an immediate close. Stops, targets and holding-time exits remain managed.
+Each accepted decision is bound to its exact input context and expires after five
+minutes. Unknown symbols/position aliases, malformed output, invalid closed data
+and live environments cannot submit orders. Position aliases exclude account and
+broker deal identifiers from model input. Only owned JSCAT positions can be closed.
+The app reserves each submission durably before the external request. The same
+model decision cannot repeat after a tick, manual request or restart. A timeout is
+reconciled by the reserved broker reference, without blindly opening a duplicate.
+A pending close acknowledgement is reported as pending until verified/reconciled.
 
-Bitcoin uses the previously verified IG DEMO EPIC and a fresh Bitcoin instrument
-name/quote check. It has no weekend-only veto in this mode. The independent legacy
-weekend entry worker and allocation-sized Compound lane cannot originate competing
-AI entries. Existing holdings and prior-generation daily entry counts remain visible.
+## Rollback
 
-## Configuration and usage
+`JASONG_DEMO_EXECUTION_POLICY=PROTECTED` retains the prior 1% account-risk sizing,
+capacity/exposure/daily limits, quote/spread/news checks, attached stop/target and
+watchdog management. `JASONG_ANALYSIS_MODE=REGIME` restores the rule-based path.
+Existing broker positions and historical trade evidence are retained.
+
+## API configuration and operation
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `JASONG_ANALYSIS_MODE` | `OPENAI` | Use `REGIME` to restore the previous rule-based entry path |
-| `OPENAI_API_KEY` | Existing Render secret | OpenAI authentication; absence produces WAIT |
-| `JASONG_OPENAI_ANALYST_MODEL` | `JASONG_OPENAI_MODEL`, then `gpt-5.4-mini` | Explicit model override, preserving an existing model selection |
-| `OPENAI_ANALYST_MAX_REQUESTS_PER_DAY` | `96` | Durable UTC-day request reservation; maximum allowed configuration 288 |
-| `OPENAI_ANALYST_TIMEOUT_SECONDS` | `45` | Per-request transport timeout, bounded to 5–90 seconds |
-| `OPENAI_ANALYST_BUDGET_PATH` | Alongside strategy state | Durable request/token accounting on the existing persistent disk |
+| `OPENAI_API_KEY` | Existing Render secret | Provider authentication |
+| `JASONG_OPENAI_ANALYST_MODEL` | `JASONG_OPENAI_MODEL`, then `gpt-5.4-mini` | Model override |
+| `OPENAI_ANALYST_MAX_REQUESTS_PER_DAY` | 96 | Durable API-use budget, configurable up to 288 |
+| `OPENAI_ANALYST_TIMEOUT_SECONDS` | 45 | Timeout bounded to 5–90 seconds |
+| `OPENAI_ANALYST_BUDGET_PATH` | Alongside strategy state | Durable usage accounting |
 
-At most one paid batch is attempted per M15 period, shared by all scanners. Its
-input contains at most 300,000 characters and its output is bounded to 4,000
-tokens. No automatic provider retries, hidden alternative-model calls or legacy
-entry fallback occur. Reservations are persisted before a paid call. Request count,
-reported token usage, model, last success/error and current proposals are visible
-without revealing the key. API consumption is separate from ChatGPT chat usage.
+At most one batch per M15 period is shared by scanners. Input remains bounded to
+300,000 characters, output to 4,000 tokens, with `store=false` and no automatic
+provider retries. API usage is charged separately from ChatGPT chat usage. These
+operating-cost controls are not trading risk caps and remain unchanged.
 
-The existing single-process, single-instance Render service is the supported
-runtime for this budget/scanner design. Scaling it requires a shared distributed
-budget and execution lock first.
+`GET /strategy/openai-analysis` exposes cached model decisions, closes, usage and
+provider errors. `/category-portfolio/status` reports active execution policy and
+order/close errors; `/category-portfolio/positions` reports tracked confirmations.
+`/mobile/sync` is a cached combined snapshot. GET status never starts an analysis
+or order. Existing Actions authentication, write-enable and explicit confirmation
+remain enforced; the chat is not given a plaintext API key or a new bypass route.
 
-`GET /strategy/openai-analysis` is a cached, side-effect-free diagnostic endpoint.
-`/health` and `/market-categories/status` also expose analyst state. API refusals,
-timeouts, quota/auth/model errors and unavailable data remain observable; the
-system does not substitute a forced trade. Authenticated Actions retain API-key,
-write-enable and explicit-confirmation checks; their only order-open route still
-accepts a symbol and rechecks the server's current AI eligibility and risk controls.
-
-## Validation
-
-The regression suite mocks both OpenAI transport and IG. It checks structured
-response validation, WAIT, context binding, unknown/duplicate proposals, protected
-level geometry, refusal/incomplete/error handling, durable budgets, per-bar caching,
-weekday Bitcoin admission, stale/invalid-data rejection, account and duplicate
-limits, initial protection and unsafe-fill closes. The original strategy tests
-remain as rollback regression coverage. Offline startup smoke must pass in both
-`OPENAI` and `REGIME` modes before release. Actual key/model availability and
-post-deploy decisions must additionally be verified on Render.
+The existing single-process/single-instance Render deployment is required for the
+in-process scanner/order locks. A scale-out deployment requires distributed locks.
+Tests cover both discretionary and protected execution, close ownership, actual
+confirmation versus pending acknowledgement, restart/timeout recovery, provider
+redaction and budgets, strict candle handling, and live-environment rejection.
+Offline startup checks must exercise discretionary, protected and REGIME modes.

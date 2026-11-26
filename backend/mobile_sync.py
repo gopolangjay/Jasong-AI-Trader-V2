@@ -33,7 +33,7 @@ class MobileSyncCache:
     ) -> None:
         self.intelligence = intelligence
         self.portfolio = portfolio
-        if str(getattr(portfolio, "VERSION", "")).startswith(("6.14-", "6.15-")):
+        if str(getattr(portfolio, "VERSION", "")).startswith(("6.14-", "6.15-", "6.16-")):
             self.VERSION = portfolio.VERSION
         if "BITCOIN" in getattr(portfolio, "ACTIVE_SYMBOLS", ()):
             self.CATEGORIES = ("FOREX", "METALS", "CRYPTO")

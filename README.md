@@ -1,4 +1,4 @@
-# Jasong AI Trader V6.15
+# Jasong AI Trader V6.16
 
 IG DEMO trading service with a FastAPI backend and Flutter Android client.
 OpenAI now selects BUY, SELL or WAIT from validated completed M15/H1/H4 price
@@ -6,24 +6,29 @@ history. The active AI universe is the 28 liquid FX pairs, Gold and Bitcoin.
 
 ## Entry analysis and execution
 
-- The OpenAI Responses API selects up to three proposals per analysis, with an
-  observed invalidation stop, target and holding horizon. An empty list means WAIT.
-- The prior EMA/ADX/RSI entry sequence, ML/FAST confidence floors, geographic
-  session veto and fixed minimum reward/risk threshold do not gate AI entries.
-- Every entry remains IG DEMO-only and requires fresh valid data/quotes, correct
-  instrument identity, IG tradeability, category spread-cost limits and any
-  explicitly configured high-impact-news guard.
-- Account-risk sizing remains capped at 1% per trade. Existing daily, duplicate,
-  capacity, account-wide EPIC and theme-exposure controls remain enforced.
-- Initial orders include a broker stop and target. Invalid protection, excess
-  filled risk or upward size changes close the order. Existing position management
-  and broker-settled evidence continue across the upgrade.
-- Bitcoin may be selected on weekdays when IG is tradeable. The old independent
-  weekend entry worker is disabled in AI mode, preventing competing entry lanes.
-- One bounded analysis batch per M15 period is shared by all market evaluations.
-  Default: 96 paid requests per UTC day, 45-second timeout, no automatic retries,
-  at most 4,000 output tokens, and no account identifiers or credentials in inputs.
-  API failures, refusals, malformed decisions and missing credentials produce WAIT.
+- OpenAI selects up to three BUY/SELL entries per analysis, or WAIT, and explicit
+  closes for positions it opened. It receives completed M15/H1/H4 candles and
+  aliased open-position evidence; it has no broker tools or credential access.
+- The default `JASONG_DEMO_EXECUTION_POLICY=DISCRETIONARY` implements the user's
+  requested DEMO policy: no application account-percent sizing cap, daily entry
+  cap, position/theme/EPIC capacity cap, geographic/news veto or quote/spread/
+  attached-protection/dealing-distance preflight. Orders use a positive model
+  contract size, or the existing configured IG default when size is null.
+- Market orders omit attached stop and limit levels. Advisory model levels and
+  holding horizons do not force exits. The model explicitly chooses closes;
+  the fixed server risk/profit watchdog and native-order amendment are disabled.
+- IG still applies its own market, margin, minimum-size and order rules. Rejections
+  are recorded. The code cannot remove rules enforced by IG.
+- Hard-coded IG DEMO, authenticated writes, exact instruments, valid completed
+  candles, fresh context-bound model decisions and owned-position closes remain.
+  Each decision is submitted once, durably, including across restarts. An uncertain
+  fill is recovered from the broker by its reserved reference rather than resent.
+- The old independent weekend and Compound entry lanes remain disabled in AI mode.
+- One bounded analysis per M15 period is shared by all scanners. The existing
+  OpenAI key, 96 requests per UTC day, 45-second timeout, no automatic API retries,
+  4,000 output-token bound and credential redaction are retained.
+- Set `JASONG_DEMO_EXECUTION_POLICY=PROTECTED` for the earlier capped/attached-order
+  policy, or `JASONG_ANALYSIS_MODE=REGIME` for the previous rule-based strategy.
 
 See the [OpenAI analyst guide](backend/README_OPENAI_ANALYST.md). The
 [regime strategy](backend/README_REGIME_ADAPTIVE.md), earlier
@@ -78,7 +83,7 @@ flutter build apk --release
 ```
 
 APK output: `mobile/build/app/outputs/flutter-apk/app-release.apk`.
-The existing client consumes live category rankings and protected portfolio state.
+The existing client consumes live category rankings and portfolio state.
 AI rationale is also exposed in compact Actions/MCP market responses.
 Code tests do not establish profitability; evaluate returns using genuine
 broker-settled DEMO results.

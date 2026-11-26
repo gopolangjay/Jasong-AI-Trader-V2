@@ -26,6 +26,8 @@ FORBIDDEN = {
 
 
 with patch("threading.Thread.start", return_value=None):
+    # Exercise the production entrypoint, including its legacy rollback imports.
+    importlib.import_module("run_server")
     runtime = importlib.import_module("clean_core_runtime")
 
 assert getattr(runtime, "app", None) is not None
@@ -39,6 +41,10 @@ expected_strategy = "OpenAIStrategyEngine" if openai_enabled() else "RegimeStrat
 expected_execution = "OpenAIExecutionEngine" if openai_enabled() else "RegimeExecutionEngine"
 assert type(runtime.CATEGORY_STRATEGY_ENGINE).__name__ == expected_strategy
 assert type(runtime.CATEGORY_PORTFOLIO_ENGINE).__name__ == expected_execution
+if openai_enabled():
+    from openai_policy import discretionary_enabled
+    assert runtime.CATEGORY_PORTFOLIO_ENGINE.discretionary == discretionary_enabled()
+    assert runtime.V63_SPECIALIST_SYSTEM["excursion_tracker"].discretionary == discretionary_enabled()
 
 loaded_forbidden = sorted(name for name in FORBIDDEN if name in sys.modules)
 if loaded_forbidden:
@@ -60,7 +66,7 @@ missing = sorted(required - paths)
 if missing:
     raise AssertionError("Missing clean-core routes: " + ", ".join(missing))
 
-print("PROTECTED DEMO CLEAN CORE SMOKE PASS", expected_strategy)
+print("IG DEMO CLEAN CORE SMOKE PASS", expected_strategy)
 print("routes:", len(paths))
 print("broker:", runtime.IG_DEMO_BROKER.status().get("environment"))
 print("live_money_execution: False")

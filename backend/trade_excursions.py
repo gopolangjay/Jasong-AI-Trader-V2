@@ -54,8 +54,10 @@ class TradeExcursionTracker:
         broker: Any,
         state_path: Optional[str] = None,
         poll_seconds: Optional[int] = None,
+        discretionary: bool = False,
     ) -> None:
         self.broker = broker
+        self.discretionary = bool(discretionary)
 
         base_dir = "/var/data" if Path("/var/data").exists() else "/tmp"
         self.state_path = Path(
@@ -731,6 +733,8 @@ class TradeExcursionTracker:
         record: Dict[str, Any],
         now: float,
     ) -> Optional[str]:
+        if self.discretionary:
+            return None
         if not bool(record.get("jasong_owned")):
             return None
         if str(
@@ -1412,6 +1416,8 @@ class TradeExcursionTracker:
         record: Dict[str, Any],
         now: float,
     ) -> bool:
+        if self.discretionary:
+            return False
         if not bool(record.get("jasong_owned")):
             return False
         if str(
@@ -2627,24 +2633,25 @@ class TradeExcursionTracker:
             "version": self.VERSION,
             "enabled": True,
             "mfe_mae_observation_only": True,
-            "server_r_watchdog_enabled": True,
+            "server_r_watchdog_enabled": not self.discretionary,
             "server_hard_stop_enabled":
-                bool(self.hard_stop_enabled),
+                bool(self.hard_stop_enabled and not self.discretionary),
             "server_hard_stop_r":
                 self.hard_stop_r,
             "take_profit_execution_enabled":
-                bool(self.take_profit_enabled),
+                bool(self.take_profit_enabled and not self.discretionary),
             "take_profit_target_r_default":
                 self.default_target_r,
             "take_profit_basis_new_trades":
                 "PLANNED_RISK_R_MULTIPLE",
             "legacy_open_trade_take_profit_basis":
                 "ENTRY_PRICE_FAVOURABLE_MOVE_PCT",
-            "protective_stop_new_trades": True,
+            "protective_stop_new_trades": not self.discretionary,
+            "exit_policy": "MODEL_CLOSE_DECISIONS" if self.discretionary else "RISK_WATCHDOG",
             "risk_policy_version":
-                "v63-risk-exit-v1",
+                None if self.discretionary else "v63-risk-exit-v1",
             "native_order_policy":
-                "IG_DEALING_RULE_NORMALISED_OUTWARD_ONLY",
+                "DISABLED_IN_AI_DISCRETIONARY_DEMO" if self.discretionary else "IG_DEALING_RULE_NORMALISED_OUTWARD_ONLY",
             "native_rejection_policy": (
                 "SUPPRESS_REJECTED_REPEAT_AND_USE_SERVER_WATCHDOG"
                 if not self.retry_rejected_native
@@ -2653,13 +2660,13 @@ class TradeExcursionTracker:
             "take_profit_scope":
                 "JASONG_OWNED_IG_DEMO_POSITIONS_ONLY",
             "take_profit_primary_execution":
-                "IG_DEMO_NATIVE_LIMIT_LEVEL",
+                "MODEL_CLOSE_DECISIONS" if self.discretionary else "IG_DEMO_NATIVE_LIMIT_LEVEL",
             "risk_primary_execution":
-                "IG_DEMO_NATIVE_STOP_WHEN_ACCEPTED",
+                "MODEL_CLOSE_DECISIONS" if self.discretionary else "IG_DEMO_NATIVE_STOP_WHEN_ACCEPTED",
             "risk_fallback_execution":
-                "SERVER_OBSERVED_HARD_CLOSE_AT_PLANNED_R",
+                "NONE" if self.discretionary else "SERVER_OBSERVED_HARD_CLOSE_AT_PLANNED_R",
             "take_profit_fallback_execution":
-                "SERVER_OBSERVED_CLOSE_AT_PLANNED_R",
+                "NONE" if self.discretionary else "SERVER_OBSERVED_CLOSE_AT_PLANNED_R",
             "poll_seconds": self.poll_seconds,
             "price_extreme_basis":
                 "BROKER_OBSERVED_EXIT_SIDE_QUOTES",
