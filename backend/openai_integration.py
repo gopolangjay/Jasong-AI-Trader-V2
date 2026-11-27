@@ -367,12 +367,26 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
         super().__init__(**kwargs)
         if self.discretionary:
             self._state.setdefault("entry_trial_started_at", time.time())
+            self._entry_trial_report = trial_status([], self._state["entry_trial_started_at"])
+            self._publish_entry_trial()
+
+    def _publish_entry_trial(self):
+        try:
+            report = trial_status(self._state["positions"], self._state["entry_trial_started_at"])
+        except Exception:
+            # A reporting failure must not interrupt discretionary execution.
+            self._entry_trial_report = {**self._entry_trial_report, "report_error": "TRIAL_REPORT_UNAVAILABLE"}
+        else:
+            self._entry_trial_report = {**report, "updated_at": time.time(), "report_error": None}
+
+    def _persist(self):
+        super()._persist()
+        if self.discretionary:
+            self._publish_entry_trial()
 
     def entry_trial_status(self):
-        with self._lock:
-            started_at = self._state["entry_trial_started_at"]
-            positions = [dict(row) for row in self._state.get("positions", [])]
-        return trial_status(positions, started_at)
+        # The executor can hold its lock during broker or model requests.
+        return self._entry_trial_report
 
     def _is_active_strategy(self, candidate):
         symbol, category = candidate.get("symbol"), candidate.get("category")

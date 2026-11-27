@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
 import tempfile
@@ -148,6 +149,10 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.assertEqual(status["guarded_trial"]["open_positions"], 1)
         self.assertEqual(status["current_strategy"]["open_positions"], 2)
         self.assertEqual(status["broker_orders_submitted"], 0)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with self.execution._lock:
+                report = executor.submit(self.execution.entry_trial_status)
+                self.assertEqual(report.result(timeout=1), status)
 
     def test_live_environment_and_stale_model_decisions_still_cannot_submit(self):
         row = self.selected()
