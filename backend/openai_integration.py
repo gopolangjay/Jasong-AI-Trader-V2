@@ -21,6 +21,7 @@ from openai_analyst import OpenAIAnalyst, AnalystUnavailable
 from openai_policy import STRATEGY_ID, STRATEGY_NAME, policy_status as base_policy
 from runtime_version import VERSION
 from ai_demo_execution import DiscretionaryDemoMixin, entry_reasons as discretionary_reasons
+from demo_entry_trial import trial_status
 
 AI_ACTIVE_KEYS = (*ACTIVE_EXECUTION_KEYS, "BITCOIN")
 
@@ -246,7 +247,13 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
                 epic = market.get("epic")
                 if self.discretionary:
                     row.update(ig_epic=epic, ig_market_name=market.get("name"),
-                               application_quote_preflight=False, execution_policy="AI_DISCRETIONARY_DEMO")
+                               application_quote_preflight=False, execution_policy="AI_DISCRETIONARY_DEMO",
+                               trial_entry=selected.get("trial_entry"),
+                               trial_decision_at=decision["created_at"],
+                               trial_m15_closes=[
+                                   (int(stamp.timestamp()), round(float(close), 8))
+                                   for stamp, close in frames["M15"]["Close"].tail(2).items()
+                               ])
                 else:
                     details = self.broker.market_details(epic, require_quote=True)
                     if symbol == "BITCOIN" and "BITCOIN" not in str((details.get("instrument") or {}).get("name") or "").upper():
@@ -358,6 +365,14 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
         self.discretionary = bool(discretionary)
         self._now = now_func or (lambda: pd.Timestamp.now(tz="UTC"))
         super().__init__(**kwargs)
+        if self.discretionary:
+            self._state.setdefault("entry_trial_started_at", time.time())
+
+    def entry_trial_status(self):
+        with self._lock:
+            started_at = self._state["entry_trial_started_at"]
+            positions = [dict(row) for row in self._state.get("positions", [])]
+        return trial_status(positions, started_at)
 
     def _is_active_strategy(self, candidate):
         symbol, category = candidate.get("symbol"), candidate.get("category")

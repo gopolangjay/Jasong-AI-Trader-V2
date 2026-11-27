@@ -411,6 +411,8 @@ def install_specialist_market_system(
     if discretionary:
         portfolio.analysis_engine = intelligence
         intelligence.position_source = portfolio.discretionary_position_context
+        app.add_api_route("/strategy/entry-trial", portfolio.entry_trial_status,
+                          methods=["GET"], name="ig_demo_entry_trial_status")
     forward_prime.attach_category_portfolio(
         portfolio
     )

@@ -45,6 +45,10 @@ if openai_enabled():
     from openai_policy import discretionary_enabled
     assert runtime.CATEGORY_PORTFOLIO_ENGINE.discretionary == discretionary_enabled()
     assert runtime.V63_SPECIALIST_SYSTEM["excursion_tracker"].discretionary == discretionary_enabled()
+    if discretionary_enabled():
+        trial = runtime.CATEGORY_PORTFOLIO_ENGINE.entry_trial_status()
+        assert trial["mode"] == "SHADOW_MATCHED_IG_DEMO_FILLS"
+        assert trial["broker_orders_submitted"] == 0
 
 loaded_forbidden = sorted(name for name in FORBIDDEN if name in sys.modules)
 if loaded_forbidden:
