@@ -1106,6 +1106,7 @@ class IGDemoBroker:
 
         protected_order = stop_level is not None or limit_level is not None
         details = self.market_details(clean_epic, require_quote=True) if protected_order else self.market_details(clean_epic)
+        observed_at = time.time()
         instrument = details.get("instrument") or {}
         snapshot = details.get("snapshot") or {}
         market_status = str(snapshot.get("marketStatus") or "").upper()
@@ -1137,6 +1138,19 @@ class IGDemoBroker:
             "orderType": "MARKET",
             "size": round(final_size, 12),
         }
+        entry_quote = None
+        if not protected_order:
+            published_at = self._first_number(snapshot.get("updateTimestampUTC"))
+            if published_at is not None and published_at >= 100_000_000_000:
+                published_at /= 1000
+            entry_quote = {
+                **self.extract_snapshot_quote(details),
+                "source": "IG_DEMO_MARKET_DETAILS",
+                "epic": instrument.get("epic") or clean_epic,
+                "observed_at": observed_at,
+                "update_timestamp_utc": published_at,
+                "delay_time": self._first_number(snapshot.get("delayTime")),
+            }
         if protected_order:
             try:
                 stop, target = float(stop_level), float(limit_level)
@@ -1277,6 +1291,7 @@ class IGDemoBroker:
             "dealId": confirmation.get("dealId"),
             "level": confirmation.get("level"),
             "dealStatus": confirmation.get("dealStatus"),
+            "entry_quote": entry_quote,
             "attached_stop_level": payload.get("stopLevel"),
             "attached_limit_level": payload.get("limitLevel"),
             "reason": confirmation.get("reason"),

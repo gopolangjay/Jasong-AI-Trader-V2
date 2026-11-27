@@ -12,6 +12,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend"))
 from ai_demo_execution import position_key
 from category_strategy_engine import CATEGORY_MARKET_SEEDS
+from demo_entry_trial import TRIAL_ID
 from ig_demo_broker import IGDemoBroker
 from openai_analyst import OpenAIAnalyst, AnalystUnavailable
 from openai_integration import OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
@@ -59,11 +60,16 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.clock.start(); self.addCleanup(self.clock.stop)
         self.broker = DiscretionaryBroker()
         self.position_decisions = []
+        self.trial_entry = None
         def transport(payload):
             context = json.loads(payload["input"])
+            ref = next(market["reference_price"] for market in context["markets"] if market["symbol"] == "EURUSD")
             decision = {"context_id": context["context_id"], "proposals": [{
-                "symbol": "EURUSD", "direction": "BUY", "size": None, "stop_price": None,
-                "target_price": None, "holding_minutes": None, "reason": "Observed continuation supports entry."}],
+                "symbol": "EURUSD", "direction": "BUY", "size": None,
+                "stop_price": ref - .01 if self.trial_entry else None,
+                "target_price": ref + .01 if self.trial_entry else None,
+                "holding_minutes": None, "trial_entry": self.trial_entry,
+                "reason": "Observed continuation supports entry."}],
                 "position_decisions": self.position_decisions, "wait_reason": "Other markets WAIT."}
             return {"id": "response-discretionary", "status": "completed", "output": [{"content": [
                 {"type": "output_text", "text": json.dumps(decision)}]}]}
@@ -119,6 +125,29 @@ class DiscretionaryDemoTests(unittest.TestCase):
         for i in range(5):
             self.execution._open_candidate({**row, "setup_id": "distinct-model-decision-"+str(i)}, [])
         self.assertEqual(len(self.broker.opened), 5)
+
+    def test_trial_admits_one_of_two_matched_fills_while_current_execution_keeps_both(self):
+        self.trial_entry = {"action": "ENTER_NOW", "confirmation": {"rule": "CLOSE_ABOVE", "price": .9}}
+        row = self.selected()
+        quote = {"source": "IG_DEMO_MARKET_DETAILS", "epic": row["ig_epic"], "bid": row["live_price"],
+                 "offer": row["live_price"] + .0001, "observed_at": NOW.timestamp(),
+                 "update_timestamp_utc": NOW.timestamp()}
+        open_position = self.broker.open_epic_position
+
+        def open_with_quote(**kwargs):
+            return {**open_position(**kwargs), "entry_quote": quote}
+
+        with patch.object(self.broker, "open_epic_position", side_effect=open_with_quote):
+            self.execution._open_candidate(row, [])
+            self.execution._open_candidate({**row, "setup_id": "second-setup"}, [])
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(len(self.broker.opened), 2)
+        status = self.execution.entry_trial_status()
+        self.assertEqual(status["trial_id"], TRIAL_ID)
+        self.assertEqual(status["entry_outcomes"], {"ENTER_NOW_CONFIRMED": 1, "MARKET_ALREADY_OPEN": 1})
+        self.assertEqual(status["guarded_trial"]["open_positions"], 1)
+        self.assertEqual(status["current_strategy"]["open_positions"], 2)
+        self.assertEqual(status["broker_orders_submitted"], 0)
 
     def test_live_environment_and_stale_model_decisions_still_cannot_submit(self):
         row = self.selected()
@@ -251,16 +280,22 @@ class DiscretionaryDemoTests(unittest.TestCase):
     def test_real_broker_order_path_accepts_no_quotes_and_no_attached_distances(self):
         broker = IGDemoBroker()
         broker.market_details = Mock(return_value={"instrument": {"type": "CURRENCIES",
-            "currencies": [{"code": "USD", "isDefault": True}]}, "snapshot": {"marketStatus": "TRADEABLE"}})
+            "currencies": [{"code": "USD", "isDefault": True}]}, "snapshot": {
+                "marketStatus": "TRADEABLE", "updateTimestampUTC": (NOW.timestamp() - 2) * 1000,
+                "priceLadder": [{"bid": "1.2000", "ask": "1.2001"}], "delayTime": 0,
+            }})
         broker._min_deal_size = Mock(return_value=.1)
         broker._deal_size_increment = Mock(return_value=.1)
         broker._request = Mock(return_value={"dealReference": "REF"})
         broker.confirm = Mock(return_value={"dealId": "D1", "dealStatus": "ACCEPTED", "level": 1.2})
-        broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1)
+        result = broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1)
         payload = broker._request.call_args.kwargs["payload"]
         self.assertNotIn("stopLevel", payload)
         self.assertNotIn("limitLevel", payload)
         self.assertEqual(payload["orderType"], "MARKET")
+        self.assertEqual(result["entry_quote"]["bid"], 1.2)
+        self.assertEqual(result["entry_quote"]["offer"], 1.2001)
+        self.assertEqual(result["entry_quote"]["update_timestamp_utc"], NOW.timestamp() - 2)
 
     def test_real_broker_close_records_only_matching_cash_confirmation(self):
         broker = IGDemoBroker()

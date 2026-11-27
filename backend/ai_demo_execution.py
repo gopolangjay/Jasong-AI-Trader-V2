@@ -11,6 +11,7 @@ import uuid
 
 import pandas as pd
 
+from demo_entry_trial import TRIAL_ID, evaluate_entry
 from openai_analyst import close_reason_issue
 
 
@@ -145,6 +146,11 @@ class DiscretionaryDemoMixin:
             deal_id = result.get("dealId")
             if not deal_id or str(result.get("dealStatus", "")).upper() != "ACCEPTED":
                 raise RuntimeError("IG_DEMO_OPEN_NOT_CONFIRMED")
+            try:
+                trial = evaluate_entry(candidate, result.get("entry_quote") or {}, self._open_positions())
+            except Exception:
+                # An observation error cannot discard an already filled IG deal.
+                trial = {"trial_id": TRIAL_ID, "admitted": False, "reason": "ENTRY_TRIAL_VALIDATION_ERROR"}
             now = time.time()
             position = {
                 "track": "CATEGORY", "category": candidate["category"],
@@ -161,6 +167,7 @@ class DiscretionaryDemoMixin:
                 "model_target_price": candidate.get("model_target_price"),
                 "model_holding_minutes": candidate.get("model_holding_minutes"),
                 "openai_analysis": candidate.get("openai_analysis") or {},
+                "entry_trial": trial,
                 "broker_open_result": result, "live_money_execution": False,
             }
             self._state.setdefault("positions", []).append(position)
