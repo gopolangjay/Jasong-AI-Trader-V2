@@ -2112,7 +2112,7 @@ class IGDemoBroker:
             else "CLOSE_PENDING"
         )
 
-        return {
+        result = {
             "broker": "IG",
             "environment": "DEMO",
             "dealId": deal_id,
@@ -2143,3 +2143,10 @@ class IGDemoBroker:
             "live_money_execution": False,
             "demo_execution": True,
         }
+        if close_verified and ref and deal_status == "ACCEPTED" and confirmation.get("dealReference") == ref:
+            raw_profit = confirmation.get("profit")
+            currency = confirmation.get("profitCurrency")
+            profit = self._first_number(raw_profit) if type(raw_profit) in (int, float) else None
+            if profit is not None and isinstance(currency, str) and re.fullmatch(r"[A-Z]{3}", currency):
+                result.update(profit=profit, profitCurrency=currency, profitSource="IG_CLOSE_CONFIRMATION")
+        return result

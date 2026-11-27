@@ -11,6 +11,8 @@ import uuid
 
 import pandas as pd
 
+from openai_analyst import close_reason_issue
+
 
 def position_key(deal_id):
     return hashlib.sha256(("JSCAT:"+str(deal_id)).encode()).hexdigest()[:32]
@@ -62,11 +64,16 @@ class DiscretionaryDemoMixin:
             if row.get("status") != "OPEN" or not str(row.get("deal_reference", "")).startswith("JSCAT_"):
                 continue
             broker = row.get("broker") or {}
+            direction = row.get("direction")
+            bid, offer = _number(broker.get("bid")), _number(broker.get("offer"))
+            exit_price = None
+            if bid is not None and offer is not None and 0 < bid <= offer:
+                exit_price = {"BUY": bid, "SELL": offer}.get(direction)
             result.append({
                 "position_key": position_key(row["deal_id"]), "symbol": row.get("symbol"),
-                "direction": row.get("direction"), "size": _number(row.get("size")),
+                "direction": direction, "size": _number(row.get("size")),
                 "entry_price": _number(broker.get("level") or row.get("entry_level")),
-                "current_bid": _number(broker.get("bid")), "current_offer": _number(broker.get("offer")),
+                "current_bid": bid, "current_offer": offer, "indicative_exit_price": exit_price,
                 "unrealized_profit_loss": _number(broker.get("profit_loss")),
                 "quote_observed_at": row.get("last_seen_at"), "opened_at": row.get("opened_at"),
                 "advisory_stop": row.get("model_stop_price"), "advisory_target": row.get("model_target_price"),
@@ -204,7 +211,9 @@ class DiscretionaryDemoMixin:
             return
         by_key = {position_key(row["deal_id"]): row for row in self._open_positions()
                   if row.get("deal_id") and str(row.get("deal_reference", "")).startswith("JSCAT_")}
-        for item in decision.get("closes", []):
+        for item in decision.get("position_decisions", []):
+            if item.get("action") != "CLOSE" or close_reason_issue(item.get("reason")):
+                continue
             row = by_key.get(item["position_key"])
             if row is None:
                 continue
@@ -215,7 +224,8 @@ class DiscretionaryDemoMixin:
                 result = self.broker.close_position(row["deal_id"]) or {}
                 confirmed = result.get("closeVerified") is True or str(result.get("status", "")).upper() in {
                     "CLOSED_VERIFIED", "ALREADY_CLOSED_OR_NOT_FOUND"}
-                row.update(close_result=result, model_close_reason=item["reason"],
+                row.update(close_result=result, model_close_action="CLOSE", model_close_reason=item["reason"],
+                           model_close_context_id=decision["context_id"],
                            close_state="CLOSED_VERIFIED" if confirmed else "PENDING_OR_DEFERRED")
                 if confirmed:
                     row.update(status="CLOSED", closed_at=time.time())

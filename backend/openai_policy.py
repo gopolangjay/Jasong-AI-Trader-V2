@@ -17,7 +17,8 @@ def policy_status(discretionary: bool | None = None) -> dict:
     from runtime_version import VERSION
     discretionary = discretionary_enabled() if discretionary is None else discretionary
     controls = (["IG_DEMO_ONLY", "VALID_CLOSED_CANDLES", "FRESH_MODEL_DECISION",
-                 "EXACT_INSTRUMENT", "ONE_SUBMISSION_PER_DECISION", "OWNED_POSITION_CLOSES"]
+                 "EXACT_INSTRUMENT", "ONE_SUBMISSION_PER_DECISION", "OWNED_POSITION_CLOSES",
+                 "EXPLICIT_CLOSE_ACTION", "CONSISTENT_CLOSE_REASON"]
                 if discretionary else ["IG_DEMO_ONLY", "VALID_CLOSED_CANDLES", "FRESH_DECISION_AND_QUOTE",
                     "BROKER_TRADEABILITY", "SPREAD_COST", "ACCOUNT_RISK_SIZING", "POSITION_AND_EXPOSURE_CAPS",
                     "DUPLICATE_PROTECTION", "ATTACHED_STOP_AND_TARGET", "CONFIGURED_NEWS_GUARD"])
@@ -26,7 +27,7 @@ def policy_status(discretionary: bool | None = None) -> dict:
         "decision_authority": "OPENAI_RESPONSES_STRUCTURED_ANALYSIS",
         "entry_policy": "AI selects BUY, SELL or WAIT from completed price evidence",
         "execution_policy": "AI_DISCRETIONARY_DEMO" if discretionary else "PROTECTED_DEMO",
-        "exit_policy": "MODEL_CLOSE_DECISIONS" if discretionary else "ATTACHED_PROTECTION_AND_HORIZON",
+        "exit_policy": "EXPLICIT_MODEL_CLOSE_DECISIONS" if discretionary else "ATTACHED_PROTECTION_AND_HORIZON",
         "fixed_strategy_filters_removed": ["EMA_CROSS", "ADX_REGIME", "RSI_DIVERGENCE",
                                            "ML_CONFIDENCE_FLOORS", "FAST_SCORE", "GEOGRAPHIC_SESSION",
                                            "FORWARD_PRIME", "FIXED_MINIMUM_REWARD_RISK"],

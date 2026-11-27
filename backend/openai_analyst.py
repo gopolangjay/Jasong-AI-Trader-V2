@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -57,10 +58,15 @@ class BatchDecision(BaseModel):
 DISCRETIONARY_INSTRUCTIONS = """You make trading decisions for the user's IG DEMO simulation.
 Analyse the supplied completed candles and open positions using your trading knowledge:
 multi-timeframe price action, trend, momentum, ranges, volatility, invalidation and costs.
-Return up to three best BUY/SELL entries, or WAIT. Also decide whether to CLOSE any of
-the supplied open positions: take modest profits when continuation weakens, exit invalid
-ideas, and retain a position only when the observed evidence supports holding it.
-Use only supplied position_key values for closes. You may close and reverse a position.
+Return up to three best BUY/SELL entries, or WAIT. For position_decisions, use the
+supplied position_key once per position and set action to HOLD or CLOSE. Omission
+also leaves the position open. Begin a CLOSE rationale with 'Close because ' and
+state the present evidence for exiting. If the reason supports keeping the position
+open or waiting for a future trigger, choose HOLD. You may close and reverse a position.
+For profit-taking, compare entry_price with indicative_exit_price and consider the
+spread and quote_observed_at. A long sells at the bid and a short buys at the offer.
+The quote is indicative, can be unavailable or stale, and does not establish the
+actual fill or realized cash P&L. Candle closes or midpoints are not exit quotes.
 The user removed the application's account-percent risk, daily, capacity, theme,
 quote/spread and attached-stop/target entry vetoes for DEMO. IG still applies its own
 market, margin, minimum-size and order rules. Do not claim that an order will be accepted.
@@ -83,9 +89,10 @@ class DiscretionaryProposal(Proposal):
     holding_minutes: int | None = Field(gt=0)
 
 
-class CloseDecision(BaseModel):
+class PositionDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     position_key: str = Field(min_length=1, max_length=64)
+    action: Literal["HOLD", "CLOSE"]
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -93,8 +100,31 @@ class DiscretionaryDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     context_id: str = Field(min_length=1, max_length=64)
     proposals: list[DiscretionaryProposal] = Field(max_length=3)
-    closes: list[CloseDecision] = Field(max_length=1000)
+    position_decisions: list[PositionDecision] = Field(max_length=1000)
     wait_reason: str = Field(max_length=500)
+
+
+_HOLD_LANGUAGE = re.compile(
+    r"(?:^|[.!?;:])\s*(?:hold|retain|maintain|stay (?:long|short))\b"
+    r"|\b(?:hold|retain|maintain)\s+(?:(?:the|this|our|current|existing)\s+)?"
+    r"(?:[a-z0-9/_-]+\s+)?(?:long|short|position|trade)\b"
+    r"|\b(?:keep|leave)\b[^.!?;]{0,48}\bopen\b"
+    r"|\b(?:continue|keep) holding\b|\b(?:should|must) (?:hold|stay open|remain open)\b"
+    r"|\b(?:do not|don't|should not|shouldn't|would not|wouldn't) (?:close|exit)\b"
+    r"|\bno (?:(?:clear|immediate) )?(?:reason|need) to (?:close|exit)\b"
+)
+
+
+def close_reason_issue(reason: object) -> str | None:
+    if not isinstance(reason, str):
+        return "OPENAI_CLOSE_REASON_REQUIRED"
+    normalized = " ".join(reason.lower().replace("’", "'").split())
+    evidence = normalized.removeprefix("close because ")
+    if _HOLD_LANGUAGE.search(evidence):
+        return "OPENAI_CLOSE_REASON_CONFLICT"
+    if evidence == normalized or not any(character.isalnum() for character in evidence):
+        return "OPENAI_CLOSE_REASON_REQUIRED"
+    return None
 
 
 class AnalystUnavailable(RuntimeError):
@@ -123,7 +153,7 @@ class OpenAIAnalyst:
         self._last_success = None
         self._last_response_id = None
         self._last_proposals = []
-        self._last_closes = []
+        self._last_position_decisions = []
         self._wait_reason = None
 
     @staticmethod
@@ -200,7 +230,7 @@ class OpenAIAnalyst:
         with self._lock:
             self._last_error = code
             self._last_proposals = []
-            self._last_closes = []
+            self._last_position_decisions = []
             self._wait_reason = code
 
     def analyse(self, markets: list[dict], *, as_of: str, positions: list[dict] | None = None) -> dict:
@@ -248,14 +278,18 @@ class OpenAIAnalyst:
                     raise AnalystUnavailable("OPENAI_INVALID_PROTECTIVE_GEOMETRY")
             if self.discretionary:
                 allowed = {p["position_key"] for p in positions or []}
-                closed = set()
-                for item in decision.closes:
-                    if item.position_key not in allowed or item.position_key in closed:
+                seen_positions = set()
+                for item in decision.position_decisions:
+                    if item.position_key not in allowed or item.position_key in seen_positions:
                         raise AnalystUnavailable("OPENAI_UNKNOWN_OR_DUPLICATE_POSITION")
-                    closed.add(item.position_key)
+                    seen_positions.add(item.position_key)
             created_at = self._clock()
             out = {**decision.model_dump(), "created_at": created_at, "model": self.model,
                    "response_id": response.get("id")}
+            position_decisions = out.get("position_decisions", [])
+            for item in position_decisions:
+                if item["action"] == "CLOSE" and (issue := close_reason_issue(item["reason"])):
+                    item.update(action="HOLD", rejected_action="CLOSE", validation_error=issue)
             with self._lock:
                 usage = response.get("usage") or {}
                 self._budget["input_tokens"] += max(0, int(usage.get("input_tokens") or 0))
@@ -265,7 +299,7 @@ class OpenAIAnalyst:
                 self._last_success = created_at
                 self._last_response_id = response.get("id")
                 self._last_proposals = out["proposals"]
-                self._last_closes = out.get("closes", [])
+                self._last_position_decisions = position_decisions
                 self._wait_reason = decision.wait_reason
             return out
         except AnalystUnavailable as exc:
@@ -277,12 +311,14 @@ class OpenAIAnalyst:
 
     def status(self) -> dict:
         with self._lock:
+            position_decisions = [dict(item) for item in self._last_position_decisions]
             return {"provider": "OPENAI_RESPONSES", "configured": self.configured(), "model": self.model,
                     "last_error": self._last_error, "last_success_at": self._last_success,
                     "api_verified": self._last_success is not None,
                     "api_available": self._last_success is not None and self._last_error is None,
                     "last_response_id": self._last_response_id, "latest_proposals": list(self._last_proposals),
-                    "latest_close_decisions": list(self._last_closes),
+                    "latest_position_decisions": position_decisions,
+                    "latest_close_decisions": [item for item in position_decisions if item["action"] == "CLOSE"],
                     "execution_policy": "AI_DISCRETIONARY_DEMO" if self.discretionary else "PROTECTED_DEMO",
                     "wait_reason": self._wait_reason, "request_budget": {**self._budget, "maximum_per_day": self.max_requests},
                     "maximum_output_tokens_per_request": 4000, "timeout_seconds": self.timeout,

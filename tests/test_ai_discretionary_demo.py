@@ -58,14 +58,13 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.clock = patch("openai_integration.time.time", return_value=NOW.timestamp())
         self.clock.start(); self.addCleanup(self.clock.stop)
         self.broker = DiscretionaryBroker()
-        self.close_keys = []
+        self.position_decisions = []
         def transport(payload):
             context = json.loads(payload["input"])
             decision = {"context_id": context["context_id"], "proposals": [{
                 "symbol": "EURUSD", "direction": "BUY", "size": None, "stop_price": None,
                 "target_price": None, "holding_minutes": None, "reason": "Observed continuation supports entry."}],
-                "closes": [{"position_key": key, "reason": "Momentum faded; take the available profit."}
-                           for key in self.close_keys], "wait_reason": "Other markets WAIT."}
+                "position_decisions": self.position_decisions, "wait_reason": "Other markets WAIT."}
             return {"id": "response-discretionary", "status": "completed", "output": [{"content": [
                 {"type": "output_text", "text": json.dumps(decision)}]}]}
         self.transport = Mock(side_effect=transport)
@@ -84,6 +83,10 @@ class DiscretionaryDemoTests(unittest.TestCase):
         row = self.engine._evaluate_seed(self.seed)
         self.assertTrue(row["standard_eligible"], row["rejection_reasons"])
         return row
+
+    @staticmethod
+    def position_decision(action="CLOSE", reason="Close because the price failed to hold support.", deal="D1"):
+        return {"position_key": position_key(deal), "action": action, "reason": reason}
 
     def test_entries_have_no_application_risk_caps_or_attached_order_preflight(self):
         row = self.selected()
@@ -129,7 +132,8 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.execution._reconcile()
         context = self.execution.discretionary_position_context()
         self.assertEqual(context[0]["position_key"], position_key("D1"))
-        self.close_keys = [context[0]["position_key"]]
+        self.assertEqual(context[0]["indicative_exit_price"], context[0]["current_bid"])
+        self.position_decisions = [self.position_decision()]
         self.engine._analysis_period = None
         self.selected()
         payload = self.transport.call_args.args[0]
@@ -139,17 +143,59 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.execution._discretionary_closes()
         self.assertEqual(self.broker.closed, ["D1"])
         self.assertEqual(self.execution.positions()[0]["status"], "CLOSED")
+        self.assertEqual(self.execution.positions()[0]["model_close_action"], "CLOSE")
         self.assertEqual(self.execution.status()["closes"], 1)
 
-    def test_unknown_close_alias_rejects_whole_model_batch(self):
-        self.close_keys = ["invented-position"]
-        with self.assertRaisesRegex(AnalystUnavailable, "UNKNOWN_OR_DUPLICATE_POSITION"):
-            self.analyst.analyse([{"symbol": "EURUSD", "reference_price": 1.2}], as_of=NOW.isoformat(), positions=[])
+    def test_unknown_or_duplicate_alias_rejects_whole_model_batch(self):
+        markets = [{"symbol": "EURUSD", "reference_price": 1.2}]
+        positions = [{"position_key": position_key("D1")}]
+        duplicate = [self.position_decision("HOLD"), self.position_decision("CLOSE")]
+        for decisions in ([self.position_decision(deal="unknown")], duplicate):
+            with self.subTest(decisions=decisions):
+                self.position_decisions = decisions
+                with self.assertRaisesRegex(AnalystUnavailable, "UNKNOWN_OR_DUPLICATE_POSITION"):
+                    self.analyst.analyse(markets, as_of=NOW.isoformat(), positions=positions)
         self.assertEqual(self.analyst.status()["latest_close_decisions"], [])
+
+    def test_usdjpy_short_hold_reason_cannot_authorize_close(self):
+        self.execution._open_candidate({**self.selected(), "symbol": "USDJPY", "direction": "SELL"}, [])
+        position = self.execution._state["positions"][0]
+        position.update(entry_level=150.25, broker={"bid": 150.16, "offer": 150.31})
+        hold_reason = "Hold the USDJPY short. H1 and H4 still support the short thesis."
+        self.position_decisions = [self.position_decision(reason=hold_reason)]
+        self.engine._analysis_period = None
+        self.selected()
+        context = json.loads(self.transport.call_args.args[0]["input"])["open_positions"][0]
+        self.assertEqual(context["indicative_exit_price"], 150.31)
+        decisions = self.analyst.status()
+        self.assertEqual(decisions["latest_close_decisions"], [])
+        self.assertEqual(decisions["latest_position_decisions"], [{
+            **self.position_decision("HOLD", hold_reason), "rejected_action": "CLOSE",
+            "validation_error": "OPENAI_CLOSE_REASON_CONFLICT",
+        }])
+        self.execution._discretionary_closes()
+        self.assertEqual(self.broker.closed, [])
+        self.assertEqual(self.execution.positions()[0]["status"], "OPEN")
+
+    def test_only_consistent_explicit_close_reaches_broker_even_if_snapshot_is_invalid(self):
+        self.execution._open_candidate(self.selected(), [])
+        for payload in (
+            {"closes": [{"position_key": position_key("D1"), "reason": "Keep the short open."}]},
+            {"position_decisions": [self.position_decision("HOLD", "Higher timeframe supports holding.")]},
+            {"position_decisions": [self.position_decision(reason="Close because price is choppy. Keep it open.")]},
+            {"position_decisions": [self.position_decision(reason="Price is near a target.")]},
+        ):
+            with self.subTest(payload=payload):
+                snapshot = {**payload, "context_id": "context", "created_at": NOW.timestamp()}
+                with patch.object(self.engine, "decision_snapshot", return_value=snapshot):
+                    self.execution._discretionary_closes()
+                self.assertEqual(self.broker.closed, [])
+                self.assertEqual(self.execution.status()["closes"], 0)
+                self.assertFalse(any(key.startswith("CLOSE:") for key in self.execution._state["ai_decision_submissions"]))
 
     def test_pending_close_acknowledgement_is_not_reported_as_closed(self):
         self.execution._open_candidate(self.selected(), [])
-        self.close_keys = [position_key("D1")]
+        self.position_decisions = [self.position_decision()]
         self.engine._analysis_period = None
         self.selected()
         with patch.object(self.broker, "close_position", return_value={"status": "ACCEPTED", "closeVerified": False}):
@@ -215,6 +261,26 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.assertNotIn("stopLevel", payload)
         self.assertNotIn("limitLevel", payload)
         self.assertEqual(payload["orderType"], "MARKET")
+
+    def test_real_broker_close_records_only_matching_cash_confirmation(self):
+        broker = IGDemoBroker()
+        position = {"position": {"direction": "SELL", "size": .6}, "market": {"marketStatus": "TRADEABLE"}}
+        broker._request = Mock(return_value={"dealReference": "CLOSE-REF"})
+        for fields, expected in (
+            ({"profit": -2.34, "profitCurrency": "USD"}, -2.34),
+            ({"profit": 0, "profitCurrency": "JPY"}, 0),
+            ({"profit": -2.34, "profitCurrency": "USD", "dealReference": "UNRELATED"}, None),
+            ({"profit": -2.34}, None),
+            ({"profit": float("nan"), "profitCurrency": "USD"}, None),
+        ):
+            with self.subTest(fields=fields):
+                broker._find_open_position = Mock(side_effect=[position, None])
+                broker.confirm = Mock(return_value={"dealReference": "CLOSE-REF", "dealStatus": "ACCEPTED", **fields})
+                with patch("ig_demo_broker.time.sleep"):
+                    close = broker.close_position("D1")
+                self.assertTrue(close["closeVerified"])
+                self.assertEqual(close.get("profit"), expected)
+                self.assertEqual(close.get("profitCurrency"), fields["profitCurrency"] if expected is not None else None)
 
 
 if __name__ == "__main__":
