@@ -5,12 +5,14 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from forward_store import ForwardStore
+from chatgpt_actions import _trade_summary
 from forward_validation import ForwardValidationConfig, ForwardValidationEngine
 from prime_policy import ForwardPrimeArchitecture
 from provenance import ProvenanceRegistry
@@ -84,6 +86,25 @@ class ForwardValidationTests(unittest.TestCase):
         metrics = engine.metrics(strategy_id="TREND_CONTINUATION")
         self.assertFalse(metrics["checks"]["minimum_settled_trades"])
         self.assertFalse(metrics["prime_eligible"])
+
+    def test_broker_confirmed_cash_overrides_price_outcome_and_keeps_currencies_separate(self):
+        architecture = ForwardPrimeArchitecture(
+            intelligence=FakeIntelligence([]), broker=object(),
+            provenance_registry=ProvenanceRegistry("SYNTHETIC_TEST"),
+            legacy_evidence_source=None, state_dir=self.tmp.name,
+        )
+        trade = {"status": "CLOSED", "symbol": "USDJPY", "direction": "SELL", "entry_level": 150.25}
+        architecture.category_portfolio = SimpleNamespace(positions=lambda: [
+            {**trade, "deal_id": "D1", "close_result": {"level": 150.16, "profit": -2.34, "profitCurrency": "USD"}},
+            {**trade, "deal_id": "D2", "close_result": {"level": 150.31, "profit": 450, "profitCurrency": "JPY"}},
+            {**trade, "deal_id": "D3", "close_result": {"level": 150.31, "profit": 0, "profitCurrency": "JPY"}},
+        ])
+        rows = architecture.validator.all_rows()
+        self.assertEqual({row["trade_id"]: (row["broker_result"], row["broker_pnl"], row["broker_pnl_currency"])
+                          for row in rows}, {"D1": ("LOSS", -2.34, "USD"), "D2": ("WIN", 450, "JPY")})
+        summary = _trade_summary(rows)
+        self.assertIsNone(summary["realized_pnl_total_known"])
+        self.assertEqual(summary["realized_pnl_by_currency"], {"USD": -2.34, "JPY": 450})
 
     def test_historical_failure_is_informational_only(self):
         now = time.time()

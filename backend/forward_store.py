@@ -155,5 +155,7 @@ class ForwardStore:
                     row[key.removesuffix("_json")] = json.loads(row.get(key) or "{}")
                 except Exception:
                     row[key.removesuffix("_json")] = {}
+            raw = row["raw"]
+            row["broker_pnl_currency"] = raw.get("broker_pnl_currency") if isinstance(raw, dict) else None
             output.append(row)
         return output

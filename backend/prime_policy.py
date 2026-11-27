@@ -120,6 +120,8 @@ class ForwardPrimeArchitecture:
                     return "WIN"
                 if pnl < 0:
                     return "LOSS"
+                if pnl == 0:
+                    return None
             except Exception:
                 pass
         try:
@@ -159,6 +161,8 @@ class ForwardPrimeArchitecture:
                 row["broker_pnl"] = close_result.get("profit")
             elif close_result.get("pnl") is not None:
                 row["broker_pnl"] = close_result.get("pnl")
+            if close_result.get("profitCurrency") and row.get("broker_pnl") is not None:
+                row["broker_pnl_currency"] = close_result["profitCurrency"]
 
             try:
                 entry = float(row.get("entry_level") or 0.0)

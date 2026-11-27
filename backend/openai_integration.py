@@ -416,7 +416,7 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
                        risk_per_trade_pct=None, max_daily_entries_south_africa=None, max_open_positions=None,
                        global_ig_max_positions=None, global_remaining_positions=None, max_per_category=None,
                        max_tracks_per_epic=None, mandatory_attached_protection=False,
-                       quote_spread_dealing_distance_preflight=False, exit_policy="MODEL_CLOSE_DECISIONS",
+                       quote_spread_dealing_distance_preflight=False, exit_policy=out["regime_policy"]["exit_policy"],
                        last_order_error=self._state.get("last_order_error"),
                        last_model_close_error=self._state.get("last_model_close_error"))
         return out

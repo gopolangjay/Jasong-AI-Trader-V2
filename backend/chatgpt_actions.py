@@ -431,6 +431,7 @@ def _compact_trade(row: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "exit_favourable_pct": (round(_favourable_exit_pct(row), 6) if _favourable_exit_pct(row) is not None else None),
         "broker_pnl": row.get("broker_pnl"),
+        "broker_pnl_currency": row.get("broker_pnl_currency"),
         "r_multiple": row.get("r_multiple"),
         "r_source": row.get("r_source"),
         "opened_at": row.get("opened_at") or row.get("created_at"),
@@ -522,7 +523,7 @@ def _trade_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     settled = len(rows)
     wins = 0
     losses = 0
-    pnls: List[float] = []
+    pnls_by_currency: Dict[str, List[float]] = {}
     r_values: List[float] = []
     mfe_pcts: List[float] = []
     mae_pcts: List[float] = []
@@ -543,7 +544,8 @@ def _trade_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         pnl = _finite(row.get("broker_pnl"))
         if pnl is not None:
-            pnls.append(pnl)
+            currency = str(row.get("broker_pnl_currency") or "").strip().upper()
+            pnls_by_currency.setdefault(currency, []).append(pnl)
         r_value = _finite(row.get("r_multiple"))
         if r_value is not None:
             r_values.append(r_value)
@@ -611,7 +613,9 @@ def _trade_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         })
     strategy_rows.sort(key=lambda row: int(row.get("settled_trades") or 0), reverse=True)
 
-    pnl_count = len(pnls)
+    pnl_count = sum(len(values) for values in pnls_by_currency.values())
+    totals_by_currency = {currency: round(sum(values), 4) for currency, values in pnls_by_currency.items()}
+    total_currency = next(iter(totals_by_currency), None) if len(totals_by_currency) == 1 else None
     r_count = len(r_values)
     excursion_count = sum(
         1
@@ -634,7 +638,9 @@ def _trade_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "wins": wins,
         "losses": losses,
         "win_rate_pct": _pct(wins, settled),
-        "realized_pnl_total_known": round(sum(pnls), 4) if pnls else None,
+        "realized_pnl_total_known": totals_by_currency.get(total_currency),
+        "realized_pnl_currency": total_currency or None,
+        "realized_pnl_by_currency": {currency: total for currency, total in totals_by_currency.items() if currency},
         "realized_pnl_known_trades": pnl_count,
         "realized_pnl_missing_trades": max(0, settled - pnl_count),
         "cash_pnl_coverage_pct": _pct(pnl_count, settled),
