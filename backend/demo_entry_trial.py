@@ -1,4 +1,4 @@
-"""Order-free comparison of entry controls on matched IG DEMO fills."""
+"""Entry validation and broker-confirmed results for the IG DEMO trial."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -8,9 +8,11 @@ import math
 import re
 from zoneinfo import ZoneInfo
 
+from openai_policy import GUARDED_DEMO_POLICY
 from runtime_version import VERSION
 
 TRIAL_ID = "IG_DEMO_ENTRY_TRIAL_V1"
+LIVE_TRIAL_ID = "IG_DEMO_GUARDED_TRIAL_V1"
 QUOTE_MAX_AGE = 180
 M15_SECONDS = 900
 CANDLE_MAX_AGE = 1200
@@ -20,6 +22,7 @@ _DEFER_ENTRY = re.compile(
     r"|\bif (?:price|it|the pair|the market) (?:cannot|can(?:not|'t)? hold|fails? to|breaks? (?:above|below))\b",
     re.I,
 )
+_QUOTED_FX_PAIR = re.compile(r"\b([A-Z]{3})\s*/\s*([A-Z]{3})\b")
 
 
 def _number(value):
@@ -38,6 +41,43 @@ def _yen_direction(symbol, side):
             return "SHORT_JPY" if side == "BUY" else "LONG_JPY"
         if symbol.startswith("JPY"):
             return "LONG_JPY" if side == "BUY" else "SHORT_JPY"
+    return None
+
+
+def _market_symbol(position):
+    symbol = str(position.get("symbol") or "").upper()
+    name = str(position.get("market_name") or "").upper()
+    epic = str(position.get("epic") or "").upper()
+    if symbol:
+        return re.sub(r"[^A-Z0-9]", "", symbol)
+    if pair := _QUOTED_FX_PAIR.search(name):
+        return "".join(pair.groups())
+    if "BITCOIN" in epic.split("."):
+        return "BITCOIN"
+    if "GOLD" in epic.split(".") or name.startswith("SPOT GOLD"):
+        return "GOLD"
+    return next((part for part in epic.split(".") if len(part) == 6 and part.isalpha()), "")
+
+
+def entry_exposure_issue(candidate, open_positions):
+    symbol = candidate["symbol"]
+    epic = candidate["ig_epic"].upper()
+    yen = _yen_direction(symbol, candidate["direction"])
+    for row in open_positions:
+        existing_symbol = _market_symbol(row)
+        if existing_symbol == symbol or str(row.get("epic") or "").upper() == epic:
+            return "MARKET_ALREADY_OPEN"
+        if yen and _yen_direction(existing_symbol, row.get("direction")) == yen:
+            return "SAME_DIRECTION_YEN_EXPOSURE"
+    return None
+
+
+def entry_action_issue(candidate):
+    action = (candidate.get("trial_entry") or {}).get("action")
+    if action != "ENTER_NOW":
+        return "MODEL_WAIT" if action == "WAIT" else "ENTRY_DECISION_UNAVAILABLE"
+    if _DEFER_ENTRY.search((candidate.get("openai_analysis") or {}).get("reason") or ""):
+        return "CONDITIONAL_ENTRY_RATIONALE"
     return None
 
 
@@ -63,17 +103,15 @@ def _confirmation_met(condition, candles, checked_at, published_at):
     )
 
 
-def evaluate_entry(candidate, quote, open_positions):
-    """Use the decision's completed candles, pre-order IG quote and trial book."""
+def evaluate_entry(candidate, quote, open_positions, *, now=None):
+    """Validate the decision against closed candles, the IG quote and account exposure."""
     trial_decision = candidate.get("trial_entry") or {}
-    action = trial_decision.get("action")
-    result = {"trial_id": TRIAL_ID, "action": action, "admitted": False}
-    if action != "ENTER_NOW":
-        return {**result, "reason": "MODEL_WAIT" if action == "WAIT" else "ENTRY_DECISION_UNAVAILABLE"}
-    if _DEFER_ENTRY.search((candidate.get("openai_analysis") or {}).get("reason") or ""):
-        return {**result, "reason": "CONDITIONAL_ENTRY_RATIONALE"}
+    result = {"trial_id": LIVE_TRIAL_ID, "action": trial_decision.get("action"), "admitted": False}
+    if issue := entry_action_issue(candidate):
+        return {**result, "reason": issue}
 
-    checked_at = _number(quote.get("observed_at"))
+    observed_at = _number(quote.get("observed_at"))
+    checked_at = observed_at if now is None else now
     published_at = _number(quote.get("update_timestamp_utc"))
     bid, offer = _number(quote.get("bid")), _number(quote.get("offer"))
     delay = _number(quote.get("delay_time"))
@@ -81,8 +119,8 @@ def evaluate_entry(candidate, quote, open_positions):
     if (
         quote.get("source") != "IG_DEMO_MARKET_DETAILS"
         or not epic or quote.get("epic") != epic
-        or checked_at is None or published_at is None
-        or not 0 <= checked_at - published_at <= QUOTE_MAX_AGE
+        or checked_at is None or observed_at is None or published_at is None
+        or not published_at <= observed_at <= checked_at <= published_at + QUOTE_MAX_AGE
         or delay not in (None, 0)
         or bid is None or offer is None or not 0 < bid <= offer
     ):
@@ -116,13 +154,8 @@ def evaluate_entry(candidate, quote, open_positions):
     if reward <= offer - bid:
         return {**result, "reason": "TARGET_MOVE_TOO_SMALL_AFTER_SPREAD"}
 
-    symbol = candidate["symbol"]
-    yen = _yen_direction(symbol, side)
-    eligible_open = [p for p in open_positions if (p.get("entry_trial") or {}).get("admitted") is True]
-    if any(p.get("symbol") == symbol or p.get("epic") == epic for p in eligible_open):
-        return {**result, "reason": "MARKET_ALREADY_OPEN"}
-    if yen and any(_yen_direction(p.get("symbol") or "", p.get("direction")) == yen for p in eligible_open):
-        return {**result, "reason": "SAME_DIRECTION_YEN_EXPOSURE"}
+    if issue := entry_exposure_issue(candidate, open_positions):
+        return {**result, "reason": issue}
     return {**result, "admitted": True, "reason": "ENTER_NOW_CONFIRMED"}
 
 
@@ -195,4 +228,31 @@ def trial_status(positions, started_at):
             (row.get("entry_trial") or {}).get("reason") or "ENTRY_DECISION_UNAVAILABLE" for row in observed
         )),
         "current_strategy": _metrics(observed), "guarded_trial": _metrics(admitted),
+    }
+
+
+def guarded_trial_status(positions, state):
+    started_at = state["guarded_trial_started_at"]
+    guarded = [
+        row for row in positions
+        if row.get("execution_policy") == GUARDED_DEMO_POLICY and (row.get("opened_at") or 0) >= started_at
+    ]
+    checked = {
+        event["setup_id"]: event for event in state.get("journal", [])
+        if event.get("event") == "GUARDED_ENTRY_CHECK"
+    }
+    return {
+        "version": VERSION, "trial_id": LIVE_TRIAL_ID, "mode": "IG_DEMO_GUARDED_EXECUTION",
+        "execution_policy": GUARDED_DEMO_POLICY, "started_at": started_at,
+        "started_at_sast": datetime.fromtimestamp(started_at, SAST).isoformat(timespec="seconds"),
+        "live_money_execution": False, "extra_model_calls": 0,
+        "pnl_basis": "IG_SETTLED_CLOSE_AMOUNTS_AFTER_SPREAD_BEFORE_API_HOSTING_AND_SEPARATE_FEES",
+        "live_demo_trial": _metrics(guarded),
+        "open_positions_from_previous_strategy": sum(
+            row.get("status") == "OPEN" and row.get("execution_policy") != GUARDED_DEMO_POLICY
+            for row in positions
+        ),
+        "recent_entry_checks": dict(Counter(event["reason"] for event in checked.values())),
+        "last_entry_check": state.get("last_guarded_entry_check"),
+        "shadow_comparison": trial_status(positions, state["entry_trial_started_at"]),
     }

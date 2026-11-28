@@ -4,7 +4,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from demo_entry_trial import TRIAL_ID, evaluate_entry, trial_status
+from demo_entry_trial import TRIAL_ID, evaluate_entry, guarded_trial_status, trial_status
+from openai_policy import GUARDED_DEMO_POLICY
 
 NOW = datetime(2026, 11, 27, 12, 30, 30, tzinfo=timezone.utc).timestamp()
 M15 = 900
@@ -54,6 +55,7 @@ def test_quote_must_be_fresh_for_exact_epic_and_leave_room_after_spread():
     ):
         assert evaluate_entry(signal(), {**quote(), **changes}, [])["reason"] == "FRESH_IG_QUOTE_REQUIRED"
     assert evaluate_entry({**signal(), "trial_decision_at": NOW - 301}, quote(), [])["reason"] == "ENTRY_DECISION_STALE"
+    assert evaluate_entry(signal(), quote(), [], now=NOW + 181)["reason"] == "FRESH_IG_QUOTE_REQUIRED"
     outside = {**signal(), "model_stop_price": 190.56, "model_target_price": 191.05}
     assert evaluate_entry(outside, quote(), [])["reason"] == "QUOTE_OUTSIDE_STOP_TARGET"
     almost_at_target = {**signal(), "model_target_price": 159.31}
@@ -65,7 +67,7 @@ def test_quote_must_be_fresh_for_exact_epic_and_leave_room_after_spread():
     assert evaluate_entry(signal(), quote(bid=159.19, offer=159.21), [])["reason"] == "QUOTE_REVERSED_CONFIRMATION"
 
 
-def test_only_admitted_positions_consume_market_and_yen_capacity():
+def test_all_open_positions_including_legacy_and_manual_count_toward_exposure():
     position = {"symbol": "USDJPY", "epic": "IG.USDJPY", "direction": "BUY",
                 "entry_trial": {"admitted": True, "trial_id": TRIAL_ID}}
     assert evaluate_entry(signal(side="SELL"), quote(), [position])["reason"] == "MARKET_ALREADY_OPEN"
@@ -73,7 +75,9 @@ def test_only_admitted_positions_consume_market_and_yen_capacity():
     assert evaluate_entry(signal("GBPJPY", side="SELL"), quote("GBPJPY"), [position])["admitted"] is True
     assert evaluate_entry(signal("EURUSD"), quote("EURUSD"), [position])["admitted"] is True
     rejected = {**position, "entry_trial": {"admitted": False}}
-    assert evaluate_entry(signal(), quote(), [rejected])["admitted"] is True
+    assert evaluate_entry(signal(), quote(), [rejected])["reason"] == "MARKET_ALREADY_OPEN"
+    manual = {"epic": "CS.D.USDJPY.MINI.IP", "market_name": "Weekend USD/JPY", "direction": "BUY"}
+    assert evaluate_entry(signal("GBPJPY"), quote("GBPJPY"), [manual])["reason"] == "SAME_DIRECTION_YEN_EXPOSURE"
 
 
 def test_trial_metrics_use_only_broker_cash_in_each_currency_and_ignore_old_trades():
@@ -103,3 +107,10 @@ def test_trial_metrics_use_only_broker_cash_in_each_currency_and_ignore_old_trad
         "win_rate_pct": 50, "avg_per_confirmed_close": 4, "max_realized_drawdown": 2,
     }
     assert status["guarded_trial"]["verified_pnl_by_currency"]["JPY"]["net_realized"] == 4
+    live = guarded_trial_status(
+        [*rows, {**settled(7, 15), "execution_policy": GUARDED_DEMO_POLICY}],
+        {"entry_trial_started_at": NOW, "guarded_trial_started_at": NOW + 7},
+    )
+    assert live["live_demo_trial"]["entries"] == 1
+    assert live["live_demo_trial"]["verified_pnl_by_currency"]["USD"]["net_realized"] == 15
+    assert live["shadow_comparison"]["current_strategy"]["entries"] == 5

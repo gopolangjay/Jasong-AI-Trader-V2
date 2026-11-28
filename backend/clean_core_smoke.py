@@ -47,8 +47,9 @@ if openai_enabled():
     assert runtime.V63_SPECIALIST_SYSTEM["excursion_tracker"].discretionary == discretionary_enabled()
     if discretionary_enabled():
         trial = runtime.CATEGORY_PORTFOLIO_ENGINE.entry_trial_status()
-        assert trial["mode"] == "SHADOW_MATCHED_IG_DEMO_FILLS"
-        assert trial["broker_orders_submitted"] == 0
+        assert trial["mode"] == "IG_DEMO_GUARDED_EXECUTION"
+        assert runtime.IG_DEMO_BROKER.status()["guarded_entries_only"] is True
+        assert trial["live_money_execution"] is False
 
 loaded_forbidden = sorted(name for name in FORBIDDEN if name in sys.modules)
 if loaded_forbidden:

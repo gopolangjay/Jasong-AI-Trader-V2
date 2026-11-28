@@ -16,7 +16,7 @@ from urllib import request as urlrequest
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openai_policy import STRATEGY_ID
+from openai_policy import GUARDED_DEMO_POLICY, STRATEGY_ID
 
 RESPONSES_URL = "https://api.openai.com/v1/responses"
 INSTRUCTIONS = """You analyse market evidence for the user's IG DEMO simulation.
@@ -58,7 +58,9 @@ class BatchDecision(BaseModel):
 DISCRETIONARY_INSTRUCTIONS = """You make trading decisions for the user's IG DEMO simulation.
 Analyse the supplied completed candles and open positions using your trading knowledge:
 multi-timeframe price action, trend, momentum, ranges, volatility, invalidation and costs.
-Return up to three best BUY/SELL entries, or WAIT. For position_decisions, use the
+Return up to three BUY/SELL proposals using only symbols listed in markets.
+Skip a market if the setup needs more evidence. An empty list is valid.
+For position_decisions, use the
 supplied position_key once per position and set action to HOLD or CLOSE. Omission
 also leaves the position open. Begin a CLOSE rationale with 'Close because ' and
 state the present evidence for exiting. If the reason supports keeping the position
@@ -67,16 +69,16 @@ For profit-taking, compare entry_price with indicative_exit_price and consider t
 spread and quote_observed_at. A long sells at the bid and a short buys at the offer.
 The quote is indicative, can be unavailable or stale, and does not establish the
 actual fill or realized cash P&L. Candle closes or midpoints are not exit quotes.
-The user removed the application's account-percent risk, daily, capacity, theme,
-quote/spread and attached-stop/target entry vetoes for DEMO. IG still applies its own
-market, margin, minimum-size and order rules. Do not claim that an order will be accepted.
+The entry guard checks closed M15 confirmation, the current IG quote and spread,
+stop and target geometry, one position per market and one per direction of yen exposure.
+IG applies its own market, margin, minimum-size and order rules.
 size is in IG contract units: use null for the user's configured broker default size
 unless a different contract size is supported by the supplied evidence. Never invent
 account balance, leverage, contract value, available margin or a win probability.
-stop_price and target_price are optional advisory price levels, not attached orders or
-entry conditions. holding_minutes is an optional review horizon, not a forced timer.
+Supply stop_price and target_price in the market's price units for every ENTER_NOW.
+The executor checks these levels at entry. holding_minutes is an optional review horizon.
 Closes are explicit decisions, not implied by an opposite entry or an advisory level.
-For each proposal, also return a trial_entry for the separate order-free analysis.
+For each proposal, set the entry action in trial_entry.
 Use WAIT if the setup needs any future price action, or if you cannot identify a
 concrete price confirmation, invalidation and target. Use ENTER_NOW only when all
 conditions are already supported by the supplied closed candles. Provide the actual
@@ -174,6 +176,7 @@ class OpenAIAnalyst:
         self._last_response_id = None
         self._last_proposals = []
         self._last_position_decisions = []
+        self._last_entry_validation_error = None
         self._wait_reason = None
 
     @staticmethod
@@ -251,6 +254,7 @@ class OpenAIAnalyst:
             self._last_error = code
             self._last_proposals = []
             self._last_position_decisions = []
+            self._last_entry_validation_error = None
             self._wait_reason = code
 
     def analyse(self, markets: list[dict], *, as_of: str, positions: list[dict] | None = None) -> dict:
@@ -263,7 +267,7 @@ class OpenAIAnalyst:
                        "as_of": as_of, "markets": markets}
             if self.discretionary:
                 context["open_positions"] = positions or []
-                context["execution_policy"] = "AI_DISCRETIONARY_DEMO"
+                context["execution_policy"] = GUARDED_DEMO_POLICY
             encoded = json.dumps(context, separators=(",", ":"), allow_nan=False)
             if len(encoded) > 300_000:
                 raise AnalystUnavailable("OPENAI_INPUT_BUDGET_EXCEEDED")
@@ -287,9 +291,13 @@ class OpenAIAnalyst:
                 raise AnalystUnavailable("OPENAI_CONTEXT_MISMATCH")
             references = {m["symbol"]: float(m["reference_price"]) for m in markets}
             seen = set()
+            entry_error = None
             for proposal in decision.proposals:
                 if proposal.symbol not in references or proposal.symbol in seen:
-                    raise AnalystUnavailable("OPENAI_UNKNOWN_OR_DUPLICATE_SYMBOL")
+                    if not self.discretionary:
+                        raise AnalystUnavailable("OPENAI_UNKNOWN_OR_DUPLICATE_SYMBOL")
+                    entry_error = "OPENAI_UNKNOWN_OR_DUPLICATE_SYMBOL"
+                    break
                 seen.add(proposal.symbol)
                 entry = references[proposal.symbol]
                 sign = 1 if proposal.direction == "BUY" else -1
@@ -306,6 +314,8 @@ class OpenAIAnalyst:
             created_at = self._clock()
             out = {**decision.model_dump(), "created_at": created_at, "model": self.model,
                    "response_id": response.get("id")}
+            if entry_error:
+                out.update(proposals=[], wait_reason=entry_error)
             position_decisions = out.get("position_decisions", [])
             for item in position_decisions:
                 if item["action"] == "CLOSE" and (issue := close_reason_issue(item["reason"])):
@@ -320,7 +330,8 @@ class OpenAIAnalyst:
                 self._last_response_id = response.get("id")
                 self._last_proposals = out["proposals"]
                 self._last_position_decisions = position_decisions
-                self._wait_reason = decision.wait_reason
+                self._last_entry_validation_error = entry_error
+                self._wait_reason = out["wait_reason"]
             return out
         except AnalystUnavailable as exc:
             self.failure(str(exc))
@@ -339,7 +350,8 @@ class OpenAIAnalyst:
                     "last_response_id": self._last_response_id, "latest_proposals": list(self._last_proposals),
                     "latest_position_decisions": position_decisions,
                     "latest_close_decisions": [item for item in position_decisions if item["action"] == "CLOSE"],
-                    "execution_policy": "AI_DISCRETIONARY_DEMO" if self.discretionary else "PROTECTED_DEMO",
+                    "execution_policy": GUARDED_DEMO_POLICY if self.discretionary else "PROTECTED_DEMO",
+                    "last_entry_validation_error": self._last_entry_validation_error,
                     "wait_reason": self._wait_reason, "request_budget": {**self._budget, "maximum_per_day": self.max_requests},
                     "maximum_output_tokens_per_request": 4000, "timeout_seconds": self.timeout,
                     "api_key_exposed": False, "can_call_broker": False, "live_money_execution": False}

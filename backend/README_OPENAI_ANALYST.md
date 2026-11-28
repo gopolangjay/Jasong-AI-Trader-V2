@@ -4,27 +4,25 @@ The server reuses its existing `OPENAI_API_KEY`. Credentials never enter model
 context, source control, public responses or logs. The hard-coded broker remains
 IG DEMO, and live-money execution is unavailable.
 
-## Discretionary DEMO policy
+## Guarded DEMO policy
 
-`JASONG_ANALYSIS_MODE=OPENAI` and
-`JASONG_DEMO_EXECUTION_POLICY=DISCRETIONARY` are the defaults for the explicitly
-requested discretionary simulation. The model analyses completed M15/H1/H4 candles
-for 28 liquid FX pairs, Gold and Bitcoin. It returns up to three BUY/SELL proposals
-or WAIT, and explicit closes for supplied open-position aliases.
+`JASONG_ANALYSIS_MODE=OPENAI` and `JASONG_DEMO_EXECUTION_POLICY=GUARDED` are
+the defaults. The existing `DISCRETIONARY` setting selects this same policy.
+The model analyses completed M15/H1/H4 candles for 28 liquid FX pairs, Gold and
+Bitcoin. Orders require an explicit `ENTER_NOW`, a completed M15 confirmation
+and a fresh IG quote within the trigger, spread, stop and target limits.
+The account book allows one open position per market and one per direction of
+yen exposure. Open positions from before the switch consume this capacity.
 
-Application account-percent risk sizing, daily entry caps, portfolio/category/
-theme/EPIC capacity limits, geographic/news vetoes, quote/spread thresholds and
-mandatory attached-stop/target/dealing-distance preflight do not gate these orders.
 A positive model `size` is in IG contract units; null uses the existing configured
-IG default. IG's own minimum-size, increment, market, margin and order rules still
-apply. The executor records rejections rather than claiming an accepted trade.
+IG default. IG enforces minimum-size, increment, market, margin and order rules.
+The executor requires a broker confirmation to record a fill.
 
-Discretionary orders are market orders without attached stop or limit levels.
-Model stop/target levels and review horizons are optional advice, not entry gates
-or automatic exits. The model sees owned open positions, their last reconciled
-broker quotes, entry, size, available P&L and original rationale, and explicitly
-chooses closes. The server R/profit watchdog and native amendments are disabled
-in this mode; excursion reporting remains observational.
+Guarded entries use market orders. The model's stop and target validate entry
+geometry and do not attach an order. Models explicitly choose `HOLD` or `CLOSE`
+for owned positions using their reconciled broker quotes, available P&L and
+original rationale. The server R/profit watchdog and native amendments are
+disabled in this mode. Excursion reporting remains observational.
 
 Each accepted decision is bound to its exact input context and expires after five
 minutes. Unknown symbols/position aliases, malformed output, invalid closed data
@@ -60,13 +58,15 @@ operating-cost controls are not trading risk caps and remain unchanged.
 `GET /strategy/openai-analysis` exposes cached model decisions, closes, usage and
 provider errors. `/category-portfolio/status` reports active execution policy and
 order/close errors; `/category-portfolio/positions` reports tracked confirmations.
+`GET /strategy/entry-trial` reports new guarded fills and broker-verified cash P&L.
+The prior comparison is retained under `shadow_comparison`.
 `/mobile/sync` is a cached combined snapshot. GET status never starts an analysis
 or order. Existing Actions authentication, write-enable and explicit confirmation
 remain enforced; the chat is not given a plaintext API key or a new bypass route.
 
 The existing single-process/single-instance Render deployment is required for the
 in-process scanner/order locks. A scale-out deployment requires distributed locks.
-Tests cover both discretionary and protected execution, close ownership, actual
+Tests cover both guarded and protected execution, close ownership, actual
 confirmation versus pending acknowledgement, restart/timeout recovery, provider
 redaction and budgets, strict candle handling, and live-environment rejection.
-Offline startup checks must exercise discretionary, protected and REGIME modes.
+Offline startup checks exercise guarded, protected and REGIME modes.

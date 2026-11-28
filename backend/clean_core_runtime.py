@@ -17,7 +17,7 @@ from specialist_market_integration import install_specialist_market_system
 
 from runtime_version import VERSION, build_info
 from candle_data import normalize_candles
-from openai_policy import enabled as openai_enabled
+from openai_policy import discretionary_enabled, enabled as openai_enabled
 RUNTIME: Dict[str, Any] = {}
 
 
@@ -80,7 +80,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    broker = IGDemoBroker()
+    broker = IGDemoBroker(guarded_entries_only=discretionary_enabled())
     RUNTIME["broker"] = broker
     compound = EliteCompoundEngine(
         broker=broker,

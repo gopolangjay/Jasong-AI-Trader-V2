@@ -1,7 +1,7 @@
 """One release identity for the engine and its broker/API gateways."""
 import os
 
-VERSION = "6.16-ai-discretionary-demo-v4"
+VERSION = "6.16-ai-guarded-demo-v1"
 
 
 def build_info() -> dict[str, str]:

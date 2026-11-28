@@ -18,10 +18,10 @@ from regime_strategy import completed_frames, features, STRATEGY_IDS as REGIME_I
 from regime_integration import current_session
 from forex_liquidity_lines_strategy import news_blackout_context
 from openai_analyst import OpenAIAnalyst, AnalystUnavailable
-from openai_policy import STRATEGY_ID, STRATEGY_NAME, policy_status as base_policy
+from openai_policy import GUARDED_DEMO_POLICY, STRATEGY_ID, STRATEGY_NAME, policy_status as base_policy
 from runtime_version import VERSION
-from ai_demo_execution import DiscretionaryDemoMixin, entry_reasons as discretionary_reasons
-from demo_entry_trial import trial_status
+from ai_demo_execution import GuardedDemoMixin, entry_reasons as guarded_reasons
+from demo_entry_trial import guarded_trial_status
 
 AI_ACTIVE_KEYS = (*ACTIVE_EXECUTION_KEYS, "BITCOIN")
 
@@ -247,7 +247,7 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
                 epic = market.get("epic")
                 if self.discretionary:
                     row.update(ig_epic=epic, ig_market_name=market.get("name"),
-                               application_quote_preflight=False, execution_policy="AI_DISCRETIONARY_DEMO",
+                               application_quote_preflight=True, execution_policy=GUARDED_DEMO_POLICY,
                                trial_entry=selected.get("trial_entry"),
                                trial_decision_at=decision["created_at"],
                                trial_m15_closes=[
@@ -275,7 +275,7 @@ class OpenAIStrategyEngine(CategoryStrategyEngine):
         # Analysis and broker requests can advance the clock. Validate against
         # completion time so a freshly received quote is not compared with the
         # timestamp captured before I/O; genuine future/stale values still fail.
-        reasons = (discretionary_reasons(row, self._now()) if self.discretionary
+        reasons = (guarded_reasons(row, self._now()) if self.discretionary
                    else execution_reasons(row, now=self._now()))
         row.update({"rejection_reasons": reasons, "standard_eligible": not reasons, "trade_eligible": not reasons,
                     "execution_safety_pass": not reasons, "direction_match": row["direction"] in {"BUY", "SELL"},
@@ -319,7 +319,7 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
     def _strong_gate(self, row, provenance):
         if row.get("strategy_id") != STRATEGY_ID:
             return False, ["RETIRED_ENTRY_STRATEGY"]
-        reasons = (discretionary_reasons(row, pd.Timestamp(time.time(), unit="s", tz="UTC"))
+        reasons = (guarded_reasons(row, pd.Timestamp(time.time(), unit="s", tz="UTC"))
                    if getattr(self, "discretionary", False)
                    else execution_reasons(row) + list(provenance.get("issues") or []))
         return not reasons, list(dict.fromkeys(reasons))
@@ -340,7 +340,7 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
                         "prime_qualified": bool(eligible and row.get("prime_qualified")),
                         "ig_demo_learning_eligible": eligible,
                         "learning_eligible": bool(eligible and not row.get("prime_qualified")),
-                        "execution_basis": ("AI_DISCRETIONARY_DEMO" if getattr(self, "discretionary", False)
+                        "execution_basis": (GUARDED_DEMO_POLICY if getattr(self, "discretionary", False)
                                             else "OPENAI_ANALYST_WITH_PROTECTED_EXECUTOR") if eligible else "OPENAI_WAIT_OR_EXECUTION_GUARD",
                         "fast_score_source": "OPENAI_PRIORITY_NOT_WIN_PROBABILITY",
                         "rejection_reasons": reasons,
@@ -356,7 +356,7 @@ class OpenAIPrimeArchitecture(ForwardPrimeArchitecture):
         return result
 
 
-class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
+class OpenAIExecutionEngine(GuardedDemoMixin, CategoryExecutionEngine):
     VERSION = VERSION
     ACTIVE_SYMBOLS = AI_ACTIVE_KEYS
     ACTIVE_STRATEGY_IDS = (*CategoryExecutionEngine.ACTIVE_STRATEGY_IDS, *REGIME_IDS, STRATEGY_ID)
@@ -367,14 +367,15 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
         super().__init__(**kwargs)
         if self.discretionary:
             self._state.setdefault("entry_trial_started_at", time.time())
-            self._entry_trial_report = trial_status([], self._state["entry_trial_started_at"])
+            self._state.setdefault("guarded_trial_started_at", time.time())
+            self._entry_trial_report = {}
             self._publish_entry_trial()
 
     def _publish_entry_trial(self):
         try:
-            report = trial_status(self._state["positions"], self._state["entry_trial_started_at"])
+            report = guarded_trial_status(self._state["positions"], self._state)
         except Exception:
-            # A reporting failure must not interrupt discretionary execution.
+            # A reporting failure must not interrupt trade management.
             self._entry_trial_report = {**self._entry_trial_report, "report_error": "TRIAL_REPORT_UNAVAILABLE"}
         else:
             self._entry_trial_report = {**report, "updated_at": time.time(), "report_error": None}
@@ -400,7 +401,7 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
 
     def _may_open(self, candidate, external):
         if self.discretionary:
-            return self._discretionary_may_open(candidate)
+            return self._guarded_may_open(candidate)
         if not demo_only(self.broker):
             return False, "IG_DEMO_REQUIRED"
         reasons = execution_reasons(candidate, now=self._now())
@@ -410,7 +411,8 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
 
     def _open_candidate(self, candidate, external):
         if self.discretionary:
-            return self._discretionary_open(candidate)
+            with self._lock:
+                return self._guarded_open(candidate)
         return super()._open_candidate(candidate, external)
 
     def _due_closes(self):
@@ -419,14 +421,17 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
         return super()._due_closes()
 
     def _reconcile(self):
-        rows = super()._reconcile()
         if self.discretionary:
+            if not demo_only(self.broker):
+                raise RuntimeError("IG_DEMO_REQUIRED")
+            rows = super()._reconcile(broker_rows=self._guarded_broker_rows())
             self._recover_discretionary_orders(rows)
-        return rows
+            return rows
+        return super()._reconcile()
 
     def tick(self):
         if self.discretionary:
-            return self._discretionary_tick()
+            return self._guarded_tick()
         return super().tick()
 
     def status(self):
@@ -441,11 +446,14 @@ class OpenAIExecutionEngine(DiscretionaryDemoMixin, CategoryExecutionEngine):
         for legacy_field in ("minimum_target_r_by_market", "preferred_target_r_by_market", "forex_demo_policy"):
             out.pop(legacy_field, None)
         if self.discretionary:
-            out.update(execution_policy="AI_DISCRETIONARY_DEMO", risk_policy="MODEL_DISCRETION_NO_APPLICATION_RISK_CAPS",
+            out.update(execution_policy=GUARDED_DEMO_POLICY, risk_policy="MARKET_AND_YEN_EXPOSURE_LIMITS",
                        risk_per_trade_pct=None, max_daily_entries_south_africa=None, max_open_positions=None,
                        global_ig_max_positions=None, global_remaining_positions=None, max_per_category=None,
-                       max_tracks_per_epic=None, mandatory_attached_protection=False,
-                       quote_spread_dealing_distance_preflight=False, exit_policy=out["regime_policy"]["exit_policy"],
+                       max_tracks_per_epic=1, max_positions_per_yen_direction=1, mandatory_attached_protection=False,
+                       guarded_entry_preflight=True, fresh_ig_quote_and_spread_required=True,
+                       quote_spread_dealing_distance_preflight=False,
+                       exit_policy=out["regime_policy"]["exit_policy"],
+                       last_guarded_entry_check=self._state.get("last_guarded_entry_check"),
                        last_order_error=self._state.get("last_order_error"),
                        last_model_close_error=self._state.get("last_model_close_error"))
         return out

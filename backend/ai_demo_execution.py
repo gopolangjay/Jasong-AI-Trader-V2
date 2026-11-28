@@ -1,4 +1,4 @@
-"""User-requested discretionary execution, confined to the IG DEMO adapter."""
+"""Guarded entries and model-directed exits on IG DEMO."""
 from __future__ import annotations
 
 import hashlib
@@ -11,8 +11,11 @@ import uuid
 
 import pandas as pd
 
-from demo_entry_trial import TRIAL_ID, evaluate_entry
+from demo_entry_trial import QUOTE_MAX_AGE, entry_action_issue, entry_exposure_issue, evaluate_entry
+from ig_demo_broker import IGDemoOrderRejected
 from openai_analyst import close_reason_issue
+from openai_policy import GUARDED_DEMO_POLICY
+from runtime_version import VERSION
 
 
 def position_key(deal_id):
@@ -40,6 +43,8 @@ def entry_reasons(row, now):
         reasons.append("VALID_CLOSED_CANDLES_REQUIRED")
     if not row.get("ig_epic") or not row.get("setup_id"):
         reasons.append("INSTRUMENT_OR_DECISION_ID_MISSING")
+    if issue := entry_action_issue(row):
+        reasons.append(issue)
     return reasons
 
 
@@ -51,12 +56,11 @@ def _number(value):
         return None
 
 
-class DiscretionaryDemoMixin:
-    """No application risk sizing, position caps, quote veto or attached orders.
+class GuardedEntryBlocked(RuntimeError):
+    """A guarded entry was stopped before an order was sent."""
 
-    Input identity, durable once-only submissions, DEMO confinement and ownership
-    are protocol correctness. IG remains the authority on acceptance and margin.
-    """
+
+class GuardedDemoMixin:
 
     def discretionary_position_context(self):
         rows = self.positions(limit=1000)
@@ -105,24 +109,52 @@ class DiscretionaryDemoMixin:
             raise RuntimeError("AI_SUBMISSION_JOURNAL_NOT_DURABLE") from None
         return True
 
-    def _discretionary_may_open(self, row):
+    def _guarded_may_open(self, row):
         if not demo_only(self.broker):
             return False, "IG_DEMO_REQUIRED"
         if not self._is_active_strategy(row):
             return False, "UNKNOWN_AI_STRATEGY_OR_MARKET"
+        if row.get("version") != VERSION:
+            return False, "ENTRY_VERSION_MISMATCH"
         reasons = entry_reasons(row, self._now())
         if reasons:
             return False, ", ".join(reasons)
         key = "OPEN:"+str(row["setup_id"])
         if key in self._state.get("ai_decision_submissions", {}):
             return False, "AI_DECISION_ALREADY_SUBMITTED"
-        return True, "AI_DISCRETIONARY_DEMO"
+        return True, GUARDED_DEMO_POLICY
 
-    def _discretionary_open(self, candidate):
-        allowed, reason = self._discretionary_may_open(candidate)
+    def _guarded_broker_rows(self):
+        payload = self.broker.positions()
+        positions = payload.get("positions") if isinstance(payload, dict) else None
+        if not isinstance(positions, list):
+            raise GuardedEntryBlocked("BROKER_EXPOSURE_UNAVAILABLE")
+        rows = self._broker_rows(payload)
+        if len(rows) != len(positions) or any(
+            not row["deal_id"] or not row["epic"] or row["direction"] not in {"BUY", "SELL"} for row in rows
+        ):
+            raise GuardedEntryBlocked("BROKER_EXPOSURE_UNAVAILABLE")
+        return rows
+
+    def _record_entry_check(self, candidate, reason):
+        setup_id = candidate.get("setup_id")
+        if not setup_id or reason == "AI_DECISION_ALREADY_SUBMITTED":
+            return
+        last = next((row for row in reversed(self._state.get("journal", []))
+                     if row.get("event") == "GUARDED_ENTRY_CHECK" and row.get("setup_id") == setup_id), {})
+        if last.get("reason") == reason:
+            return
+        finding = {"setup_id": setup_id, "symbol": candidate.get("symbol"), "reason": reason}
+        self._state["last_guarded_entry_check"] = {"at": time.time(), **finding}
+        self._journal("GUARDED_ENTRY_CHECK", **finding)
+
+    def _guarded_open(self, candidate):
+        allowed, reason = self._guarded_may_open(candidate)
         if not allowed:
+            self._record_entry_check(candidate, reason)
             return False
         key = "OPEN:"+candidate["setup_id"]
+        approval = None
         try:
             size = candidate.get("openai_size")
             if size is None:
@@ -134,23 +166,47 @@ class DiscretionaryDemoMixin:
             metadata = {"deal_reference": reference, "symbol": candidate["symbol"],
                         "category": candidate["category"], "epic": candidate["ig_epic"],
                         "direction": candidate["direction"], "setup_id": candidate["setup_id"],
-                        "strategy_id": candidate["strategy_id"]}
-            if not self._durable_submission(key, "OPEN", candidate["symbol"], metadata):
-                return False
-            # Intentionally no stop_level, limit_level, max_spread_bps or
-            # account-risk valuation. IG applies its native order rules.
+                        "strategy_id": candidate["strategy_id"], "execution_policy": GUARDED_DEMO_POLICY,
+                        "model_stop_price": candidate.get("model_stop_price"),
+                        "model_target_price": candidate.get("model_target_price"),
+                        "model_holding_minutes": candidate.get("model_holding_minutes"),
+                        "openai_analysis": candidate.get("openai_analysis") or {}}
+            open_positions = self._guarded_broker_rows()
+            exposure_observed_at = time.time()
+            open_positions += self._open_positions()
+            open_positions += [
+                submission for submission in self._state.get("ai_decision_submissions", {}).values()
+                if submission.get("action") == "OPEN"
+                and submission.get("execution_policy") == GUARDED_DEMO_POLICY
+                and submission.get("state") in {"SUBMITTING", "PENDING_CONFIRMATION"}
+                and 0 <= exposure_observed_at - submission["at"] <= 86400
+            ]
+            if issue := entry_exposure_issue(candidate, open_positions):
+                raise GuardedEntryBlocked(issue)
+
+            def authorize(quote):
+                nonlocal approval
+                if not demo_only(self.broker):
+                    raise GuardedEntryBlocked("IG_DEMO_REQUIRED")
+                now = time.time()
+                if not 0 <= now - exposure_observed_at <= QUOTE_MAX_AGE:
+                    raise GuardedEntryBlocked("BROKER_EXPOSURE_STALE")
+                checked = evaluate_entry(candidate, quote or {}, open_positions, now=now)
+                if not checked["admitted"]:
+                    raise GuardedEntryBlocked(checked["reason"])
+                if not self._durable_submission(key, "OPEN", candidate["symbol"],
+                                                {**metadata, "entry_trial": checked}):
+                    raise GuardedEntryBlocked("AI_DECISION_ALREADY_SUBMITTED")
+                approval = checked
+                self._record_entry_check(candidate, checked["reason"])
+
             result = self.broker.open_epic_position(
                 epic=candidate["ig_epic"], direction=candidate["direction"], size=size,
-                deal_reference=reference, allow_size_increment_retry=True,
+                deal_reference=reference, entry_guard=authorize,
             ) or {}
             deal_id = result.get("dealId")
-            if not deal_id or str(result.get("dealStatus", "")).upper() != "ACCEPTED":
+            if not approval or not deal_id or str(result.get("dealStatus", "")).upper() != "ACCEPTED":
                 raise RuntimeError("IG_DEMO_OPEN_NOT_CONFIRMED")
-            try:
-                trial = evaluate_entry(candidate, result.get("entry_quote") or {}, self._open_positions())
-            except Exception:
-                # An observation error cannot discard an already filled IG deal.
-                trial = {"trial_id": TRIAL_ID, "admitted": False, "reason": "ENTRY_TRIAL_VALIDATION_ERROR"}
             now = time.time()
             position = {
                 "track": "CATEGORY", "category": candidate["category"],
@@ -160,14 +216,14 @@ class DiscretionaryDemoMixin:
                 "size": result.get("size") or size, "entry_level": result.get("level"),
                 "opened_at": now, "due_at": None, "status": "OPEN",
                 "strategy_id": candidate["strategy_id"], "setup_id": candidate["setup_id"],
-                "execution_policy": "AI_DISCRETIONARY_DEMO", "risk_per_trade_pct": None,
+                "execution_policy": GUARDED_DEMO_POLICY, "risk_per_trade_pct": None,
                 "risk_cash_budget": None, "estimated_stop_risk_cash": None,
                 "protective_stop_price": None, "take_profit_target_price": None,
                 "model_stop_price": candidate.get("model_stop_price"),
                 "model_target_price": candidate.get("model_target_price"),
                 "model_holding_minutes": candidate.get("model_holding_minutes"),
                 "openai_analysis": candidate.get("openai_analysis") or {},
-                "entry_trial": trial,
+                "entry_trial": approval,
                 "broker_open_result": result, "live_money_execution": False,
             }
             self._state.setdefault("positions", []).append(position)
@@ -178,9 +234,15 @@ class DiscretionaryDemoMixin:
                           setup_id=candidate["setup_id"])
             self._persist()
             return True
+        except GuardedEntryBlocked as exc:
+            self._record_entry_check(candidate, str(exc))
+            self._persist()
+            return False
         except Exception as exc:
             if key in self._state.get("ai_decision_submissions", {}):
-                self._state["ai_decision_submissions"][key]["state"] = "REJECTED_OR_UNCONFIRMED"
+                self._state["ai_decision_submissions"][key]["state"] = (
+                    "REJECTED" if isinstance(exc, IGDemoOrderRejected) else "PENDING_CONFIRMATION"
+                )
             self._state["last_order_error"] = {"at": time.time(), "symbol": candidate.get("symbol"),
                                                "error": f"{type(exc).__name__}: {exc}"}
             self._journal("AI_DEMO_OPEN_FAILED", **self._state["last_order_error"])
@@ -197,10 +259,13 @@ class DiscretionaryDemoMixin:
             if not submission or not row.get("deal_id") or row["deal_id"] in known:
                 continue
             tracked = {k:submission.get(k) for k in ["deal_reference", "symbol", "category", "epic",
-                                                    "direction", "setup_id", "strategy_id"]}
+                                                    "direction", "setup_id", "strategy_id", "entry_trial",
+                                                    "model_stop_price", "model_target_price", "model_holding_minutes"]}
             tracked.update(track="CATEGORY", deal_id=row["deal_id"], size=row.get("size"),
                            entry_level=row.get("level"), opened_at=submission["at"], status="OPEN", due_at=None,
-                           broker=dict(row), last_seen_at=time.time(), execution_policy="AI_DISCRETIONARY_DEMO",
+                           broker=dict(row), last_seen_at=time.time(),
+                           execution_policy=submission.get("execution_policy") or "AI_DISCRETIONARY_DEMO",
+                           openai_analysis=submission.get("openai_analysis") or {},
                            risk_per_trade_pct=None, protective_stop_price=None, take_profit_target_price=None,
                            confirmation_source="BROKER_REFERENCE_RECONCILIATION", live_money_execution=False)
             self._state.setdefault("positions", []).append(tracked)
@@ -246,7 +311,7 @@ class DiscretionaryDemoMixin:
                                                         "error": f"{type(exc).__name__}: {exc}"}
             self._persist()
 
-    def _discretionary_tick(self):
+    def _guarded_tick(self):
         with self._lock:
             try:
                 if not demo_only(self.broker):
@@ -258,7 +323,7 @@ class DiscretionaryDemoMixin:
                     rows = [dict(row) for bucket in rankings.values() for row in bucket]
                     rows.sort(key=lambda row: row.get("openai_priority") or 999)
                     for row in rows:
-                        self._discretionary_open(row)
+                        self._guarded_open(row)
                 self._state["last_error"] = None
             except Exception as exc:
                 self._state["last_error"] = f"{type(exc).__name__}: {exc}"
