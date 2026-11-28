@@ -162,18 +162,22 @@ class CategoryExecutionEngine:
         self._state.setdefault("journal", []).append({"at": time.time(), "event": event, **data})
         self._state["journal"] = self._state["journal"][-500:]
 
-    def _reconcile(self) -> List[Dict[str, Any]]:
-        broker_rows = self._broker_rows(self.broker.positions())
+    def _reconcile(self, *, broker_rows=None) -> List[Dict[str, Any]]:
+        if broker_rows is None:
+            broker_rows = self._broker_rows(self.broker.positions())
         by_deal = {str(row.get("deal_id") or ""): row for row in broker_rows}
+        external = None
         for item in self._state.setdefault("positions", []):
             if item.get("status") != "OPEN":
                 continue
             deal_id = str(item.get("deal_id") or "")
             broker_row = by_deal.get(deal_id)
             if broker_row:
+                if external is None:
+                    external = self._external_positions()
                 item["broker"] = broker_row
                 item["last_seen_at"] = time.time()
-                item["dual_track"] = self._is_dual_track(item.get("epic"), self._external_positions())
+                item["dual_track"] = self._is_dual_track(item.get("epic"), external)
             else:
                 item["status"] = "CLOSED_RECONCILED"
                 item["closed_at"] = time.time()

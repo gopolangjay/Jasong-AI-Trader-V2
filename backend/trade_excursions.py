@@ -2651,7 +2651,7 @@ class TradeExcursionTracker:
             "risk_policy_version":
                 None if self.discretionary else "v63-risk-exit-v1",
             "native_order_policy":
-                "DISABLED_IN_AI_DISCRETIONARY_DEMO" if self.discretionary else "IG_DEALING_RULE_NORMALISED_OUTWARD_ONLY",
+                "DISABLED_IN_AI_GUARDED_DEMO" if self.discretionary else "IG_DEALING_RULE_NORMALISED_OUTWARD_ONLY",
             "native_rejection_policy": (
                 "SUPPRESS_REJECTED_REPEAT_AND_USE_SERVER_WATCHDOG"
                 if not self.retry_rejected_native

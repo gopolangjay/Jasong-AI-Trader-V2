@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -13,10 +14,11 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "backend"))
 from ai_demo_execution import position_key
 from category_strategy_engine import CATEGORY_MARKET_SEEDS
-from demo_entry_trial import TRIAL_ID
-from ig_demo_broker import IGDemoBroker
+from demo_entry_trial import LIVE_TRIAL_ID
+from ig_demo_broker import IGDemoBroker, IGDemoError, IGDemoOrderRejected
 from openai_analyst import OpenAIAnalyst, AnalystUnavailable
 from openai_integration import OpenAIStrategyEngine, OpenAIExecutionEngine, OpenAIPrimeArchitecture
+from openai_policy import GUARDED_DEMO_POLICY
 from provenance import ProvenanceRegistry
 from trade_excursions import TradeExcursionTracker
 from test_regime_execution import DemoBroker
@@ -36,12 +38,19 @@ class DiscretionaryBroker(DemoBroker):
         return True
 
     def accounts(self):
-        raise AssertionError("Discretionary entries must not use account-percent risk sizing")
+        raise AssertionError("Guarded entries must not use account-percent risk sizing")
+
+    def entry_quote(self, epic):
+        return {"source": "IG_DEMO_MARKET_DETAILS", "epic": epic, "bid": self.quote_price,
+                "offer": self.quote_price + .0001, "observed_at": NOW.timestamp(),
+                "update_timestamp_utc": NOW.timestamp()}
 
     def open_epic_position(self, **kwargs):
+        quote = self.entry_quote(kwargs["epic"])
+        kwargs["entry_guard"](quote)
         self.opened.append(kwargs)
         return {"dealId": "D"+str(len(self.opened)), "dealReference": kwargs["deal_reference"],
-                "dealStatus": "ACCEPTED", "level": 1.2, "size": kwargs["size"]}
+                "dealStatus": "ACCEPTED", "level": 1.2, "size": kwargs["size"], "entry_quote": quote}
 
     def positions(self):
         return {"positions": [
@@ -61,12 +70,13 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.clock.start(); self.addCleanup(self.clock.stop)
         self.broker = DiscretionaryBroker()
         self.position_decisions = []
-        self.trial_entry = None
+        self.trial_entry = {"action": "ENTER_NOW", "confirmation": {"rule": "CLOSE_ABOVE", "price": .9}}
+        self.proposal_symbol = "EURUSD"
         def transport(payload):
             context = json.loads(payload["input"])
             ref = next(market["reference_price"] for market in context["markets"] if market["symbol"] == "EURUSD")
             decision = {"context_id": context["context_id"], "proposals": [{
-                "symbol": "EURUSD", "direction": "BUY", "size": None,
+                "symbol": self.proposal_symbol, "direction": "BUY", "size": None,
                 "stop_price": ref - .01 if self.trial_entry else None,
                 "target_price": ref + .01 if self.trial_entry else None,
                 "holding_minutes": None, "trial_entry": self.trial_entry,
@@ -89,20 +99,21 @@ class DiscretionaryDemoTests(unittest.TestCase):
     def selected(self):
         row = self.engine._evaluate_seed(self.seed)
         self.assertTrue(row["standard_eligible"], row["rejection_reasons"])
+        self.broker.quote_price = row["live_price"]
         return row
 
     @staticmethod
     def position_decision(action="CLOSE", reason="Close because the price failed to hold support.", deal="D1"):
         return {"position_key": position_key(deal), "action": action, "reason": reason}
 
-    def test_entries_have_no_application_risk_caps_or_attached_order_preflight(self):
+    def test_guarded_entry_uses_model_levels_without_attaching_broker_orders(self):
         row = self.selected()
         self.execution.max_open_positions = self.execution.max_per_category = 0
         self.execution.global_ig_max_positions = self.execution.max_daily_fx_entries = 0
         self.execution.max_theme_exposure = self.execution.max_daily_fx_entries_per_pair = 0
         row.update(ig_quote_timestamp=0, spread_pass=False, liquidity_pass=False, ig_spread_bps=100000,
                    news_guard={"required": True, "clear": False}, session_active=False)
-        self.execution._open_candidate(row, [{"epic": row["ig_epic"]}])
+        self.execution._open_candidate(row, [])
         self.assertEqual(len(self.broker.opened), 1)
         order = self.broker.opened[0]
         self.assertFalse({"stop_level", "limit_level", "max_spread_bps"} & order.keys())
@@ -111,6 +122,8 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.assertIsNone(tracked["due_at"])
         self.assertIsNone(tracked["protective_stop_price"])
         self.assertIsNone(self.execution.status()["risk_per_trade_pct"])
+        self.assertEqual(tracked["execution_policy"], GUARDED_DEMO_POLICY)
+        self.assertTrue(tracked["entry_trial"]["admitted"])
 
     def test_durable_decision_submission_prevents_repeat_after_restart(self):
         row = self.selected()
@@ -121,34 +134,17 @@ class DiscretionaryDemoTests(unittest.TestCase):
         restarted._open_candidate(row, [])
         self.assertEqual(len(self.broker.opened), 1)
 
-    def test_distinct_model_decisions_can_add_same_symbol_without_position_or_daily_caps(self):
+    def test_guarded_trial_submits_only_one_entry_and_serves_metrics_without_execution_lock(self):
         row = self.selected()
-        for i in range(5):
-            self.execution._open_candidate({**row, "setup_id": "distinct-model-decision-"+str(i)}, [])
-        self.assertEqual(len(self.broker.opened), 5)
-
-    def test_trial_admits_one_of_two_matched_fills_while_current_execution_keeps_both(self):
-        self.trial_entry = {"action": "ENTER_NOW", "confirmation": {"rule": "CLOSE_ABOVE", "price": .9}}
-        row = self.selected()
-        quote = {"source": "IG_DEMO_MARKET_DETAILS", "epic": row["ig_epic"], "bid": row["live_price"],
-                 "offer": row["live_price"] + .0001, "observed_at": NOW.timestamp(),
-                 "update_timestamp_utc": NOW.timestamp()}
-        open_position = self.broker.open_epic_position
-
-        def open_with_quote(**kwargs):
-            return {**open_position(**kwargs), "entry_quote": quote}
-
-        with patch.object(self.broker, "open_epic_position", side_effect=open_with_quote):
-            self.execution._open_candidate(row, [])
-            self.execution._open_candidate({**row, "setup_id": "second-setup"}, [])
+        self.execution._open_candidate(row, [])
+        self.execution._open_candidate({**row, "setup_id": "second-setup"}, [])
         self.assertEqual(self.transport.call_count, 1)
-        self.assertEqual(len(self.broker.opened), 2)
+        self.assertEqual(len(self.broker.opened), 1)
         status = self.execution.entry_trial_status()
-        self.assertEqual(status["trial_id"], TRIAL_ID)
-        self.assertEqual(status["entry_outcomes"], {"ENTER_NOW_CONFIRMED": 1, "MARKET_ALREADY_OPEN": 1})
-        self.assertEqual(status["guarded_trial"]["open_positions"], 1)
-        self.assertEqual(status["current_strategy"]["open_positions"], 2)
-        self.assertEqual(status["broker_orders_submitted"], 0)
+        self.assertEqual(status["trial_id"], LIVE_TRIAL_ID)
+        self.assertEqual(status["recent_entry_checks"], {"ENTER_NOW_CONFIRMED": 1, "MARKET_ALREADY_OPEN": 1})
+        self.assertEqual(status["live_demo_trial"]["entries"], 1)
+        self.assertEqual(status["shadow_comparison"]["current_strategy"]["entries"], 0)
         with ThreadPoolExecutor(max_workers=1) as executor:
             with self.execution._lock:
                 report = executor.submit(self.execution.entry_trial_status)
@@ -160,6 +156,44 @@ class DiscretionaryDemoTests(unittest.TestCase):
             self.execution._open_candidate(row, [])
         self.execution._open_candidate({**row, "signal_timestamp": (NOW-pd.Timedelta(minutes=6)).isoformat()}, [])
         self.assertEqual(self.broker.opened, [])
+
+    def test_wait_bad_candles_stale_quote_and_unavailable_exposure_cannot_submit(self):
+        row = self.selected()
+        for candidate, reason in (
+            ({**row, "trial_entry": {"action": "WAIT"}}, "MODEL_WAIT"),
+            ({**row, "trial_m15_closes": []}, "COMPLETED_M15_TRIGGER_REQUIRED"),
+            ({**row, "version": "6.16-ai-discretionary-demo-v4"}, "ENTRY_VERSION_MISMATCH"),
+        ):
+            self.assertFalse(self.execution._open_candidate(candidate, []))
+            self.assertEqual(self.execution._state["last_guarded_entry_check"]["reason"], reason)
+        stale = {**self.broker.entry_quote(row["ig_epic"]), "update_timestamp_utc": NOW.timestamp() - 181}
+        with patch.object(self.broker, "entry_quote", return_value=stale):
+            self.assertFalse(self.execution._open_candidate(row, []))
+            self.assertEqual(self.execution._state["last_guarded_entry_check"]["reason"], "FRESH_IG_QUOTE_REQUIRED")
+        with patch.object(self.broker, "positions", return_value={}):
+            self.assertFalse(self.execution._open_candidate(row, []))
+            self.assertEqual(self.execution._state["last_guarded_entry_check"]["reason"], "BROKER_EXPOSURE_UNAVAILABLE")
+        self.assertEqual(self.broker.opened, [])
+        self.assertEqual(self.execution._state.get("ai_decision_submissions", {}), {})
+
+    def test_broker_exposure_from_before_cutover_blocks_new_entries(self):
+        row = self.selected()
+        existing = {"positions": [{"position": {"dealId": "LEGACY", "dealReference": "EXTERNAL",
+                                                "direction": "SELL"},
+                                   "market": {"epic": row["ig_epic"], "instrumentName": "EUR/USD"}}]}
+        with patch.object(self.broker, "positions", return_value=existing):
+            self.assertFalse(self.execution._open_candidate(row, []))
+        self.assertEqual(self.execution.entry_trial_status()["recent_entry_checks"], {"MARKET_ALREADY_OPEN": 1})
+        self.assertEqual(self.broker.opened, [])
+
+    def test_invalid_entry_symbol_leaves_valid_position_management_available(self):
+        self.proposal_symbol = "UNKNOWN"
+        self.position_decisions = [self.position_decision()]
+        analysis = self.analyst.analyse([{"symbol": "EURUSD", "reference_price": 1.2}], as_of=NOW.isoformat(),
+                                        positions=[{"position_key": position_key("D1")}])
+        self.assertEqual(analysis["proposals"], [])
+        self.assertEqual(analysis["position_decisions"], self.position_decisions)
+        self.assertEqual(self.analyst.status()["last_entry_validation_error"], "OPENAI_UNKNOWN_OR_DUPLICATE_SYMBOL")
 
     def test_model_receives_only_position_aliases_and_can_close_an_owned_position(self):
         self.execution._open_candidate(self.selected(), [])
@@ -192,9 +226,10 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.assertEqual(self.analyst.status()["latest_close_decisions"], [])
 
     def test_usdjpy_short_hold_reason_cannot_authorize_close(self):
-        self.execution._open_candidate({**self.selected(), "symbol": "USDJPY", "direction": "SELL"}, [])
+        self.execution._open_candidate(self.selected(), [])
         position = self.execution._state["positions"][0]
-        position.update(entry_level=150.25, broker={"bid": 150.16, "offer": 150.31})
+        position.update(symbol="USDJPY", direction="SELL", entry_level=150.25,
+                        broker={"bid": 150.16, "offer": 150.31})
         hold_reason = "Hold the USDJPY short. H1 and H4 still support the short thesis."
         self.position_decisions = [self.position_decision(reason=hold_reason)]
         self.engine._analysis_period = None
@@ -239,7 +274,10 @@ class DiscretionaryDemoTests(unittest.TestCase):
 
     def test_order_rejection_is_recorded_without_fabricating_a_position(self):
         row = self.selected()
-        with patch.object(self.broker, "open_epic_position", side_effect=RuntimeError("IG_REJECTED_MARGIN")) as send:
+        def reject(**kwargs):
+            kwargs["entry_guard"](self.broker.entry_quote(kwargs["epic"]))
+            raise IGDemoOrderRejected("IG_REJECTED_MARGIN")
+        with patch.object(self.broker, "open_epic_position", side_effect=reject) as send:
             self.execution._open_candidate(row, [])
             self.execution._open_candidate(row, [])
         self.assertEqual(send.call_count, 1)
@@ -248,18 +286,23 @@ class DiscretionaryDemoTests(unittest.TestCase):
 
     def test_timed_out_open_is_recovered_by_broker_reference_without_resubmission(self):
         row = self.selected()
+        open_position = self.broker.open_epic_position
         def uncertain(**kwargs):
-            self.broker.opened.append(kwargs)
+            open_position(**kwargs)
             raise TimeoutError("confirmation timed out")
         with patch.object(self.broker, "open_epic_position", side_effect=uncertain):
             self.execution._open_candidate(row, [])
         self.assertEqual(self.execution.positions(), [])
+        with patch.object(self.broker, "positions", return_value={"positions": []}):
+            self.assertFalse(self.execution._open_candidate({**row, "setup_id": "while-unconfirmed"}, []))
         self.execution._reconcile()
         self.execution._reconcile()
         self.execution._open_candidate(row, [])
         self.assertEqual(len(self.broker.opened), 1)
         self.assertEqual(self.execution.status()["opens"], 1)
         self.assertEqual(self.execution.positions()[0]["deal_id"], "D1")
+        self.assertEqual(self.execution.positions()[0]["execution_policy"], GUARDED_DEMO_POLICY)
+        self.assertTrue(self.execution.positions()[0]["entry_trial"]["admitted"])
 
     def test_quote_provenance_is_diagnostic_and_not_a_discretionary_veto(self):
         row = self.selected()
@@ -282,8 +325,8 @@ class DiscretionaryDemoTests(unittest.TestCase):
         self.assertFalse(tracker._native_order_needed(row, NOW.timestamp()))
         self.assertFalse(tracker.status()["server_r_watchdog_enabled"])
 
-    def test_real_broker_order_path_accepts_no_quotes_and_no_attached_distances(self):
-        broker = IGDemoBroker()
+    def test_guarded_broker_requires_preflight_at_submission_and_preserves_close_path(self):
+        broker = IGDemoBroker(guarded_entries_only=True)
         broker.market_details = Mock(return_value={"instrument": {"type": "CURRENCIES",
             "currencies": [{"code": "USD", "isDefault": True}]}, "snapshot": {
                 "marketStatus": "TRADEABLE", "updateTimestampUTC": (NOW.timestamp() - 2) * 1000,
@@ -291,16 +334,35 @@ class DiscretionaryDemoTests(unittest.TestCase):
             }})
         broker._min_deal_size = Mock(return_value=.1)
         broker._deal_size_increment = Mock(return_value=.1)
-        broker._request = Mock(return_value={"dealReference": "REF"})
+        broker._session = SimpleNamespace(last_used_at=None)
+        broker._raw_request = Mock(return_value=({"dealReference": "REF"}, {}))
         broker.confirm = Mock(return_value={"dealId": "D1", "dealStatus": "ACCEPTED", "level": 1.2})
-        result = broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1)
-        payload = broker._request.call_args.kwargs["payload"]
+        with self.assertRaisesRegex(IGDemoError, "GUARDED_ENTRY_REQUIRED"):
+            broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1)
+        with self.assertRaisesRegex(IGDemoError, "GUARDED_ENTRY_REQUIRED"):
+            broker._request("POST", "/positions/otc", payload={})
+        broker._raw_request.assert_not_called()
+        rejected = Mock(side_effect=IGDemoError("STALE_QUOTE"))
+        with self.assertRaisesRegex(IGDemoError, "STALE_QUOTE"):
+            broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1, entry_guard=rejected)
+        broker._raw_request.assert_not_called()
+        guard = Mock(side_effect=lambda _: broker._raw_request.assert_not_called())
+        result = broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1, entry_guard=guard)
+        guard.assert_called_once()
+        payload = broker._raw_request.call_args.kwargs["payload"]
         self.assertNotIn("stopLevel", payload)
         self.assertNotIn("limitLevel", payload)
         self.assertEqual(payload["orderType"], "MARKET")
         self.assertEqual(result["entry_quote"]["bid"], 1.2)
         self.assertEqual(result["entry_quote"]["offer"], 1.2001)
         self.assertEqual(result["entry_quote"]["update_timestamp_utc"], NOW.timestamp() - 2)
+        broker._raw_request.reset_mock()
+        broker.confirm.return_value = {"dealStatus": "REJECTED", "reason": "SIZE_INCREMENT"}
+        with self.assertRaises(IGDemoOrderRejected):
+            broker.open_epic_position(epic="EURUSD.DEMO", direction="BUY", size=.1, entry_guard=Mock())
+        broker._raw_request.assert_called_once()
+        broker._request("POST", "/positions/otc", extra_headers={"_method": "DELETE"})
+        self.assertEqual(broker._raw_request.call_args.kwargs["extra_headers"], {"_method": "DELETE"})
 
     def test_real_broker_close_records_only_matching_cash_confirmation(self):
         broker = IGDemoBroker()

@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -20,6 +20,10 @@ from runtime_version import build_info
 
 class IGDemoError(RuntimeError):
     """Safe IG DEMO integration error."""
+
+
+class IGDemoOrderRejected(IGDemoError):
+    """IG explicitly rejected the submitted order."""
 
 
 @dataclass
@@ -46,9 +50,10 @@ class IGDemoBroker:
 
     BASE_URL = "https://demo-api.ig.com/gateway/deal"
 
-    def __init__(self) -> None:
+    def __init__(self, *, guarded_entries_only: bool = False) -> None:
         self.demo = True
         self.live_money_execution = False
+        self.guarded_entries_only = guarded_entries_only
         self.api_key = os.getenv("IG_DEMO_API_KEY", "").strip()
         self.identifier = os.getenv("IG_DEMO_IDENTIFIER", "").strip()
         self.password = os.getenv("IG_DEMO_PASSWORD", "")
@@ -159,6 +164,7 @@ class IGDemoBroker:
                 "last_error": self._last_error,
                 "live_money_execution": False,
                 "demo_execution": True,
+                "guarded_entries_only": self.guarded_entries_only,
             }
 
     def _wait_for_nontrading_slot(self) -> None:
@@ -315,9 +321,20 @@ class IGDemoBroker:
         authenticated: bool = True,
         extra_headers: Optional[Dict[str, str]] = None,
         retry_auth: bool = True,
+        entry_preflight: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        endpoint = "/" + path.strip("/").lower()
+        closing = str((extra_headers or {}).get("_method") or "").upper() == "DELETE"
+        if self.guarded_entries_only and method.upper() == "POST" and not closing:
+            if endpoint in {"/workingorders/otc", "/working-orders/otc"} or (
+                endpoint == "/positions/otc" and entry_preflight is None
+            ):
+                raise IGDemoError("IG_DEMO_GUARDED_ENTRY_REQUIRED")
         if authenticated and self._session is None:
             self.connect()
+
+        if entry_preflight is not None:
+            entry_preflight()
 
         try:
             data, _ = self._raw_request(
@@ -348,6 +365,7 @@ class IGDemoBroker:
                 authenticated
                 and retry_auth
                 and auth_problem
+                and entry_preflight is None
             ):
                 with self._lock:
                     self._session = None
@@ -1095,8 +1113,11 @@ class IGDemoBroker:
         stop_level: Optional[float] = None,
         limit_level: Optional[float] = None,
         max_spread_bps: Optional[float] = None,
+        entry_guard: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """Open an IG DEMO position on an already-resolved EPIC."""
+        if self.guarded_entries_only and entry_guard is None:
+            raise IGDemoError("IG_DEMO_GUARDED_ENTRY_REQUIRED")
         direction = str(direction or "").upper().strip()
         if direction not in {"BUY", "SELL"}:
             raise IGDemoError("Direction must be BUY or SELL")
@@ -1139,7 +1160,7 @@ class IGDemoBroker:
             "size": round(final_size, 12),
         }
         entry_quote = None
-        if not protected_order:
+        if not protected_order or entry_guard is not None:
             published_at = self._first_number(snapshot.get("updateTimestampUTC"))
             if published_at is not None and published_at >= 100_000_000_000:
                 published_at /= 1000
@@ -1177,11 +1198,13 @@ class IGDemoBroker:
             if not valid:
                 raise IGDemoError("Attached regime stop/target or fresh quote/dealing distance guard failed")
             payload.update({"stopLevel": stop, "limitLevel": target})
+        preflight = {"entry_preflight": lambda: entry_guard(entry_quote)} if entry_guard is not None else {}
         acknowledgement = self._request(
             "POST",
             "/positions/otc",
             version=2,
             payload=payload,
+            **preflight,
         )
         ref = str(
             acknowledgement.get("dealReference")
@@ -1205,6 +1228,7 @@ class IGDemoBroker:
                 "SIZE_INCREMENT" in first_rejection_reason.upper()
                 and self.demo
                 and allow_size_increment_retry
+                and entry_guard is None
             ):
                 retry_sizes = self._size_increment_retry_candidates(
                     requested_size,
@@ -1261,7 +1285,7 @@ class IGDemoBroker:
                         break
 
             if str(confirmation.get("dealStatus") or "").upper() == "REJECTED":
-                raise IGDemoError(
+                raise IGDemoOrderRejected(
                     "IG DEMO rejected order: "
                     + str(
                         confirmation.get("reason")

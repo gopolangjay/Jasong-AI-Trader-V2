@@ -455,8 +455,8 @@ def install_specialist_market_system(
     )
     app.version = intelligence.VERSION
     app.description = (
-        "IG DEMO only: OpenAI directs entries and closes; discretionary orders have no app risk caps "
-        "or mandatory attached stops/targets. IG applies its own order and margin rules."
+        "IG DEMO only: new entries require a confirmed M15 trigger, a fresh quote within the setup and "
+        "available market and yen exposure. Existing positions use explicit model close decisions."
         if discretionary else
         "IG DEMO only: OpenAI selects entries from closed candles; account-risk sizing, "
         "fresh broker quotes, duplicate/exposure limits and attached protection remain enforced."
